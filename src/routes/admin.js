@@ -1,0 +1,2828 @@
+import { Router } from "express";
+import mongoose from "mongoose";
+import { createCrudController } from "../controllers/crudController.js";
+import { dashboardController } from "../controllers/dashboardController.js";
+import { requireAdmin } from "../middlewares/auth.js";
+import { validate } from "../middlewares/validate.js";
+import {
+  Chapter,
+  Topic,
+  Coupon,
+  DailyTest,
+  DailyTestAnalytics,
+  DailyTestSettings,
+  DailyPlanConfig,
+  Difficulty,
+  ExamType,
+  ExamMarkingSettings,
+  LearningSession,
+  Mistake,
+  MockTest,
+  Mode,
+  Question,
+  QuestionAttempt,
+  QuestionType,
+  RevisionAnalytics,
+  RevisionSettings,
+  SessionAttempt,
+  Subject,
+  Subscription,
+  SubscriptionPlan,
+  User,
+  Year,
+} from "../models/index.js";
+import { userInsightsController } from "../controllers/userInsightsController.js";
+import { createCrudService } from "../services/crudService.js";
+import { AppError } from "../utils/AppError.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { sendResponse } from "../utils/apiResponse.js";
+import { hashPassword } from "../utils/password.js";
+import { bulkDeleteSchema, createSchemas, listQuerySchema, updateSchemas } from "../validators/crudValidators.js";
+import { upload } from "../middlewares/upload.js";
+import { z } from "zod";
+import { questionBulkUploadService } from "../services/questionBulkUploadService.js";
+import { oldUserMigrationService } from "../services/oldUserMigrationService.js";
+import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName } from "../utils/uploadStorage.js";
+import fs from "fs/promises";
+import { env } from "../config/env.js";
+import {
+  deriveExamType,
+  normalizeQuestionExamFields,
+  isQuestionModeCompatible,
+} from "../utils/examStructure.js";
+import { ownQuestionAssetUrl } from "../utils/questionAssetOwner.js";
+
+const router = Router();
+router.use(requireAdmin);
+
+function resolvePublicAssetUrl(publicPath) {
+  const appAssetBaseUrl = String(env.appAssetBaseUrl || "").replace(/\/+$/, "");
+  return appAssetBaseUrl ? `${appAssetBaseUrl}${publicPath}` : publicPath;
+}
+
+function inferImageExtensionFromUrl(urlValue, contentType = "") {
+  const byMime = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "image/svg+xml": ".svg",
+    "image/avif": ".avif",
+    "image/bmp": ".bmp",
+  };
+
+  const normalizedType = String(contentType || "").split(";")[0].trim().toLowerCase();
+  if (normalizedType && byMime[normalizedType]) return byMime[normalizedType];
+
+  try {
+    const parsed = new URL(String(urlValue || ""));
+    const pathName = parsed.pathname || "";
+    const dotIndex = pathName.lastIndexOf(".");
+    if (dotIndex > -1) {
+      const ext = pathName.slice(dotIndex).toLowerCase();
+      if ([".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".avif", ".bmp"].includes(ext)) {
+        return ext === ".jpeg" ? ".jpg" : ext;
+      }
+    }
+  } catch {
+    return ".jpg";
+  }
+
+  return ".jpg";
+}
+
+function normalizeImageSourceUrl(rawValue) {
+  const value = String(rawValue || "").trim();
+  if (!value) return "";
+  if (value.startsWith("data:")) return value;
+  if (value.startsWith("/uploads/")) return value;
+
+  let normalized = value;
+  if (normalized.startsWith("//")) {
+    normalized = `https:${normalized}`;
+  } else if (!/^[a-z]+:\/\//i.test(normalized) && /^www\./i.test(normalized)) {
+    normalized = `https://${normalized}`;
+  }
+
+  try {
+    const parsed = new URL(normalized);
+    if (parsed.hostname.includes("drive.google.com")) {
+      const idFromQuery = parsed.searchParams.get("id");
+      const idFromPath = (() => {
+        const match = parsed.pathname.match(/\/file\/d\/([^/]+)/i);
+        return match?.[1] || "";
+      })();
+      const fileId = idFromQuery || idFromPath;
+      if (fileId) {
+        return `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
+      }
+    }
+    if (parsed.hostname.includes("dropbox.com")) {
+      parsed.searchParams.set("raw", "1");
+      parsed.searchParams.delete("dl");
+      return parsed.toString();
+    }
+    return parsed.toString();
+  } catch {
+    return normalized;
+  }
+}
+
+async function fetchImageWithFallback(urlValue) {
+  const firstUrl = normalizeImageSourceUrl(urlValue);
+  const attempts = [firstUrl];
+  if (/^https:\/\//i.test(firstUrl)) {
+    attempts.push(firstUrl.replace(/^https:\/\//i, "http://"));
+  }
+
+  let lastError = null;
+  for (const attemptUrl of attempts) {
+    try {
+      const response = await fetch(attemptUrl, {
+        redirect: "follow",
+        headers: {
+          "user-agent": "krita-question-asset-owner/1.0",
+          "accept": "image/*,*/*;q=0.8",
+        },
+      });
+      if (!response.ok) {
+        throw new Error(`Failed to download image (${response.status})`);
+      }
+      return { response, finalUrl: attemptUrl };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError || new Error("Failed to download image");
+}
+
+router.get("/stats", asyncHandler(dashboardController.stats));
+router.get("/dashboard", asyncHandler(dashboardController.dashboard));
+router.get("/catalog", asyncHandler(dashboardController.catalog));
+router.get("/daily-test-analytics", asyncHandler(dashboardController.dailyTestAnalytics));
+router.get("/users/:id/overview", asyncHandler(userInsightsController.overview));
+router.post("/users/migration/preview", upload.single("file"), asyncHandler(async (req, res) => {
+  sendResponse(res, {
+    data: await oldUserMigrationService.preview(req.file),
+  });
+}));
+router.post("/users/migration/import", upload.single("file"), asyncHandler(async (req, res) => {
+  sendResponse(res, {
+    status: 201,
+    message: "Old app users imported successfully",
+    data: await oldUserMigrationService.import(req.file),
+  });
+}));
+router.get("/users/migration/logs", asyncHandler(async (_req, res) => {
+  sendResponse(res, {
+    data: await oldUserMigrationService.logs(),
+  });
+}));
+
+const revisionConfigSchema = z.object({
+  wrongQuestionLimit: z.coerce.number().int().min(1).max(100).optional(),
+  oldQuestionLimit: z.coerce.number().int().min(1).max(100).optional(),
+  revisionEnabled: z.coerce.boolean().optional(),
+  spacedDays: z.array(z.coerce.number().int().positive()).min(1).max(12).optional(),
+  wrong_question_limit: z.coerce.number().int().min(1).max(100).optional(),
+  old_question_limit: z.coerce.number().int().min(1).max(100).optional(),
+  revision_enabled: z.coerce.boolean().optional(),
+  spaced_days: z.array(z.coerce.number().int().positive()).min(1).max(12).optional(),
+});
+
+const revisionGenerateSchema = z.object({
+  userId: z.string().trim().optional(),
+  user_id: z.string().trim().optional(),
+  examMode: z.enum(["NEET", "JEE", "BOTH"]).optional(),
+  exam_mode: z.enum(["NEET", "JEE", "BOTH"]).optional(),
+});
+
+const dailyTestSettingsSchema = z.object({
+  totalQuestions: z.coerce.number().int().min(1).max(200).optional(),
+  newQuestions: z.coerce.number().int().min(0).max(200).optional(),
+  weakQuestions: z.coerce.number().int().min(0).max(200).optional(),
+  revisionQuestions: z.coerce.number().int().min(0).max(200).optional(),
+  easyPercentage: z.coerce.number().int().min(0).max(100).optional(),
+  moderatePercentage: z.coerce.number().int().min(0).max(100).optional(),
+  hardPercentage: z.coerce.number().int().min(0).max(100).optional(),
+  enabled: z.coerce.boolean().optional(),
+  total_questions: z.coerce.number().int().min(1).max(200).optional(),
+  new_questions: z.coerce.number().int().min(0).max(200).optional(),
+  weak_questions: z.coerce.number().int().min(0).max(200).optional(),
+  revision_questions: z.coerce.number().int().min(0).max(200).optional(),
+  easy_percentage: z.coerce.number().int().min(0).max(100).optional(),
+  moderate_percentage: z.coerce.number().int().min(0).max(100).optional(),
+  hard_percentage: z.coerce.number().int().min(0).max(100).optional(),
+  adaptiveModeEnabled: z.coerce.boolean().optional(),
+  repeatLookbackSessions: z.coerce.number().int().min(1).max(30).optional(),
+  maxRepeatedQuestions: z.coerce.number().int().min(0).max(200).optional(),
+  adaptive_mode_enabled: z.coerce.boolean().optional(),
+  repeat_lookback_sessions: z.coerce.number().int().min(1).max(30).optional(),
+  max_repeated_questions: z.coerce.number().int().min(0).max(200).optional(),
+  lowPerformanceRatio: z.object({
+    easy: z.coerce.number().int().min(0).max(100),
+    moderate: z.coerce.number().int().min(0).max(100),
+    hard: z.coerce.number().int().min(0).max(100),
+  }).optional(),
+  mediumPerformanceRatio: z.object({
+    easy: z.coerce.number().int().min(0).max(100),
+    moderate: z.coerce.number().int().min(0).max(100),
+    hard: z.coerce.number().int().min(0).max(100),
+  }).optional(),
+  highPerformanceRatio: z.object({
+    easy: z.coerce.number().int().min(0).max(100),
+    moderate: z.coerce.number().int().min(0).max(100),
+    hard: z.coerce.number().int().min(0).max(100),
+  }).optional(),
+  mixedModeRatio: z.object({
+    easy: z.coerce.number().int().min(0).max(100),
+    moderate: z.coerce.number().int().min(0).max(100),
+    hard: z.coerce.number().int().min(0).max(100),
+  }).optional(),
+});
+
+const dailyTestResetSchema = z.object({
+  userId: z.string().trim().optional(),
+  user_id: z.string().trim().optional(),
+  date: z.string().trim().optional(),
+  resetAll: z.coerce.boolean().optional(),
+  reset_all: z.coerce.boolean().optional(),
+});
+
+const chapterBulkFreeAccessSchema = z.object({
+  chapterIds: z.array(z.string().trim().min(1)).optional().default([]),
+  subjectId: z.string().trim().min(1).optional(),
+  isLockedForFreeUsers: z.coerce.boolean(),
+});
+
+const markingRuleSchema = z.object({
+  correct: z.coerce.number(),
+  wrong: z.coerce.number(),
+  unanswered: z.coerce.number().default(0),
+});
+
+const examMarkingSettingsSchema = z.object({
+  neet: z.object({
+    version: z.string().trim().min(1),
+    mcq: markingRuleSchema,
+    numerical: markingRuleSchema,
+    active: z.coerce.boolean().optional().default(true),
+  }).optional(),
+  jeeMain: z.object({
+    version: z.string().trim().min(1),
+    mcq: markingRuleSchema,
+    numerical: markingRuleSchema,
+    active: z.coerce.boolean().optional().default(true),
+  }).optional(),
+  jeeAdvanced: z.object({
+    version: z.string().trim().min(1),
+    mcq: markingRuleSchema,
+    numerical: markingRuleSchema,
+    active: z.coerce.boolean().optional().default(true),
+  }).optional(),
+});
+
+function getTodayRange() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
+  const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 23, 59, 59, 999));
+  return { start, end };
+}
+
+function resolveDateRange(dateValue) {
+  if (!dateValue) return getTodayRange();
+  const parsed = new Date(dateValue);
+  if (Number.isNaN(parsed.getTime())) throw new AppError("Invalid date format for reset", 400);
+  const start = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate(), 0, 0, 0, 0));
+  const end = new Date(Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate(), 23, 59, 59, 999));
+  return { start, end };
+}
+
+function createDefaultMarkingSettingsPayload() {
+  return {
+    neet: {
+      version: "v1",
+      examType: "NEET",
+      mcq: { correct: 4, wrong: -1, unanswered: 0 },
+      numerical: { correct: 4, wrong: -1, unanswered: 0 },
+      active: true,
+    },
+    jeeMain: {
+      version: "v1",
+      examType: "JEE_MAIN",
+      mcq: { correct: 4, wrong: -1, unanswered: 0 },
+      numerical: { correct: 4, wrong: 0, unanswered: 0 },
+      active: true,
+    },
+    jeeAdvanced: {
+      version: "v1",
+      examType: "JEE_ADVANCED",
+      mcq: { correct: 4, wrong: -1, unanswered: 0 },
+      numerical: { correct: 4, wrong: 0, unanswered: 0 },
+      active: true,
+    },
+  };
+}
+
+function normalizeMarkingRule(rule, fallback) {
+  return {
+    correct: Number(rule?.correct ?? fallback.correct),
+    wrong: Number(rule?.wrong ?? fallback.wrong),
+    unanswered: Number(rule?.unanswered ?? fallback.unanswered ?? 0),
+  };
+}
+
+function normalizeMarkingScheme(scheme, fallback) {
+  return {
+    version: String(scheme?.version ?? fallback.version ?? "v1").trim() || "v1",
+    examType: String(scheme?.examType ?? fallback.examType ?? "").trim() || fallback.examType,
+    mcq: normalizeMarkingRule(scheme?.mcq, fallback.mcq),
+    numerical: normalizeMarkingRule(scheme?.numerical, fallback.numerical),
+    active: scheme?.active !== undefined ? Boolean(scheme.active) : Boolean(fallback.active ?? true),
+  };
+}
+
+function normalizeMarkingSettingsDocument(doc) {
+  const fallback = createDefaultMarkingSettingsPayload();
+  return {
+    neet: normalizeMarkingScheme(doc?.neet, fallback.neet),
+    jeeMain: normalizeMarkingScheme(doc?.jeeMain, fallback.jeeMain),
+    jeeAdvanced: normalizeMarkingScheme(doc?.jeeAdvanced, fallback.jeeAdvanced),
+  };
+}
+
+function assertValidMarkingScheme(scheme, label = "Marking scheme") {
+  const checks = [
+    { key: "mcq.correct", value: Number(scheme?.mcq?.correct ?? 0), min: 0 },
+    { key: "mcq.wrong", value: Number(scheme?.mcq?.wrong ?? 0), max: 0 },
+    { key: "numerical.correct", value: Number(scheme?.numerical?.correct ?? 0), min: 0 },
+    { key: "numerical.wrong", value: Number(scheme?.numerical?.wrong ?? 0), max: 0 },
+    { key: "mcq.unanswered", value: Number(scheme?.mcq?.unanswered ?? 0) },
+    { key: "numerical.unanswered", value: Number(scheme?.numerical?.unanswered ?? 0) },
+  ];
+
+  for (const check of checks) {
+    if (!Number.isFinite(check.value)) {
+      throw new AppError(`${label} ${check.key} must be a valid number`, 400);
+    }
+    if (check.min !== undefined && check.value < check.min) {
+      throw new AppError(`${label} ${check.key} must be >= ${check.min}`, 400);
+    }
+    if (check.max !== undefined && check.value > check.max) {
+      throw new AppError(`${label} ${check.key} must be <= ${check.max}`, 400);
+    }
+  }
+}
+
+function mapMarkingSettingsResponse(doc) {
+  const normalized = normalizeMarkingSettingsDocument(doc);
+  return {
+    neet: normalized.neet,
+    jeeMain: normalized.jeeMain,
+    jeeAdvanced: normalized.jeeAdvanced,
+    updated_at: doc?.updatedAt,
+  };
+}
+
+async function getOrCreateExamMarkingSettings() {
+  let settings = await ExamMarkingSettings.findOne({});
+  if (!settings) {
+    settings = await ExamMarkingSettings.create(createDefaultMarkingSettingsPayload());
+  }
+  return settings;
+}
+
+function getMarkingSchemeByExamType(markingSettings, examType) {
+  if (examType === "NEET") return markingSettings.neet;
+  if (examType === "JEE") return markingSettings.jeeMain;
+  return markingSettings.neet;
+}
+
+function getQuestionTypeForMarking(questionLike) {
+  const responseType = String(questionLike?.responseType || "").trim().toLowerCase();
+  return responseType === "numeric" || responseType === "numerical" ? "NUMERICAL" : "MCQ";
+}
+
+function buildQuestionMarkingRules(questionIds, questionMap, markingScheme) {
+  return questionIds.map((id) => {
+    const question = questionMap.get(String(id));
+    const questionType = getQuestionTypeForMarking(question);
+    const rule = questionType === "NUMERICAL" ? markingScheme.numerical : markingScheme.mcq;
+    return {
+      questionId: String(id),
+      examType: markingScheme.examType,
+      questionType,
+      positiveMarks: Number(rule.correct ?? 0),
+      negativeMarks: Number(rule.wrong ?? 0),
+      unansweredMarks: Number(rule.unanswered ?? 0),
+      schemeVersion: markingScheme.version,
+    };
+  });
+}
+
+function calculateMaxScoreFromRules(questionMarkingRules, totalAttemptQuestions) {
+  const attemptCount = Math.max(0, Number(totalAttemptQuestions || 0));
+  if (!attemptCount) return 0;
+  return questionMarkingRules
+    .slice(0, attemptCount)
+    .reduce((sum, item) => sum + Number(item?.positiveMarks ?? 0), 0);
+}
+
+async function getOrCreateDailyTestSettings() {
+  let settings = await DailyTestSettings.findOne({});
+  if (!settings) {
+    settings = await DailyTestSettings.create({
+      totalQuestions: 20,
+      newQuestions: 10,
+      weakQuestions: 5,
+      revisionQuestions: 5,
+      easyPercentage: 30,
+      moderatePercentage: 40,
+      hardPercentage: 30,
+      enabled: true,
+      adaptiveModeEnabled: true,
+      repeatLookbackSessions: 5,
+      maxRepeatedQuestions: 2,
+      lowPerformanceRatio: { easy: 70, moderate: 20, hard: 10 },
+      mediumPerformanceRatio: { easy: 40, moderate: 40, hard: 20 },
+      highPerformanceRatio: { easy: 15, moderate: 45, hard: 40 },
+      mixedModeRatio: { easy: 34, moderate: 33, hard: 33 },
+    });
+  }
+  return settings;
+}
+
+function mapDailyTestSettings(doc) {
+  const lowRatio = doc.lowPerformanceRatio || { easy: 70, moderate: 20, hard: 10 };
+  const mediumRatio = doc.mediumPerformanceRatio || { easy: 40, moderate: 40, hard: 20 };
+  const highRatio = doc.highPerformanceRatio || { easy: 15, moderate: 45, hard: 40 };
+  const mixedRatio = doc.mixedModeRatio || { easy: 34, moderate: 33, hard: 33 };
+  return {
+    totalQuestions: Number(doc.totalQuestions || 20),
+    newQuestions: Number(doc.newQuestions || 10),
+    weakQuestions: Number(doc.weakQuestions || 5),
+    revisionQuestions: Number(doc.revisionQuestions || 5),
+    easyPercentage: Number(doc.easyPercentage || 30),
+    moderatePercentage: Number(doc.moderatePercentage || 40),
+    hardPercentage: Number(doc.hardPercentage || 30),
+    enabled: Boolean(doc.enabled),
+    adaptiveModeEnabled: doc.adaptiveModeEnabled !== false,
+    repeatLookbackSessions: Number(doc.repeatLookbackSessions || 5),
+    maxRepeatedQuestions: Number(doc.maxRepeatedQuestions || 2),
+    lowPerformanceRatio: {
+      easy: Number(lowRatio.easy || 0),
+      moderate: Number(lowRatio.moderate || 0),
+      hard: Number(lowRatio.hard || 0),
+    },
+    mediumPerformanceRatio: {
+      easy: Number(mediumRatio.easy || 0),
+      moderate: Number(mediumRatio.moderate || 0),
+      hard: Number(mediumRatio.hard || 0),
+    },
+    highPerformanceRatio: {
+      easy: Number(highRatio.easy || 0),
+      moderate: Number(highRatio.moderate || 0),
+      hard: Number(highRatio.hard || 0),
+    },
+    mixedModeRatio: {
+      easy: Number(mixedRatio.easy || 0),
+      moderate: Number(mixedRatio.moderate || 0),
+      hard: Number(mixedRatio.hard || 0),
+    },
+    total_questions: Number(doc.totalQuestions || 20),
+    new_questions: Number(doc.newQuestions || 10),
+    weak_questions: Number(doc.weakQuestions || 5),
+    revision_questions: Number(doc.revisionQuestions || 5),
+    easy_percentage: Number(doc.easyPercentage || 30),
+    moderate_percentage: Number(doc.moderatePercentage || 40),
+    hard_percentage: Number(doc.hardPercentage || 30),
+    adaptive_mode_enabled: doc.adaptiveModeEnabled !== false,
+    repeat_lookback_sessions: Number(doc.repeatLookbackSessions || 5),
+    max_repeated_questions: Number(doc.maxRepeatedQuestions || 2),
+    updated_at: doc.updatedAt,
+  };
+}
+
+function normalizeSpacedDays(spacedDays) {
+  const source = Array.isArray(spacedDays) ? spacedDays : [1, 2, 5, 10];
+  return [...new Set(source.map((day) => Number(day)).filter((day) => Number.isFinite(day) && day > 0))]
+    .sort((left, right) => left - right)
+    .slice(0, 12);
+}
+
+async function getOrCreateRevisionSettings() {
+  let settings = await RevisionSettings.findOne({});
+  if (!settings) {
+    settings = await RevisionSettings.create({
+      wrongQuestionLimit: 10,
+      oldQuestionLimit: 5,
+      revisionEnabled: true,
+      spacedDays: [1, 2, 5, 10],
+    });
+  }
+  return settings;
+}
+
+function mapRevisionSettings(doc) {
+  return {
+    wrongQuestionLimit: Number(doc.wrongQuestionLimit || 10),
+    oldQuestionLimit: Number(doc.oldQuestionLimit || 5),
+    revisionEnabled: Boolean(doc.revisionEnabled),
+    spacedDays: normalizeSpacedDays(doc.spacedDays),
+    wrong_question_limit: Number(doc.wrongQuestionLimit || 10),
+    old_question_limit: Number(doc.oldQuestionLimit || 5),
+    revision_enabled: Boolean(doc.revisionEnabled),
+    spaced_days: normalizeSpacedDays(doc.spacedDays),
+    updated_at: doc.updatedAt,
+  };
+}
+
+router.get("/revision/settings", asyncHandler(async (_req, res) => {
+  const settings = await getOrCreateRevisionSettings();
+  res.json({ success: true, data: mapRevisionSettings(settings) });
+}));
+
+router.post("/revision/settings", asyncHandler(async (req, res) => {
+  const payload = revisionConfigSchema.parse(req.body || {});
+  const nextValues = {
+    wrongQuestionLimit: payload.wrongQuestionLimit ?? payload.wrong_question_limit ?? 10,
+    oldQuestionLimit: payload.oldQuestionLimit ?? payload.old_question_limit ?? 5,
+    revisionEnabled: payload.revisionEnabled ?? payload.revision_enabled ?? true,
+    spacedDays: normalizeSpacedDays(payload.spacedDays ?? payload.spaced_days ?? [1, 2, 5, 10]),
+  };
+
+  const settings = await RevisionSettings.findOneAndUpdate({}, nextValues, {
+    new: true,
+    upsert: true,
+    setDefaultsOnInsert: true,
+  });
+
+  res.json({ success: true, message: "Revision settings updated", data: mapRevisionSettings(settings) });
+}));
+
+router.get("/revision/analytics", asyncHandler(async (_req, res) => {
+  const revisionSessions = await LearningSession.find({ type: "revision" }).select("_id");
+  const revisionSessionIds = revisionSessions.map((item) => String(item._id));
+
+  const [completedCount, pendingCount, topTopicRows] = await Promise.all([
+    revisionSessionIds.length
+      ? SessionAttempt.countDocuments({ sessionId: { $in: revisionSessionIds }, completedAt: { $ne: null } })
+      : 0,
+    Mistake.countDocuments({ status: { $in: ["new", "weak"] } }),
+    revisionSessionIds.length
+      ? QuestionAttempt.aggregate([
+          { $match: { sessionId: { $in: revisionSessionIds } } },
+          { $group: { _id: "$chapterId", count: { $sum: 1 } } },
+          { $sort: { count: -1 } },
+          { $limit: 5 },
+        ])
+      : [],
+  ]);
+
+  const chapterIds = topTopicRows.map((item) => String(item._id)).filter(Boolean);
+  const chapters = chapterIds.length ? await Chapter.find({ _id: { $in: chapterIds } }).select("_id name") : [];
+  const chapterMap = new Map(chapters.map((item) => [String(item._id), item.name]));
+  const topTopics = topTopicRows.map((item) => chapterMap.get(String(item._id)) || String(item._id));
+
+  const analytics = await RevisionAnalytics.findOneAndUpdate(
+    {},
+    {
+      totalAttempts: revisionSessionIds.length,
+      completedCount,
+      pendingCount,
+      topTopics,
+    },
+    { new: true, upsert: true, setDefaultsOnInsert: true },
+  );
+
+  res.json({
+    success: true,
+    data: {
+      totalAttempts: Number(analytics.totalAttempts || 0),
+      completedCount: Number(analytics.completedCount || 0),
+      pendingCount: Number(analytics.pendingCount || 0),
+      topTopics: Array.isArray(analytics.topTopics) ? analytics.topTopics : [],
+      total_attempts: Number(analytics.totalAttempts || 0),
+      completed_count: Number(analytics.completedCount || 0),
+      pending_count: Number(analytics.pendingCount || 0),
+      top_topics: Array.isArray(analytics.topTopics) ? analytics.topTopics : [],
+      updated_at: analytics.updatedAt,
+    },
+  });
+}));
+
+router.post("/revision/generate", asyncHandler(async (req, res) => {
+  const payload = revisionGenerateSchema.parse(req.body || {});
+  const settings = await getOrCreateRevisionSettings();
+
+  if (!settings.revisionEnabled) {
+    throw new AppError("Revision module is disabled. Enable it in revision settings first.", 400);
+  }
+
+  const selectedUserId = payload.userId || payload.user_id;
+  const selectedUser = selectedUserId
+    ? await User.findById(selectedUserId)
+    : await User.findOne({ isAdmin: { $ne: true } }).sort({ updatedAt: -1 });
+
+  if (!selectedUser) {
+    throw new AppError("No valid learner found to generate revision pool", 404);
+  }
+
+  const examMode = payload.examMode || payload.exam_mode || selectedUser.examMode || "NEET";
+  const examModeFilter =
+    examMode === "BOTH"
+      ? { examMode: { $in: ["NEET", "JEE", "BOTH"] } }
+      : { examMode: { $in: [examMode, "BOTH"] } };
+
+  const wrongEntries = await Mistake.find({ userId: String(selectedUser._id) })
+    .sort({ attempts: -1, lastAttemptDate: 1 })
+    .limit(Math.max(1, Number(settings.wrongQuestionLimit || 10)));
+  const wrongQuestionIds = wrongEntries.map((item) => String(item.questionId)).filter(Boolean);
+  const wrongQuestionsRaw = wrongQuestionIds.length
+    ? await Question.find({ _id: { $in: wrongQuestionIds }, ...examModeFilter }).select("_id question chapterId subjectId examMode")
+    : [];
+  const wrongMap = new Map(wrongQuestionsRaw.map((item) => [String(item._id), item]));
+  const wrongQuestions = wrongQuestionIds.map((id) => wrongMap.get(id)).filter(Boolean);
+
+  const attemptCandidates = await QuestionAttempt.find({ userId: String(selectedUser._id), isCorrect: true })
+    .sort({ createdAt: 1 })
+    .limit(Math.max(50, Number(settings.oldQuestionLimit || 5) * 10));
+
+  const oldQuestionIds = [];
+  const oldSeen = new Set();
+  for (const attempt of attemptCandidates) {
+    const questionId = String(attempt.questionId || "");
+    if (!questionId || oldSeen.has(questionId)) continue;
+    oldSeen.add(questionId);
+    oldQuestionIds.push(questionId);
+    if (oldQuestionIds.length >= Number(settings.oldQuestionLimit || 5)) break;
+  }
+
+  const oldQuestionsRaw = oldQuestionIds.length
+    ? await Question.find({ _id: { $in: oldQuestionIds }, ...examModeFilter }).select("_id question chapterId subjectId examMode")
+    : [];
+  const oldMap = new Map(oldQuestionsRaw.map((item) => [String(item._id), item]));
+  const oldQuestions = oldQuestionIds.map((id) => oldMap.get(id)).filter(Boolean);
+
+  const deduped = new Map();
+  [...wrongQuestions, ...oldQuestions].forEach((item) => {
+    deduped.set(String(item._id), item);
+  });
+
+  const generatedPool = [...deduped.values()].slice(0, Number(settings.wrongQuestionLimit || 10) + Number(settings.oldQuestionLimit || 5));
+  const chapterIds = [...new Set(generatedPool.map((item) => String(item.chapterId)).filter(Boolean))];
+  const chapters = chapterIds.length ? await Chapter.find({ _id: { $in: chapterIds } }).select("_id name") : [];
+  const chapterMap = new Map(chapters.map((item) => [String(item._id), item.name]));
+
+  res.json({
+    success: true,
+    message: "Revision pool generated",
+    data: {
+      userId: String(selectedUser._id),
+      examMode,
+      wrongCount: wrongQuestions.length,
+      oldCount: oldQuestions.length,
+      totalCount: generatedPool.length,
+      wrong_count: wrongQuestions.length,
+      old_count: oldQuestions.length,
+      total_count: generatedPool.length,
+      questionIds: generatedPool.map((item) => String(item._id)),
+      topTopics: [...new Set(generatedPool.map((item) => chapterMap.get(String(item.chapterId))).filter(Boolean))].slice(0, 5),
+      questions: generatedPool.map((item) => ({
+        id: String(item._id),
+        question: item.question,
+        chapterId: item.chapterId ? String(item.chapterId) : null,
+        chapterName: chapterMap.get(String(item.chapterId)) || null,
+        subjectId: item.subjectId ? String(item.subjectId) : null,
+        examMode: item.examMode || null,
+      })),
+      settings: mapRevisionSettings(settings),
+    },
+  });
+}));
+
+router.get("/daily-test/settings", asyncHandler(async (_req, res) => {
+  const settings = await getOrCreateDailyTestSettings();
+  res.json({ success: true, data: mapDailyTestSettings(settings) });
+}));
+
+router.post("/daily-test/settings", asyncHandler(async (req, res) => {
+  const payload = dailyTestSettingsSchema.parse(req.body || {});
+  const nextValues = {
+    totalQuestions: payload.totalQuestions ?? payload.total_questions ?? 20,
+    newQuestions: payload.newQuestions ?? payload.new_questions ?? 10,
+    weakQuestions: payload.weakQuestions ?? payload.weak_questions ?? 5,
+    revisionQuestions: payload.revisionQuestions ?? payload.revision_questions ?? 5,
+    easyPercentage: payload.easyPercentage ?? payload.easy_percentage ?? 30,
+    moderatePercentage: payload.moderatePercentage ?? payload.moderate_percentage ?? 40,
+    hardPercentage: payload.hardPercentage ?? payload.hard_percentage ?? 30,
+    enabled: payload.enabled ?? true,
+    adaptiveModeEnabled: payload.adaptiveModeEnabled ?? payload.adaptive_mode_enabled ?? true,
+    repeatLookbackSessions: payload.repeatLookbackSessions ?? payload.repeat_lookback_sessions ?? 5,
+    maxRepeatedQuestions: payload.maxRepeatedQuestions ?? payload.max_repeated_questions ?? 2,
+    lowPerformanceRatio: payload.lowPerformanceRatio ?? { easy: 70, moderate: 20, hard: 10 },
+    mediumPerformanceRatio: payload.mediumPerformanceRatio ?? { easy: 40, moderate: 40, hard: 20 },
+    highPerformanceRatio: payload.highPerformanceRatio ?? { easy: 15, moderate: 45, hard: 40 },
+    mixedModeRatio: payload.mixedModeRatio ?? { easy: 34, moderate: 33, hard: 33 },
+  };
+
+  const countTotal = Number(nextValues.newQuestions) + Number(nextValues.weakQuestions) + Number(nextValues.revisionQuestions);
+  if (countTotal !== Number(nextValues.totalQuestions)) {
+    throw new AppError("New, weak, and revision counts must equal total daily test questions", 400);
+  }
+
+  const percentageTotal = Number(nextValues.easyPercentage) + Number(nextValues.moderatePercentage) + Number(nextValues.hardPercentage);
+  if (percentageTotal !== 100) {
+    throw new AppError("Easy, moderate, and hard percentages must total 100", 400);
+  }
+  const adaptiveGroups = [
+    nextValues.lowPerformanceRatio,
+    nextValues.mediumPerformanceRatio,
+    nextValues.highPerformanceRatio,
+    nextValues.mixedModeRatio,
+  ];
+  adaptiveGroups.forEach((ratio, index) => {
+    const total = Number(ratio?.easy || 0) + Number(ratio?.moderate || 0) + Number(ratio?.hard || 0);
+    if (total !== 100) {
+      const labels = ["Low", "Medium", "High", "Mixed"];
+      throw new AppError(`${labels[index]} adaptive ratio must total 100`, 400);
+    }
+  });
+
+  const settings = await DailyTestSettings.findOneAndUpdate({}, nextValues, {
+    new: true,
+    upsert: true,
+    setDefaultsOnInsert: true,
+    runValidators: true,
+  });
+
+  res.json({ success: true, message: "Daily test settings updated", data: mapDailyTestSettings(settings) });
+}));
+
+router.get("/daily-test/analytics", asyncHandler(async (_req, res) => {
+  const [totalAttempts, completedCount, averageScoreRows, topUsersRows] = await Promise.all([
+    DailyTest.countDocuments({}),
+    DailyTest.countDocuments({ completed: true }),
+    DailyTest.aggregate([
+      { $match: { completed: true } },
+      { $group: { _id: null, averageScore: { $avg: "$score" } } },
+    ]),
+    DailyTest.aggregate([
+      { $match: { completed: true } },
+      {
+        $group: {
+          _id: "$userId",
+          attempts: { $sum: 1 },
+          avgScore: { $avg: "$score" },
+          avgAccuracy: { $avg: "$accuracy" },
+        },
+      },
+      { $sort: { avgScore: -1, avgAccuracy: -1, attempts: -1 } },
+      { $limit: 5 },
+    ]),
+  ]);
+
+  const completionRate = totalAttempts > 0 ? Number(((completedCount / totalAttempts) * 100).toFixed(2)) : 0;
+  const averageScore = Number((averageScoreRows?.[0]?.averageScore || 0).toFixed(2));
+  const userIds = topUsersRows.map((item) => String(item._id)).filter(Boolean);
+  const users = userIds.length
+    ? await User.find({ _id: { $in: userIds } }).select("_id name email").lean()
+    : [];
+  const userMap = new Map(users.map((item) => [String(item._id), item]));
+  const topPerformingUsers = topUsersRows.map((item) => {
+    const userId = String(item._id);
+    const user = userMap.get(userId);
+    return {
+      userId,
+      name: user?.name || "Unknown User",
+      email: user?.email || "",
+      avgScore: Number((item.avgScore || 0).toFixed(2)),
+      avgAccuracy: Number((item.avgAccuracy || 0).toFixed(2)),
+      attempts: Number(item.attempts || 0),
+    };
+  });
+
+  const analytics = await DailyTestAnalytics.findOneAndUpdate(
+    {},
+    { totalAttempts, averageScore, completionRate, topPerformingUsers },
+    { new: true, upsert: true, setDefaultsOnInsert: true },
+  );
+
+  res.json({
+    success: true,
+    data: {
+      totalAttempts: Number(analytics.totalAttempts || 0),
+      averageScore: Number(analytics.averageScore || 0),
+      completionRate: Number(analytics.completionRate || 0),
+      topPerformingUsers: Array.isArray(analytics.topPerformingUsers) ? analytics.topPerformingUsers : [],
+      total_attempts: Number(analytics.totalAttempts || 0),
+      average_score: Number(analytics.averageScore || 0),
+      completion_rate: Number(analytics.completionRate || 0),
+      top_performing_users: Array.isArray(analytics.topPerformingUsers) ? analytics.topPerformingUsers : [],
+      updated_at: analytics.updatedAt,
+    },
+  });
+}));
+
+router.post("/daily-test/reset", asyncHandler(async (req, res) => {
+  const payload = dailyTestResetSchema.parse(req.body || {});
+  const resetAll = Boolean(payload.resetAll ?? payload.reset_all ?? false);
+  const userId = payload.userId || payload.user_id;
+  const dateRange = resetAll ? null : resolveDateRange(payload.date);
+
+  const filter = {};
+  if (userId) filter.userId = userId;
+  if (dateRange) filter.testDate = { $gte: dateRange.start, $lte: dateRange.end };
+
+  const result = await DailyTest.deleteMany(filter);
+
+  res.json({
+    success: true,
+    message: "Daily tests reset completed",
+    data: {
+      deleted_count: Number(result.deletedCount || 0),
+      deletedCount: Number(result.deletedCount || 0),
+      user_id: userId || null,
+      date: payload.date || null,
+      reset_all: resetAll,
+    },
+  });
+}));
+
+const MOCK_TEST_PRESETS = {
+  NEET_REAL: {
+    examType: "NEET",
+    durationMinutes: 200,
+    maxScore: 720,
+    marksPerQuestion: 4,
+    negativeMarks: 1,
+    predictionTitle: "Predicted NEET Score",
+    predictionDescription: "This mock follows the real NEET marking pattern, so your final score is the closest estimate of your actual NEET score.",
+    instructions: [
+      "Physics: Section A 35 compulsory and Section B 15 with attempt any 10.",
+      "Chemistry: Section A 35 compulsory and Section B 15 with attempt any 10.",
+      "Biology: Section A 70 compulsory and Section B 30 with attempt any 20.",
+      "Correct answer +4, wrong answer -1, unattempted 0.",
+    ],
+  },
+  JEE_REAL: {
+    examType: "JEE",
+    durationMinutes: 180,
+    maxScore: 300,
+    marksPerQuestion: 4,
+    negativeMarks: 1,
+    predictionTitle: "Predicted JEE Score",
+    predictionDescription: "This mock follows the real JEE structure, so your result is a direct prediction of your likely exam-day score.",
+    instructions: [
+      "Each subject has 20 MCQs and 10 numerical questions with attempt any 5 numerical.",
+      "MCQ correct +4 and wrong -1.",
+      "Numerical correct +4 and wrong 0.",
+      "Chemistry first, then Physics, then Maths is the recommended time strategy.",
+    ],
+  },
+  CUSTOM: {
+    examType: "NEET",
+    durationMinutes: 60,
+    maxScore: 240,
+    marksPerQuestion: 4,
+    negativeMarks: 1,
+    predictionTitle: "Predicted Score",
+    predictionDescription: "This mock test score is based on the configured paper pattern.",
+    instructions: [],
+  },
+};
+
+const WEEKDAY_OPTIONS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+const AUTO_MOCK_HISTORY_LIMIT = 30;
+
+const AUTO_MOCK_PRESET_BY_EXAM = {
+  NEET: {
+    patternPreset: "NEET_REAL",
+    durationMinutes: 200,
+    marksPerQuestion: 4,
+    negativeMarks: 1,
+    maxScore: 720,
+    totalQuestions: 200,
+    totalAttemptQuestions: 180,
+    sectionGroups: [
+      { key: "PHY_A", label: "Physics - Section A", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 35, attemptQuestions: 35 },
+      { key: "PHY_B", label: "Physics - Section B", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 15, attemptQuestions: 10 },
+      { key: "CHEM_A", label: "Chemistry - Section A", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 35, attemptQuestions: 35 },
+      { key: "CHEM_B", label: "Chemistry - Section B", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 15, attemptQuestions: 10 },
+      { key: "BIO_A", label: "Biology - Section A", subjectKey: "BIOLOGY", questionType: "MCQ", totalQuestions: 70, attemptQuestions: 70 },
+      { key: "BIO_B", label: "Biology - Section B", subjectKey: "BIOLOGY", questionType: "MCQ", totalQuestions: 30, attemptQuestions: 20 },
+    ],
+  },
+  JEE: {
+    patternPreset: "JEE_REAL",
+    durationMinutes: 180,
+    marksPerQuestion: 4,
+    negativeMarks: 1,
+    maxScore: 300,
+    totalQuestions: 90,
+    totalAttemptQuestions: 75,
+    sectionGroups: [
+      { key: "PHY_MCQ", label: "Physics - MCQ", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
+      { key: "PHY_NUM", label: "Physics - Numerical", subjectKey: "PHYSICS", questionType: "NUMERICAL", totalQuestions: 10, attemptQuestions: 5 },
+      { key: "CHEM_MCQ", label: "Chemistry - MCQ", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
+      { key: "CHEM_NUM", label: "Chemistry - Numerical", subjectKey: "CHEMISTRY", questionType: "NUMERICAL", totalQuestions: 10, attemptQuestions: 5 },
+      { key: "MATH_MCQ", label: "Mathematics - MCQ", subjectKey: "MATHEMATICS", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
+      { key: "MATH_NUM", label: "Mathematics - Numerical", subjectKey: "MATHEMATICS", questionType: "NUMERICAL", totalQuestions: 10, attemptQuestions: 5 },
+    ],
+  },
+};
+
+function createSlug(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function shuffleList(list) {
+  const copy = [...list];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const temp = copy[i];
+    copy[i] = copy[j];
+    copy[j] = temp;
+  }
+  return copy;
+}
+
+function pickRandomFromList(list, count) {
+  return shuffleList(list).slice(0, Math.max(0, Number(count) || 0));
+}
+
+function normalizeSubjectKey(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized.includes("PHY")) return "PHYSICS";
+  if (normalized.includes("CHEM")) return "CHEMISTRY";
+  if (normalized.includes("MATH")) return "MATHEMATICS";
+  if (normalized.includes("BOT") || normalized.includes("ZOO") || normalized.includes("BIO")) return "BIOLOGY";
+  return normalized;
+}
+
+function normalizeQuestionDifficulty(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "other";
+  if (normalized === "easy") return "easy";
+  if (normalized === "hard") return "hard";
+  if (normalized === "moderate" || normalized === "medium") return "medium";
+  return "other";
+}
+
+function normalizeQuestionTypeBucket(question) {
+  const responseType = String(question?.responseType || "").trim().toLowerCase();
+  if (responseType === "numeric" || responseType === "numerical") return "NUMERICAL";
+  return "MCQ";
+}
+
+function chooseBalancedQuestions(candidates, requiredCount, forcedDifficulty = "") {
+  if (!requiredCount || requiredCount <= 0) return [];
+  if (!Array.isArray(candidates) || candidates.length === 0) return [];
+
+  const difficultyFilter = String(forcedDifficulty || "").trim().toLowerCase();
+  let source = candidates;
+  if (difficultyFilter && difficultyFilter !== "mixed" && difficultyFilter !== "all") {
+    source = candidates.filter((item) => normalizeQuestionDifficulty(item?.difficulty) === (difficultyFilter === "moderate" ? "medium" : difficultyFilter));
+  }
+  if (source.length <= requiredCount) return shuffleList(source);
+
+  const byDifficulty = {
+    easy: [],
+    medium: [],
+    hard: [],
+    other: [],
+  };
+  source.forEach((item) => {
+    byDifficulty[normalizeQuestionDifficulty(item?.difficulty)]?.push(item);
+  });
+
+  const targetEasy = Math.round(requiredCount * 0.3);
+  const targetMedium = Math.round(requiredCount * 0.4);
+  const targetHard = Math.max(0, requiredCount - targetEasy - targetMedium);
+
+  const selectedMap = new Map();
+  pickRandomFromList(byDifficulty.easy, targetEasy).forEach((item) => selectedMap.set(String(item._id), item));
+  pickRandomFromList(byDifficulty.medium, targetMedium).forEach((item) => selectedMap.set(String(item._id), item));
+  pickRandomFromList(byDifficulty.hard, targetHard).forEach((item) => selectedMap.set(String(item._id), item));
+
+  if (selectedMap.size < requiredCount) {
+    const remaining = source.filter((item) => !selectedMap.has(String(item._id)));
+    pickRandomFromList(remaining, requiredCount - selectedMap.size).forEach((item) => selectedMap.set(String(item._id), item));
+  }
+
+  return shuffleList([...selectedMap.values()]).slice(0, requiredCount);
+}
+
+async function ensureUniqueMockTestSlug(title, currentId) {
+  const baseSlug = createSlug(title) || `mock-test-${Date.now()}`;
+  let candidate = baseSlug;
+  let counter = 1;
+
+  while (true) {
+    const existing = await MockTest.findOne({ slug: candidate }).select("_id");
+    if (!existing || String(existing._id) === String(currentId || "")) {
+      return candidate;
+    }
+    counter += 1;
+    candidate = `${baseSlug}-${counter}`;
+  }
+}
+
+async function buildMockTestPayload(payload, existing = null) {
+  const title = String(payload.title || existing?.title || "").trim();
+  const patternPreset = String(payload.patternPreset || existing?.patternPreset || "CUSTOM").toUpperCase();
+  const preset = MOCK_TEST_PRESETS[patternPreset] || MOCK_TEST_PRESETS.CUSTOM;
+  const examType = normalizeExamType(payload.examType || existing?.examType || preset.examType);
+  const markingSettingsDoc = await getOrCreateExamMarkingSettings();
+  const normalizedMarkingSettings = normalizeMarkingSettingsDocument(markingSettingsDoc);
+  const defaultMarkingScheme = getMarkingSchemeByExamType(normalizedMarkingSettings, examType);
+  const markingOverrideEnabled =
+    payload.markingOverrideEnabled !== undefined
+      ? Boolean(payload.markingOverrideEnabled)
+      : existing
+        ? Boolean(existing.markingOverrideEnabled)
+        : false;
+  const providedMarkingVersion = String(payload.markingSchemeVersion ?? existing?.markingSchemeVersion ?? defaultMarkingScheme.version).trim();
+  const providedMarkingScheme = payload.markingScheme ?? existing?.markingScheme;
+  const effectiveMarkingScheme = markingOverrideEnabled
+    ? normalizeMarkingScheme(
+        {
+          version: providedMarkingVersion || defaultMarkingScheme.version,
+          examType: defaultMarkingScheme.examType,
+          mcq: {
+            correct: payload.marksPerQuestion ?? providedMarkingScheme?.mcq?.correct ?? existing?.marksPerQuestion ?? defaultMarkingScheme.mcq.correct,
+            wrong: payload.negativeMarks !== undefined ? -Math.abs(Number(payload.negativeMarks)) : providedMarkingScheme?.mcq?.wrong ?? existing?.markingScheme?.mcq?.wrong ?? defaultMarkingScheme.mcq.wrong,
+            unanswered: providedMarkingScheme?.mcq?.unanswered ?? existing?.markingScheme?.mcq?.unanswered ?? 0,
+          },
+          numerical: {
+            correct: providedMarkingScheme?.numerical?.correct ?? existing?.markingScheme?.numerical?.correct ?? defaultMarkingScheme.numerical.correct,
+            wrong: providedMarkingScheme?.numerical?.wrong ?? existing?.markingScheme?.numerical?.wrong ?? defaultMarkingScheme.numerical.wrong,
+            unanswered: providedMarkingScheme?.numerical?.unanswered ?? existing?.markingScheme?.numerical?.unanswered ?? 0,
+          },
+          active: true,
+        },
+        defaultMarkingScheme,
+      )
+    : defaultMarkingScheme;
+  assertValidMarkingScheme(effectiveMarkingScheme, "Applied marking scheme");
+  const durationMinutes = Number(payload.durationMinutes ?? existing?.durationMinutes ?? preset.durationMinutes);
+  const marksPerQuestion = Number(effectiveMarkingScheme?.mcq?.correct ?? payload.marksPerQuestion ?? existing?.marksPerQuestion ?? preset.marksPerQuestion);
+  const negativeMarks = Math.abs(Number(effectiveMarkingScheme?.mcq?.wrong ?? -(payload.negativeMarks ?? existing?.negativeMarks ?? preset.negativeMarks)));
+  const availabilityMode = String(payload.availabilityMode ?? existing?.availabilityMode ?? "all").toLowerCase();
+  const questionIds = [...new Set((Array.isArray(payload.questionIds) ? payload.questionIds : existing?.questionIds || []).map(String).filter(Boolean))];
+  const availableDaysOfMonth = [...new Set((Array.isArray(payload.availableDaysOfMonth) ? payload.availableDaysOfMonth : existing?.availableDaysOfMonth || []).map(Number).filter((value) => value >= 1 && value <= 31))];
+  const availableWeekdays = [...new Set((Array.isArray(payload.availableWeekdays) ? payload.availableWeekdays : existing?.availableWeekdays || []).map((value) => String(value).toUpperCase()).filter((value) => WEEKDAY_OPTIONS.includes(value)))];
+
+  if (!title) throw new AppError("Title is required", 400);
+  if (!questionIds.length) throw new AppError("Select at least one question", 400);
+  if (!Number.isFinite(durationMinutes) || durationMinutes < 1) throw new AppError("Duration must be at least 1 minute", 400);
+  if (!["all", "day_wise", "week_wise"].includes(availabilityMode)) throw new AppError("Availability mode is invalid", 400);
+  if (availabilityMode === "day_wise" && !availableDaysOfMonth.length) throw new AppError("Select at least one day of month", 400);
+  if (availabilityMode === "week_wise" && !availableWeekdays.length) throw new AppError("Select at least one weekday", 400);
+
+  const questions = await Question.find({ _id: { $in: questionIds } }).select("_id subjectId chapterId examMode exam responseType");
+  if (questions.length !== questionIds.length) {
+    throw new AppError("One or more selected questions were not found", 400);
+  }
+  const questionMap = new Map(questions.map((item) => [String(item._id), item]));
+
+  const subjects = await Subject.find({ _id: { $in: [...new Set(questions.map((item) => String(item.subjectId)).filter(Boolean))] } }).select("_id examType");
+  const subjectMap = new Map(subjects.map((item) => [String(item._id), item]));
+
+  questions.forEach((question) => {
+    const subject = subjectMap.get(String(question.subjectId));
+    if (!subject) throw new AppError("Mock test includes a question with an invalid subject", 400);
+    if (examType !== "BOTH" && subject.examType !== examType) {
+      throw new AppError("All selected questions must match the mock test exam type", 400);
+    }
+  });
+  const questionMarkingRules = buildQuestionMarkingRules(questionIds, questionMap, effectiveMarkingScheme);
+  const totalAttemptQuestions = Number(payload.totalAttemptQuestions ?? existing?.totalAttemptQuestions ?? questionIds.length);
+  const computedMaxScore = calculateMaxScoreFromRules(questionMarkingRules, totalAttemptQuestions);
+  const maxScore = Number(payload.maxScore ?? existing?.maxScore ?? computedMaxScore ?? preset.maxScore);
+  if (!Number.isFinite(maxScore) || maxScore <= 0) {
+    throw new AppError("Max score must be greater than 0", 400);
+  }
+
+  return {
+    title,
+    slug: await ensureUniqueMockTestSlug(title, existing?._id),
+    description: String(payload.description ?? existing?.description ?? "").trim() || undefined,
+    examType,
+    patternPreset,
+    durationMinutes,
+    totalQuestions: questionIds.length,
+    maxScore,
+    questionIds,
+    subjectIds: [...new Set(questions.map((item) => String(item.subjectId)).filter(Boolean))],
+    chapterIds: [...new Set(questions.map((item) => String(item.chapterId)).filter(Boolean))],
+    instructions: (Array.isArray(payload.instructions) ? payload.instructions : String(payload.instructions ?? existing?.instructions ?? "").split("\n"))
+      .map((item) => String(item).trim())
+      .filter(Boolean).length
+      ? (Array.isArray(payload.instructions) ? payload.instructions : String(payload.instructions ?? existing?.instructions ?? "").split("\n"))
+          .map((item) => String(item).trim())
+          .filter(Boolean)
+      : preset.instructions,
+    marksPerQuestion,
+    negativeMarks,
+    markingSchemeVersion: effectiveMarkingScheme.version,
+    markingScheme: effectiveMarkingScheme,
+    questionMarkingRules,
+    markingOverrideEnabled,
+    predictionTitle: String(payload.predictionTitle ?? existing?.predictionTitle ?? preset.predictionTitle).trim(),
+    predictionDescription: String(payload.predictionDescription ?? existing?.predictionDescription ?? preset.predictionDescription).trim(),
+    availabilityMode,
+    availableDaysOfMonth: availabilityMode === "day_wise" ? availableDaysOfMonth : [],
+    availableWeekdays: availabilityMode === "week_wise" ? availableWeekdays : [],
+    totalAttemptQuestions,
+    sectionGroups: Array.isArray(payload.sectionGroups) ? payload.sectionGroups : existing?.sectionGroups || [],
+    generationSource: existing?.generationSource || "manual",
+    generationConfig: existing?.generationConfig || undefined,
+    generationHistory: Array.isArray(existing?.generationHistory) ? existing.generationHistory : [],
+    randomizeQuestionOrder: payload.randomizeQuestionOrder !== undefined ? Boolean(payload.randomizeQuestionOrder) : existing ? Boolean(existing.randomizeQuestionOrder ?? true) : true,
+    isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : Boolean(existing?.isPremiumOnly),
+    isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
+  };
+}
+
+async function serializeMockTests(items) {
+  const subjectIds = [...new Set(items.flatMap((item) => item.subjectIds || []).map(String).filter(Boolean))];
+  const chapterIds = [...new Set(items.flatMap((item) => item.chapterIds || []).map(String).filter(Boolean))];
+  const [subjects, chapters] = await Promise.all([
+    subjectIds.length ? Subject.find({ _id: { $in: subjectIds } }).select("name") : [],
+    chapterIds.length ? Chapter.find({ _id: { $in: chapterIds } }).select("name") : [],
+  ]);
+  const subjectMap = new Map(subjects.map((item) => [String(item._id), item.name]));
+  const chapterMap = new Map(chapters.map((item) => [String(item._id), item.name]));
+
+  return items.map((item) => {
+    const raw = typeof item?.toJSON === "function" ? item.toJSON() : item;
+    return {
+      id: String(raw.id ?? raw._id),
+      title: raw.title,
+      slug: raw.slug,
+      description: raw.description || "",
+      examType: raw.examType,
+      patternPreset: raw.patternPreset || "CUSTOM",
+      durationMinutes: Number(raw.durationMinutes || 0),
+      totalQuestions: Number(raw.totalQuestions || raw.questionIds?.length || 0),
+      maxScore: Number(raw.maxScore || 0),
+      questionIds: (raw.questionIds || []).map(String),
+      subjectIds: (raw.subjectIds || []).map(String),
+      chapterIds: (raw.chapterIds || []).map(String),
+      subjectNames: (raw.subjectIds || []).map((id) => subjectMap.get(String(id))).filter(Boolean),
+      chapterNames: (raw.chapterIds || []).map((id) => chapterMap.get(String(id))).filter(Boolean),
+      instructions: Array.isArray(raw.instructions) ? raw.instructions : [],
+      marksPerQuestion: Number(raw.marksPerQuestion || 4),
+      negativeMarks: Number(raw.negativeMarks || 1),
+      markingSchemeVersion: String(raw.markingSchemeVersion || "v1"),
+      markingScheme: raw.markingScheme || null,
+      questionMarkingRules: Array.isArray(raw.questionMarkingRules) ? raw.questionMarkingRules : [],
+      markingOverrideEnabled: Boolean(raw.markingOverrideEnabled),
+      predictionTitle: raw.predictionTitle || "",
+      predictionDescription: raw.predictionDescription || "",
+      availabilityMode: raw.availabilityMode || "all",
+      availableDaysOfMonth: Array.isArray(raw.availableDaysOfMonth) ? raw.availableDaysOfMonth : [],
+      availableWeekdays: Array.isArray(raw.availableWeekdays) ? raw.availableWeekdays : [],
+      totalAttemptQuestions: Number(raw.totalAttemptQuestions || raw.totalQuestions || raw.questionIds?.length || 0),
+      sectionGroups: Array.isArray(raw.sectionGroups) ? raw.sectionGroups : [],
+      generationSource: raw.generationSource || "manual",
+      generationConfig: raw.generationConfig || null,
+      generationHistory: Array.isArray(raw.generationHistory) ? raw.generationHistory : [],
+      randomizeQuestionOrder: raw.randomizeQuestionOrder !== false,
+      isPremiumOnly: Boolean(raw.isPremiumOnly),
+      isActive: Boolean(raw.isActive),
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
+    };
+  });
+}
+
+async function resolveAutoMockSubjects(examType, requestedSubjectIds = []) {
+  const normalizedRequested = [...new Set((Array.isArray(requestedSubjectIds) ? requestedSubjectIds : []).map(String).filter(Boolean))];
+  const subjectFilter = examType === "BOTH" ? {} : { examType };
+  const subjects = normalizedRequested.length
+    ? await Subject.find({ _id: { $in: normalizedRequested }, ...subjectFilter }).select("_id name examType")
+    : await Subject.find(subjectFilter).select("_id name examType");
+
+  if (!subjects.length) {
+    throw new AppError("No matching subjects found for auto mock generation", 400);
+  }
+
+  if (normalizedRequested.length && subjects.length !== normalizedRequested.length) {
+    throw new AppError("One or more selected subjects are invalid for this exam type", 400);
+  }
+
+  const subjectKeyMap = new Map(subjects.map((item) => [String(item._id), normalizeSubjectKey(item.name)]));
+  const groupedSubjectIds = {
+    PHYSICS: [],
+    CHEMISTRY: [],
+    BIOLOGY: [],
+    MATHEMATICS: [],
+  };
+
+  subjects.forEach((subject) => {
+    const subjectKey = subjectKeyMap.get(String(subject._id));
+    if (subjectKey && groupedSubjectIds[subjectKey]) {
+      groupedSubjectIds[subjectKey].push(String(subject._id));
+    }
+  });
+
+  return { subjects, groupedSubjectIds };
+}
+
+async function buildAutoMockTestPayload(payload, actorId, existing = null) {
+  const examType = normalizeExamType(payload.examType || existing?.generationConfig?.examType || existing?.examType || "NEET");
+  if (!["NEET", "JEE"].includes(examType)) {
+    throw new AppError("Auto-generation currently supports NEET and JEE only", 400);
+  }
+
+  const preset = AUTO_MOCK_PRESET_BY_EXAM[examType];
+  const markingSettingsDoc = await getOrCreateExamMarkingSettings();
+  const normalizedMarkingSettings = normalizeMarkingSettingsDocument(markingSettingsDoc);
+  const defaultMarkingScheme = getMarkingSchemeByExamType(normalizedMarkingSettings, examType);
+  const markingOverrideEnabled =
+    payload.markingOverrideEnabled !== undefined
+      ? Boolean(payload.markingOverrideEnabled)
+      : existing
+        ? Boolean(existing.markingOverrideEnabled)
+        : false;
+  const providedMarkingVersion = String(payload.markingSchemeVersion ?? existing?.markingSchemeVersion ?? defaultMarkingScheme.version).trim();
+  const providedMarkingScheme = payload.markingScheme ?? existing?.markingScheme;
+  const effectiveMarkingScheme = markingOverrideEnabled
+    ? normalizeMarkingScheme(
+        {
+          version: providedMarkingVersion || defaultMarkingScheme.version,
+          examType: defaultMarkingScheme.examType,
+          mcq: {
+            correct: payload.marksPerQuestion ?? providedMarkingScheme?.mcq?.correct ?? existing?.marksPerQuestion ?? defaultMarkingScheme.mcq.correct,
+            wrong: payload.negativeMarks !== undefined ? -Math.abs(Number(payload.negativeMarks)) : providedMarkingScheme?.mcq?.wrong ?? existing?.markingScheme?.mcq?.wrong ?? defaultMarkingScheme.mcq.wrong,
+            unanswered: providedMarkingScheme?.mcq?.unanswered ?? existing?.markingScheme?.mcq?.unanswered ?? 0,
+          },
+          numerical: {
+            correct: providedMarkingScheme?.numerical?.correct ?? existing?.markingScheme?.numerical?.correct ?? defaultMarkingScheme.numerical.correct,
+            wrong: providedMarkingScheme?.numerical?.wrong ?? existing?.markingScheme?.numerical?.wrong ?? defaultMarkingScheme.numerical.wrong,
+            unanswered: providedMarkingScheme?.numerical?.unanswered ?? existing?.markingScheme?.numerical?.unanswered ?? 0,
+          },
+          active: true,
+        },
+        defaultMarkingScheme,
+      )
+    : defaultMarkingScheme;
+  assertValidMarkingScheme(effectiveMarkingScheme, "Applied marking scheme");
+  const requestedDifficulty = String(payload.difficulty || existing?.generationConfig?.difficulty || "").trim().toLowerCase();
+  const title = String(payload.title || existing?.title || `${examType} Auto Mock ${new Date().toISOString().slice(0, 10)}`).trim();
+  const randomizeQuestionOrder =
+    payload.randomizeQuestionOrder !== undefined
+      ? Boolean(payload.randomizeQuestionOrder)
+      : existing
+        ? Boolean(existing.randomizeQuestionOrder ?? true)
+        : true;
+
+  const sourceSubjectIds = payload.subjectIds ?? existing?.generationConfig?.subjectIds ?? existing?.subjectIds ?? [];
+  const { subjects, groupedSubjectIds } = await resolveAutoMockSubjects(examType, sourceSubjectIds);
+
+  const baseFilter = {
+    subjectId: { $in: subjects.map((item) => String(item._id)) },
+    ...(examType === "NEET" || examType === "JEE"
+      ? { $or: [{ examMode: examType }, { examMode: "BOTH" }] }
+      : {}),
+  };
+
+  const allCandidates = await Question.find(baseFilter)
+    .select("_id subjectId chapterId difficulty responseType examMode")
+    .limit(20000);
+
+  if (!allCandidates.length) {
+    throw new AppError("No questions found for selected exam/subjects", 400);
+  }
+
+  const chosenQuestionIds = [];
+  const chosenSet = new Set();
+  const sectionGroups = [];
+  const sectionShortages = [];
+
+  for (const section of preset.sectionGroups) {
+    const sectionSubjectIds = groupedSubjectIds[section.subjectKey] || [];
+    if (!sectionSubjectIds.length) {
+      throw new AppError(`Missing required subject pool for section ${section.label}`, 400);
+    }
+
+    const primaryPool = allCandidates.filter((question) => {
+      if (!sectionSubjectIds.includes(String(question.subjectId))) return false;
+      if (chosenSet.has(String(question._id))) return false;
+      if (section.questionType === "NUMERICAL") return normalizeQuestionTypeBucket(question) === "NUMERICAL";
+      if (section.questionType === "MCQ") return normalizeQuestionTypeBucket(question) === "MCQ";
+      return true;
+    });
+
+    let selected = chooseBalancedQuestions(primaryPool, section.totalQuestions, requestedDifficulty);
+    if (selected.length < section.totalQuestions) {
+      const fallbackPool = allCandidates.filter((question) => {
+        if (!sectionSubjectIds.includes(String(question.subjectId))) return false;
+        if (chosenSet.has(String(question._id))) return false;
+        return true;
+      });
+      const fallbackSelected = chooseBalancedQuestions(fallbackPool, section.totalQuestions, requestedDifficulty);
+      selected = fallbackSelected;
+    }
+
+    const requiredQuestions = Number(section.totalQuestions || 0);
+    const availableQuestions = selected.length;
+    if (availableQuestions < requiredQuestions) {
+      sectionShortages.push({
+        sectionKey: section.key,
+        sectionLabel: section.label,
+        requiredQuestions,
+        availableQuestions,
+      });
+    }
+    if (availableQuestions <= 0) {
+      continue;
+    }
+
+    selected.forEach((question) => {
+      const id = String(question._id);
+      if (!chosenSet.has(id)) {
+        chosenSet.add(id);
+        chosenQuestionIds.push(id);
+      }
+    });
+
+    const sectionAttemptQuestions = Math.min(
+      Number(section.attemptQuestions || availableQuestions),
+      availableQuestions,
+    );
+
+    sectionGroups.push({
+      key: section.key,
+      label: section.label,
+      subjectKey: section.subjectKey,
+      questionType: section.questionType,
+      totalQuestions: availableQuestions,
+      attemptQuestions: sectionAttemptQuestions,
+      requestedTotalQuestions: requiredQuestions,
+      requestedAttemptQuestions: Number(section.attemptQuestions || sectionAttemptQuestions),
+      questionIds: selected.map((question) => String(question._id)),
+    });
+  }
+
+  if (chosenQuestionIds.length === 0) {
+    throw new AppError("No questions available to generate mock test for selected filters", 400);
+  }
+
+  const selectedQuestions = allCandidates.filter((question) => chosenSet.has(String(question._id)));
+  const subjectIds = [...new Set(selectedQuestions.map((item) => String(item.subjectId)).filter(Boolean))];
+  const chapterIds = [...new Set(selectedQuestions.map((item) => String(item.chapterId)).filter(Boolean))];
+  const marksPerQuestion = Number(effectiveMarkingScheme?.mcq?.correct ?? payload.marksPerQuestion ?? existing?.marksPerQuestion ?? preset.marksPerQuestion);
+  const negativeMarks = Math.abs(Number(effectiveMarkingScheme?.mcq?.wrong ?? -(payload.negativeMarks ?? existing?.negativeMarks ?? preset.negativeMarks)));
+  const computedAttemptQuestions = sectionGroups.reduce((sum, item) => sum + Number(item.attemptQuestions || 0), 0);
+  const requestedAttemptQuestions = Number(payload.totalAttemptQuestions ?? preset.totalAttemptQuestions);
+  const totalAttemptQuestions = Math.max(
+    1,
+    Math.min(
+      chosenQuestionIds.length,
+      computedAttemptQuestions || requestedAttemptQuestions,
+      sectionShortages.length ? computedAttemptQuestions || requestedAttemptQuestions : requestedAttemptQuestions,
+    ),
+  );
+  const selectedQuestionMap = new Map(selectedQuestions.map((item) => [String(item._id), item]));
+  const questionMarkingRules = buildQuestionMarkingRules(chosenQuestionIds, selectedQuestionMap, effectiveMarkingScheme);
+  const computedMaxScore = calculateMaxScoreFromRules(questionMarkingRules, totalAttemptQuestions);
+  const maxScore = Number(
+    payload.maxScore
+      ?? (sectionShortages.length ? computedMaxScore : existing?.maxScore)
+      ?? computedMaxScore,
+  );
+  if (!Number.isFinite(maxScore) || maxScore <= 0) {
+    throw new AppError("Generated max score is invalid. Check marking settings.", 400);
+  }
+
+  const historyEntry = {
+    id: new mongoose.Types.ObjectId().toString(),
+    generatedAt: new Date().toISOString(),
+    generatedBy: actorId ? String(actorId) : null,
+    mode: existing ? "regenerate" : "generate",
+      examType,
+      difficulty: requestedDifficulty || "mixed",
+      subjectIds,
+      totalQuestions: chosenQuestionIds.length,
+      totalAttemptQuestions,
+      markingSchemeVersion: effectiveMarkingScheme.version,
+      markingOverrideEnabled,
+      shortages: sectionShortages,
+    };
+
+  const previousHistory = Array.isArray(existing?.generationHistory) ? existing.generationHistory : [];
+  const nextHistory = [...previousHistory, historyEntry].slice(-AUTO_MOCK_HISTORY_LIMIT);
+  const availabilityMode = String(payload.availabilityMode ?? existing?.availabilityMode ?? "all").toLowerCase();
+  const availableDaysOfMonth = Array.isArray(payload.availableDaysOfMonth)
+    ? payload.availableDaysOfMonth.map(Number).filter((value) => value >= 1 && value <= 31)
+    : (Array.isArray(existing?.availableDaysOfMonth) ? existing.availableDaysOfMonth : []);
+  const availableWeekdays = Array.isArray(payload.availableWeekdays)
+    ? payload.availableWeekdays.map((value) => String(value).toUpperCase()).filter((value) => WEEKDAY_OPTIONS.includes(value))
+    : (Array.isArray(existing?.availableWeekdays) ? existing.availableWeekdays : []);
+
+  if (!["all", "day_wise", "week_wise"].includes(availabilityMode)) {
+    throw new AppError("Availability mode is invalid", 400);
+  }
+  if (availabilityMode === "day_wise" && !availableDaysOfMonth.length) {
+    throw new AppError("Select at least one day of month for day-wise availability", 400);
+  }
+  if (availabilityMode === "week_wise" && !availableWeekdays.length) {
+    throw new AppError("Select at least one weekday for week-wise availability", 400);
+  }
+
+  return {
+    title,
+    slug: await ensureUniqueMockTestSlug(title, existing?._id),
+    description: String(payload.description ?? existing?.description ?? `${examType} auto-generated mock test`).trim() || undefined,
+    examType,
+    patternPreset: preset.patternPreset,
+    durationMinutes: Number(payload.durationMinutes ?? existing?.durationMinutes ?? preset.durationMinutes),
+    totalQuestions: chosenQuestionIds.length,
+    totalAttemptQuestions,
+    maxScore,
+    questionIds: chosenQuestionIds,
+    subjectIds,
+    chapterIds,
+    instructions: Array.isArray(payload.instructions)
+      ? payload.instructions.map((item) => String(item).trim()).filter(Boolean)
+      : (Array.isArray(existing?.instructions) && existing.instructions.length ? existing.instructions : MOCK_TEST_PRESETS[preset.patternPreset]?.instructions || []),
+    marksPerQuestion,
+    negativeMarks,
+    markingSchemeVersion: effectiveMarkingScheme.version,
+    markingScheme: effectiveMarkingScheme,
+    questionMarkingRules,
+    markingOverrideEnabled,
+    predictionTitle: String(payload.predictionTitle ?? existing?.predictionTitle ?? MOCK_TEST_PRESETS[preset.patternPreset]?.predictionTitle ?? `Predicted ${examType} Score`).trim(),
+    predictionDescription: String(payload.predictionDescription ?? existing?.predictionDescription ?? MOCK_TEST_PRESETS[preset.patternPreset]?.predictionDescription ?? "").trim(),
+    availabilityMode,
+    availableDaysOfMonth: availabilityMode === "day_wise" ? availableDaysOfMonth : [],
+    availableWeekdays: availabilityMode === "week_wise" ? availableWeekdays : [],
+    sectionGroups,
+    generationSource: "auto",
+    generationConfig: {
+      examType,
+      subjectIds,
+      difficulty: requestedDifficulty || "mixed",
+      markingSchemeVersion: effectiveMarkingScheme.version,
+      markingOverrideEnabled,
+      strictPattern: sectionShortages.length === 0,
+      shortages: sectionShortages,
+    },
+    generationHistory: nextHistory,
+    randomizeQuestionOrder,
+    isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : existing ? Boolean(existing.isPremiumOnly) : false,
+    isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
+  };
+}
+
+function normalizeModeKey(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "NEET" || normalized === "JEE" || normalized === "BOTH") return normalized;
+  throw new AppError("Invalid mode key. Use NEET, JEE, or BOTH.", 400);
+}
+
+async function buildDailyPlanPayload(payload, existing = null) {
+  const modeKey = normalizeModeKey(payload.modeKey ?? existing?.modeKey ?? "NEET");
+  const selectionMode = String(payload.selectionMode ?? existing?.selectionMode ?? "random").toLowerCase();
+  const questionCount = Number(payload.questionCount ?? existing?.questionCount ?? 20);
+  const manualQuestionIds = [...new Set((Array.isArray(payload.manualQuestionIds) ? payload.manualQuestionIds : existing?.manualQuestionIds || []).map(String).filter(Boolean))];
+  const autoFillRemaining =
+    payload.autoFillRemaining !== undefined
+      ? Boolean(payload.autoFillRemaining)
+      : existing
+        ? Boolean(existing.autoFillRemaining)
+        : true;
+  const isActive =
+    payload.isActive !== undefined
+      ? Boolean(payload.isActive)
+      : existing
+        ? Boolean(existing.isActive)
+        : true;
+
+  if (!["random", "manual"].includes(selectionMode)) {
+    throw new AppError("Selection mode must be random or manual", 400);
+  }
+  if (!Number.isFinite(questionCount) || questionCount < 1 || questionCount > 200) {
+    throw new AppError("Question count must be between 1 and 200", 400);
+  }
+
+  if (selectionMode === "manual" && manualQuestionIds.length) {
+    const questions = await Question.find({ _id: { $in: manualQuestionIds } })
+      .select("_id examMode subjectId")
+      .populate("subjectId", "examType");
+    if (questions.length !== manualQuestionIds.length) {
+      throw new AppError("One or more selected manual questions were not found", 400);
+    }
+
+    questions.forEach((question) => {
+      const questionMode = String(question.examMode || "").toUpperCase();
+      const subjectExam = String(question.subjectId?.examType || "").toUpperCase();
+      const normalizedQuestionExam = questionMode === "BOTH" ? subjectExam : (questionMode || subjectExam);
+      if (modeKey !== "BOTH" && normalizedQuestionExam && normalizedQuestionExam !== modeKey && normalizedQuestionExam !== "BOTH") {
+        throw new AppError(`Manual question set contains a question outside ${modeKey} mode`, 400);
+      }
+    });
+  }
+
+  return {
+    modeKey,
+    selectionMode,
+    questionCount,
+    manualQuestionIds,
+    autoFillRemaining,
+    isActive,
+    title: String(payload.title ?? existing?.title ?? "").trim() || undefined,
+    description: String(payload.description ?? existing?.description ?? "").trim() || undefined,
+  };
+}
+
+async function serializeDailyPlans(items) {
+  const questionIds = [...new Set(items.flatMap((item) => item.manualQuestionIds || []).map(String).filter(Boolean))];
+  const questions = questionIds.length
+    ? await Question.find({ _id: { $in: questionIds } })
+      .select("_id question subjectId chapterId examMode difficulty")
+      .populate("subjectId", "name examType")
+      .populate("chapterId", "name")
+    : [];
+  const questionMap = new Map(questions.map((item) => [String(item._id), item]));
+
+  return items.map((item) => {
+    const raw = typeof item?.toJSON === "function" ? item.toJSON() : item;
+    const manualQuestions = (raw.manualQuestionIds || [])
+      .map((questionId) => {
+        const question = questionMap.get(String(questionId));
+        if (!question) return null;
+        return {
+          id: String(question._id),
+          question: question.question,
+          examMode: question.examMode,
+          difficulty: question.difficulty,
+          subjectName: question.subjectId?.name || "-",
+          chapterName: question.chapterId?.name || "-",
+        };
+      })
+      .filter(Boolean);
+    return {
+      id: String(raw.id ?? raw._id),
+      modeKey: raw.modeKey,
+      selectionMode: raw.selectionMode,
+      questionCount: Number(raw.questionCount || 20),
+      manualQuestionIds: (raw.manualQuestionIds || []).map(String),
+      manualQuestions,
+      autoFillRemaining: Boolean(raw.autoFillRemaining),
+      isActive: Boolean(raw.isActive),
+      title: raw.title || "",
+      description: raw.description || "",
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
+    };
+  });
+}
+
+function mapSubscriptionPlan(plan) {
+  if (!plan) return null;
+  return {
+    id: plan.planId,
+    name: plan.name,
+    price: Number(plan.price || 0),
+    durationMonths: Number(plan.durationMonths || 0),
+    savings: plan.savings || "",
+    features: Array.isArray(plan.features) ? plan.features.filter(Boolean) : [],
+    active: Boolean(plan.active),
+    sortOrder: Number(plan.sortOrder || 0),
+    recordId: String(plan._id),
+  };
+}
+
+async function getSubscriptionPlanByPlanId(planId) {
+  const normalizedPlanId = String(planId || "").trim();
+  if (!normalizedPlanId) throw new AppError("Plan id is required", 400);
+  const plan = await SubscriptionPlan.findOne({ planId: normalizedPlanId });
+  if (!plan) throw new AppError("Selected plan was not found", 400);
+  return plan;
+}
+
+const subscriptionListQuerySchema = z.object({
+  query: z.object({
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(10),
+    search: z.string().optional(),
+    status: z.string().optional(),
+    planId: z.string().optional(),
+    sortBy: z.enum(["createdAt", "updatedAt", "amount", "endDate", "startDate"]).optional().default("createdAt"),
+    sortOrder: z.enum(["asc", "desc"]).optional().default("desc"),
+  }),
+});
+
+const manualSubscriptionSchema = z.object({
+  body: z.object({
+    userId: z.string().min(1),
+    planId: z.string().min(1),
+    status: z.enum(["active", "completed", "manual"]).optional().default("active"),
+    startDate: z.string().datetime().optional().or(z.literal("")),
+    endDate: z.string().datetime().optional().or(z.literal("")),
+    paymentId: z.string().optional().or(z.literal("")),
+    orderId: z.string().optional().or(z.literal("")),
+    couponCode: z.string().optional().or(z.literal("")),
+  }),
+});
+
+const couponPreviewSchema = z.object({
+  body: z.object({
+    planId: z.string().min(1),
+    couponCode: z.string().optional().or(z.literal("")),
+  }),
+});
+
+const cancelSubscriptionSchema = z.object({
+  body: z.object({
+    status: z.enum(["cancelled", "expired"]).optional().default("cancelled"),
+  }),
+});
+
+router.get(
+  "/subscription-plans",
+  asyncHandler(async (_req, res) => {
+    const plans = await SubscriptionPlan.find({}).sort({ sortOrder: 1, createdAt: 1 }).lean();
+    res.json({ success: true, data: plans.map(mapSubscriptionPlan) });
+  }),
+);
+
+async function resolveCoupon(plan, couponCode) {
+  const normalizedCode = String(couponCode || "").trim().toUpperCase();
+  const mappedPlan = mapSubscriptionPlan(plan);
+  const baseAmount = Number(mappedPlan?.price || 0);
+  if (!normalizedCode) {
+    return {
+      coupon: null,
+      pricing: {
+        baseAmount,
+        discountAmount: 0,
+        finalAmount: baseAmount,
+        coupon: null,
+      },
+    };
+  }
+
+  const coupon = await Coupon.findOne({ code: normalizedCode });
+  if (!coupon) throw new AppError("Coupon not found", 404);
+  if (!coupon.active) throw new AppError("Coupon is inactive", 400);
+  if (coupon.validFrom && new Date(coupon.validFrom) > new Date()) throw new AppError("Coupon is not active yet", 400);
+  if (coupon.validUntil && new Date(coupon.validUntil) < new Date()) throw new AppError("Coupon has expired", 400);
+  if (coupon.usageLimit && Number(coupon.usedCount || 0) >= Number(coupon.usageLimit)) {
+    throw new AppError("Coupon usage limit reached", 400);
+  }
+
+  const rawDiscount = coupon.type === "percent" ? (baseAmount * Number(coupon.value)) / 100 : Number(coupon.value);
+  const discountAmount = Math.min(baseAmount, Math.max(0, Math.round(rawDiscount)));
+  const finalAmount = Math.max(0, baseAmount - discountAmount);
+
+  return {
+    coupon,
+    pricing: {
+      baseAmount,
+      discountAmount,
+      finalAmount,
+      coupon: {
+        code: coupon.code,
+        type: coupon.type,
+        value: coupon.value,
+      },
+    },
+  };
+}
+
+async function refreshUserPremiumState(userId) {
+  const activeSubscription = await Subscription.findOne({
+    userId,
+    status: { $in: ["active", "manual", "completed"] },
+    endDate: { $gt: new Date() },
+  }).sort({ endDate: -1 });
+
+  await User.findByIdAndUpdate(userId, {
+    isPremium: Boolean(activeSubscription),
+    premiumExpiresAt: activeSubscription?.endDate,
+  });
+}
+
+router.post(
+  "/subscriptions/coupon-preview",
+  validate(couponPreviewSchema),
+  asyncHandler(async (req, res) => {
+    const { planId, couponCode } = req.validated.body;
+    const plan = await getSubscriptionPlanByPlanId(planId);
+
+    const { pricing } = await resolveCoupon(plan, couponCode);
+    res.json({ success: true, data: { plan: mapSubscriptionPlan(plan), ...pricing } });
+  }),
+);
+
+router.get(
+  "/subscriptions",
+  validate(subscriptionListQuerySchema),
+  asyncHandler(async (req, res) => {
+    const { page = 1, limit = 10, search = "", status, planId, sortBy = "createdAt", sortOrder = "desc" } = req.validated.query;
+    const filters = {};
+
+    if (status) filters.status = status;
+    if (planId) filters.planId = planId;
+
+    let userMap = new Map();
+    if (search) {
+      const users = await User.find({
+        $or: [
+          { name: new RegExp(search, "i") },
+          { email: new RegExp(search, "i") },
+          { mobile: new RegExp(search, "i") },
+        ],
+      })
+        .select("_id name email mobile")
+        .lean();
+
+      const matchingUserIds = users.map((item) => String(item._id));
+      if (matchingUserIds.length) {
+        filters.$or = [
+          { userId: { $in: matchingUserIds } },
+          { planId: new RegExp(search, "i") },
+          { couponCode: new RegExp(search, "i") },
+          { status: new RegExp(search, "i") },
+          { razorpayOrderId: new RegExp(search, "i") },
+          { razorpayPaymentId: new RegExp(search, "i") },
+        ];
+      } else {
+        filters.$or = [
+          { planId: new RegExp(search, "i") },
+          { couponCode: new RegExp(search, "i") },
+          { status: new RegExp(search, "i") },
+          { razorpayOrderId: new RegExp(search, "i") },
+          { razorpayPaymentId: new RegExp(search, "i") },
+        ];
+      }
+      userMap = new Map(users.map((item) => [String(item._id), item]));
+    }
+
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      Subscription.find(filters)
+        .sort({ [sortBy]: sortOrder === "asc" ? 1 : -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Subscription.countDocuments(filters),
+    ]);
+
+    const missingUserIds = [...new Set(items.map((item) => String(item.userId)).filter((id) => !userMap.has(id)))];
+    if (missingUserIds.length) {
+      const extraUsers = await User.find({ _id: { $in: missingUserIds } }).select("_id name email mobile isPremium premiumExpiresAt").lean();
+      extraUsers.forEach((item) => userMap.set(String(item._id), item));
+    }
+
+    const subscriptionPlanIds = [...new Set(items.map((item) => String(item.planId)).filter(Boolean))];
+    const plans = subscriptionPlanIds.length
+      ? await SubscriptionPlan.find({ planId: { $in: subscriptionPlanIds } }).select("planId name price durationMonths active savings features sortOrder").lean()
+      : [];
+    const planMap = new Map(plans.map((item) => [String(item.planId), item]));
+
+    const data = items.map((item) => {
+      const user = userMap.get(String(item.userId));
+      const plan = planMap.get(String(item.planId));
+      return {
+        id: String(item._id),
+        ...item,
+        plan: plan ? mapSubscriptionPlan(plan) : null,
+        user: user
+          ? {
+              id: String(user._id),
+              name: user.name,
+              email: user.email,
+              mobile: user.mobile,
+              isPremium: Boolean(user.isPremium),
+              premiumExpiresAt: user.premiumExpiresAt,
+            }
+          : null,
+      };
+    });
+
+    res.json({
+      success: true,
+      data,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
+  }),
+);
+
+router.post(
+  "/subscriptions/manual",
+  validate(manualSubscriptionSchema),
+  asyncHandler(async (req, res) => {
+    const { userId, planId, status, startDate, endDate, paymentId, orderId, couponCode } = req.validated.body;
+    const user = await User.findById(userId);
+    if (!user) throw new AppError("Selected user was not found", 404);
+
+    const plan = await getSubscriptionPlanByPlanId(planId);
+
+    const { coupon, pricing } = await resolveCoupon(plan, couponCode);
+
+    const start = startDate ? new Date(startDate) : new Date();
+    const expiresAt = endDate
+      ? new Date(endDate)
+      : new Date(new Date(start).setMonth(new Date(start).getMonth() + Number(plan.durationMonths || 0)));
+
+    const subscription = await Subscription.create({
+      userId: String(user._id),
+      planId,
+      baseAmount: pricing.baseAmount,
+      discountAmount: pricing.discountAmount,
+      amount: pricing.finalAmount,
+      status,
+      startDate: start,
+      endDate: expiresAt,
+      razorpayPaymentId: paymentId || `manual_${Date.now()}`,
+      razorpayOrderId: orderId || `admin_manual_${Date.now()}`,
+      couponCode: coupon?.code,
+      couponType: coupon?.type,
+      couponValue: coupon?.value,
+    });
+
+    user.isPremium = true;
+    user.premiumExpiresAt = expiresAt;
+    await user.save();
+    if (coupon) {
+      coupon.usedCount = Number(coupon.usedCount || 0) + 1;
+      await coupon.save();
+    }
+
+    res.status(201).json({
+      success: true,
+      message: "Manual subscription activated",
+      data: {
+        ...(typeof subscription.toJSON === "function" ? subscription.toJSON() : subscription),
+        pricing,
+      },
+    });
+  }),
+);
+
+router.post(
+  "/subscriptions/:id/cancel",
+  validate(cancelSubscriptionSchema),
+  asyncHandler(async (req, res) => {
+    const subscription = await Subscription.findById(req.params.id);
+    if (!subscription) throw new AppError("Subscription not found", 404);
+
+    subscription.status = req.validated.body.status;
+    subscription.endDate = new Date();
+    await subscription.save();
+    await refreshUserPremiumState(subscription.userId);
+
+    res.json({
+      success: true,
+      message: "Subscription updated",
+      data: subscription,
+    });
+  }),
+);
+router.post(
+  "/questions/upload-asset",
+  upload.single("image"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      throw new AppError("Image file is required", 400);
+    }
+
+    const allowedMimeTypes = new Set(["image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif"]);
+    if (!allowedMimeTypes.has(String(req.file.mimetype || "").toLowerCase())) {
+      throw new AppError("Only image files are allowed (jpg, png, webp, gif)", 400);
+    }
+
+    ensureDir(questionUploadsRoot);
+    const baseName = sanitizeFileName(req.file.originalname || "question-image");
+    const dotIndex = baseName.lastIndexOf(".");
+    const name = dotIndex > 0 ? baseName.slice(0, dotIndex) : baseName;
+    const ext = dotIndex > 0 ? baseName.slice(dotIndex) : ".png";
+    const fileName = `${name}-${Date.now()}-${Math.floor(Math.random() * 10000)}${ext}`;
+    const filePath = `${questionUploadsRoot}/${fileName}`;
+    await fs.writeFile(filePath, req.file.buffer);
+
+    const publicPath = buildPublicUploadPath(fileName);
+    res.status(201).json({
+      success: true,
+      data: {
+        path: publicPath,
+        url: publicPath,
+      },
+    });
+  }),
+);
+
+router.post(
+  "/questions/own-asset-url",
+  asyncHandler(async (req, res) => {
+    const sourceUrl = String(req.body?.url || "").trim();
+    if (!sourceUrl) {
+      throw new AppError("Image URL is required", 400);
+    }
+
+    const ownedUrl = await ownQuestionAssetUrl(sourceUrl);
+    return res.json({
+      success: true,
+      data: {
+        sourceUrl,
+        path: ownedUrl,
+        url: ownedUrl,
+      },
+    });
+  }),
+);
+
+router.post(
+  "/questions/bulk-upload/validate",
+  upload.fields([{ name: "sheet", maxCount: 1 }]),
+  asyncHandler(async (req, res) => {
+    const data = await questionBulkUploadService.validateFile({
+      sheetFile: req.files?.sheet?.[0],
+      uploadedBy: req.admin?._id,
+    });
+    res.json({ success: true, message: "Bulk upload validation completed", data });
+  }),
+);
+
+router.post(
+  "/questions/bulk-upload/:batchId/create-categories",
+  asyncHandler(async (req, res) => {
+    const data = await questionBulkUploadService.createMissingCategories({
+      batchId: req.params.batchId,
+    });
+    res.json({ success: true, message: "Categories created successfully", data });
+  }),
+);
+
+router.post(
+  "/questions/bulk-upload/:batchId/approve",
+  asyncHandler(async (req, res) => {
+    const data = await questionBulkUploadService.approve({
+      batchId: req.params.batchId,
+    });
+    res.status(201).json({ success: true, message: "Questions uploaded successfully", data });
+  }),
+);
+
+router.get(
+  "/mock-tests/marking-settings",
+  asyncHandler(async (_req, res) => {
+    const settings = await getOrCreateExamMarkingSettings();
+    res.json({ success: true, data: mapMarkingSettingsResponse(settings) });
+  }),
+);
+
+router.post(
+  "/mock-tests/marking-settings",
+  asyncHandler(async (req, res) => {
+    const payload = examMarkingSettingsSchema.parse(req.body || {});
+    const existing = await getOrCreateExamMarkingSettings();
+    const defaults = createDefaultMarkingSettingsPayload();
+    const normalizedExisting = normalizeMarkingSettingsDocument(existing);
+
+    const nextValues = {
+      neet: normalizeMarkingScheme(payload.neet ?? normalizedExisting.neet, defaults.neet),
+      jeeMain: normalizeMarkingScheme(payload.jeeMain ?? normalizedExisting.jeeMain, defaults.jeeMain),
+      jeeAdvanced: normalizeMarkingScheme(payload.jeeAdvanced ?? normalizedExisting.jeeAdvanced, defaults.jeeAdvanced),
+    };
+    assertValidMarkingScheme(nextValues.neet, "NEET scheme");
+    assertValidMarkingScheme(nextValues.jeeMain, "JEE Main scheme");
+    assertValidMarkingScheme(nextValues.jeeAdvanced, "JEE Advanced scheme");
+
+    const settings = await ExamMarkingSettings.findOneAndUpdate({}, nextValues, {
+      new: true,
+      upsert: true,
+      setDefaultsOnInsert: true,
+      runValidators: true,
+    });
+    res.json({ success: true, message: "Marking settings updated", data: mapMarkingSettingsResponse(settings) });
+  }),
+);
+
+router.get(
+  "/mock-tests",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 100);
+    const search = String(req.query.search || "").trim();
+    const filters = {};
+
+    if (req.query.examType) filters.examType = normalizeExamType(req.query.examType);
+    if (req.query.isActive === "true" || req.query.isActive === "false") filters.isActive = req.query.isActive === "true";
+    if (search) {
+      filters.$or = [
+        { title: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
+        { description: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      MockTest.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      MockTest.countDocuments(filters),
+    ]);
+
+    res.json({
+      success: true,
+      data: await serializeMockTests(items),
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.get(
+  "/mock-tests/questions",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 10);
+    const search = String(req.query.search || "").trim();
+    const filters = {};
+
+    if (req.query.examType && String(req.query.examType).toUpperCase() !== "BOTH") {
+      filters.examMode = normalizeExamType(req.query.examType);
+    }
+    if (req.query.subjectId) filters.subjectId = String(req.query.subjectId);
+    if (req.query.chapterId) filters.chapterId = String(req.query.chapterId);
+    if (search) {
+      filters.question = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    }
+
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      Question.find(filters)
+        .populate("subjectId")
+        .populate("chapterId")
+        .populate("questionTypeId")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Question.countDocuments(filters),
+    ]);
+
+    res.json({
+      success: true,
+      data: items.map((item) => ({
+        id: String(item._id),
+        question: item.question,
+        examMode: item.examMode,
+        difficulty: item.difficulty,
+        subjectName: item.subjectId?.name || "-",
+        chapterName: item.chapterId?.name || "-",
+        questionTypeLabel: item.questionTypeId?.name || item.questionTypeId?.label || "-",
+      })),
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.post(
+  "/mock-tests/auto-generate",
+  asyncHandler(async (req, res) => {
+    const payload = await buildAutoMockTestPayload(req.body || {}, req.userId);
+    const item = await MockTest.create(payload);
+    const shortageCount = Array.isArray(payload?.generationConfig?.shortages) ? payload.generationConfig.shortages.length : 0;
+    res.status(201).json({
+      success: true,
+      message: shortageCount > 0 ? `Mock test auto-generated with ${shortageCount} section shortage(s)` : "Mock test auto-generated",
+      data: (await serializeMockTests([item]))[0],
+    });
+  }),
+);
+
+router.post(
+  "/mock-tests/:id/regenerate",
+  asyncHandler(async (req, res) => {
+    const existing = await MockTest.findById(req.params.id);
+    if (!existing) throw new AppError("Mock test not found", 404);
+    const payload = await buildAutoMockTestPayload(req.body || {}, req.userId, existing);
+    Object.assign(existing, payload);
+    await existing.save();
+    const shortageCount = Array.isArray(payload?.generationConfig?.shortages) ? payload.generationConfig.shortages.length : 0;
+    res.json({
+      success: true,
+      message: shortageCount > 0 ? `Mock test regenerated with ${shortageCount} section shortage(s)` : "Mock test regenerated",
+      data: (await serializeMockTests([existing]))[0],
+    });
+  }),
+);
+
+router.get(
+  "/mock-tests/:id/generation-history",
+  asyncHandler(async (req, res) => {
+    const existing = await MockTest.findById(req.params.id).select("_id title generationHistory generationConfig generationSource");
+    if (!existing) throw new AppError("Mock test not found", 404);
+    res.json({
+      success: true,
+      data: {
+        id: String(existing._id),
+        title: existing.title,
+        generationSource: existing.generationSource || "manual",
+        generationConfig: existing.generationConfig || null,
+        history: Array.isArray(existing.generationHistory) ? existing.generationHistory : [],
+      },
+    });
+  }),
+);
+
+router.get(
+  "/mock-tests/:id",
+  asyncHandler(async (req, res) => {
+    const item = await MockTest.findById(req.params.id);
+    if (!item) throw new AppError("Mock test not found", 404);
+    res.json({ success: true, data: (await serializeMockTests([item]))[0] });
+  }),
+);
+
+router.post(
+  "/mock-tests",
+  asyncHandler(async (req, res) => {
+    const payload = await buildMockTestPayload(req.body);
+    const item = await MockTest.create(payload);
+    res.status(201).json({ success: true, message: "Mock test created", data: (await serializeMockTests([item]))[0] });
+  }),
+);
+
+router.put(
+  "/mock-tests/:id",
+  asyncHandler(async (req, res) => {
+    const existing = await MockTest.findById(req.params.id);
+    if (!existing) throw new AppError("Mock test not found", 404);
+    const payload = await buildMockTestPayload(req.body, existing);
+    Object.assign(existing, payload);
+    await existing.save();
+    res.json({ success: true, message: "Mock test updated", data: (await serializeMockTests([existing]))[0] });
+  }),
+);
+
+router.delete(
+  "/mock-tests/:id",
+  asyncHandler(async (req, res) => {
+    const existing = await MockTest.findById(req.params.id);
+    if (!existing) throw new AppError("Mock test not found", 404);
+    await existing.deleteOne();
+    res.json({ success: true, message: "Mock test deleted", data: null });
+  }),
+);
+
+router.get(
+  "/daily-plan-configs",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 100);
+    const search = String(req.query.search || "").trim();
+    const filters = {};
+
+    if (req.query.modeKey) filters.modeKey = normalizeModeKey(req.query.modeKey);
+    if (req.query.isActive === "true" || req.query.isActive === "false") filters.isActive = req.query.isActive === "true";
+    if (search) {
+      filters.$or = [
+        { modeKey: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
+        { title: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
+        { description: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      DailyPlanConfig.find(filters).sort({ modeKey: 1, createdAt: -1 }).skip(skip).limit(limit),
+      DailyPlanConfig.countDocuments(filters),
+    ]);
+
+    res.json({
+      success: true,
+      data: await serializeDailyPlans(items),
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.get(
+  "/daily-plan-configs/questions",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 10);
+    const search = String(req.query.search || "").trim();
+    const filters = {};
+
+    if (req.query.modeKey && String(req.query.modeKey).toUpperCase() !== "BOTH") {
+      const modeKey = normalizeModeKey(req.query.modeKey);
+      filters.$or = [{ examMode: modeKey }, { examMode: "BOTH" }];
+    }
+    if (req.query.subjectId) filters.subjectId = String(req.query.subjectId);
+    if (req.query.chapterId) filters.chapterId = String(req.query.chapterId);
+    if (search) {
+      filters.question = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    }
+
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      Question.find(filters)
+        .populate("subjectId")
+        .populate("chapterId")
+        .populate("questionTypeId")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      Question.countDocuments(filters),
+    ]);
+
+    res.json({
+      success: true,
+      data: items.map((item) => ({
+        id: String(item._id),
+        question: item.question,
+        examMode: item.examMode,
+        difficulty: item.difficulty,
+        subjectName: item.subjectId?.name || "-",
+        chapterName: item.chapterId?.name || "-",
+        questionTypeLabel: item.questionTypeId?.name || item.questionTypeId?.label || "-",
+      })),
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.get(
+  "/daily-plan-configs/:id",
+  asyncHandler(async (req, res) => {
+    const item = await DailyPlanConfig.findById(req.params.id);
+    if (!item) throw new AppError("Daily plan config not found", 404);
+    res.json({ success: true, data: (await serializeDailyPlans([item]))[0] });
+  }),
+);
+
+router.post(
+  "/daily-plan-configs",
+  validate(createSchemas.dailyPlan),
+  asyncHandler(async (req, res) => {
+    const payload = await buildDailyPlanPayload(req.validated.body);
+    const existingByMode = await DailyPlanConfig.findOne({ modeKey: payload.modeKey }).select("_id");
+    if (existingByMode) {
+      throw new AppError(`Daily plan for ${payload.modeKey} already exists. Edit it instead.`, 400);
+    }
+    const item = await DailyPlanConfig.create(payload);
+    res.status(201).json({ success: true, message: "Daily plan config created", data: (await serializeDailyPlans([item]))[0] });
+  }),
+);
+
+router.put(
+  "/daily-plan-configs/:id",
+  validate(updateSchemas.dailyPlan),
+  asyncHandler(async (req, res) => {
+    const existing = await DailyPlanConfig.findById(req.params.id);
+    if (!existing) throw new AppError("Daily plan config not found", 404);
+    const payload = await buildDailyPlanPayload(req.validated.body, existing);
+    const duplicate = await DailyPlanConfig.findOne({ modeKey: payload.modeKey, _id: { $ne: existing._id } }).select("_id");
+    if (duplicate) {
+      throw new AppError(`Daily plan for ${payload.modeKey} already exists.`, 400);
+    }
+    Object.assign(existing, payload);
+    await existing.save();
+    res.json({ success: true, message: "Daily plan config updated", data: (await serializeDailyPlans([existing]))[0] });
+  }),
+);
+
+router.delete(
+  "/daily-plan-configs/:id",
+  asyncHandler(async (req, res) => {
+    const existing = await DailyPlanConfig.findById(req.params.id);
+    if (!existing) throw new AppError("Daily plan config not found", 404);
+    await existing.deleteOne();
+    res.json({ success: true, message: "Daily plan config deleted", data: null });
+  }),
+);
+
+function createCrudRouter({ key, label, service }) {
+  const route = Router();
+  const controller = createCrudController(service, label);
+
+  route.get("/", validate(listQuerySchema), asyncHandler(controller.list));
+  route.post("/bulk-delete", validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
+  route.delete("/bulk", validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
+  route.get("/:id", asyncHandler(controller.getById));
+  route.post("/", validate(createSchemas[key]), asyncHandler(controller.create));
+  route.put("/:id", validate(updateSchemas[key]), asyncHandler(controller.update));
+  route.delete("/:id", asyncHandler(controller.remove));
+
+  return route;
+}
+
+function normalizeExamType(value) {
+  const normalized = String(value || "").trim().toUpperCase();
+  if (normalized === "NEET") return "NEET";
+  if (normalized === "JEE" || normalized === "JEE_MAIN" || normalized === "JEE_ADVANCED") return "JEE";
+  throw new AppError("Invalid exam type. Use NEET or JEE.", 400);
+}
+
+function normalizeDifficultyKey(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (!normalized) return "";
+  if (normalized === "medium") return "moderate";
+  return normalized;
+}
+
+async function resolveDifficultyPayload(input = {}) {
+  const requestedId = String(input.difficultyId || "").trim();
+  const requestedKey = normalizeDifficultyKey(input.difficulty);
+
+  if (requestedId && mongoose.isValidObjectId(requestedId)) {
+    const difficulty = await Difficulty.findById(requestedId);
+    if (!difficulty) throw new AppError("Selected difficulty was not found", 400);
+    return {
+      difficultyId: String(difficulty._id),
+      difficulty: normalizeDifficultyKey(difficulty.key || difficulty.name),
+    };
+  }
+
+  if (requestedKey) {
+    const difficulty = await Difficulty.findOne({
+      $or: [
+        { key: requestedKey },
+        { name: new RegExp(`^${requestedKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+      ],
+    });
+
+    if (difficulty) {
+      return {
+        difficultyId: String(difficulty._id),
+        difficulty: normalizeDifficultyKey(difficulty.key || difficulty.name),
+      };
+    }
+
+    return {
+      difficultyId: undefined,
+      difficulty: requestedKey,
+    };
+  }
+
+  throw new AppError("Difficulty is required", 400);
+}
+
+async function ensureExamTypeExists(value) {
+  const name = normalizeExamType(value);
+  const exists = await ExamType.exists({ $or: [{ name }, { key: name }, { label: name }] });
+  if (!exists) {
+    throw new AppError(`Exam type ${name} is not configured`, 400);
+  }
+  return name;
+}
+
+const modeService = createCrudService({
+  model: Mode,
+  allowedSorts: ["createdAt", "updatedAt", "label", "key"],
+  searchFields: ["key", "label", "description"],
+});
+
+const examTypeService = createCrudService({
+  model: ExamType,
+  allowedSorts: ["createdAt", "updatedAt", "name", "key", "label"],
+  searchFields: ["name", "key", "label", "description"],
+  beforeCreate: async (payload) => ({
+    name: normalizeExamType(payload.name),
+    description: payload.description || undefined,
+  }),
+  beforeUpdate: async (_existing, payload) => ({
+    ...(payload.name !== undefined ? { name: normalizeExamType(payload.name) } : {}),
+    ...(payload.description !== undefined ? { description: payload.description || undefined } : {}),
+  }),
+  beforeDelete: async (examType) => {
+    const examTypeName = String(examType.name || examType.key || examType.label || "").trim().toUpperCase();
+    const questionTypeFilters =
+      examTypeName === "JEE"
+        ? {
+            $or: [
+              { examType: "JEE" },
+              { examCategory: "JEE" },
+              { examCategory: "JEE_MAIN" },
+              { examCategory: "JEE_ADVANCED" },
+            ],
+          }
+        : {
+            $or: [
+              { examType: examTypeName },
+              { examCategory: examTypeName },
+            ],
+          };
+    const [subjectCount, yearCount, questionTypeCount] = await Promise.all([
+      Subject.countDocuments({ examType: examTypeName }),
+      Year.countDocuments({ examType: examTypeName }),
+      QuestionType.countDocuments(questionTypeFilters),
+    ]);
+    if (subjectCount > 0 || yearCount > 0 || questionTypeCount > 0) {
+      throw new AppError("Remove or reassign related subjects, years, and question types before deleting this exam type", 400);
+    }
+  },
+});
+
+const difficultyService = createCrudService({
+  model: Difficulty,
+  allowedSorts: ["createdAt", "updatedAt", "sortOrder", "name", "key"],
+  searchFields: ["name", "key", "description"],
+  beforeCreate: async (payload) => ({
+    ...payload,
+    key: String(payload.key ?? "").trim().toLowerCase(),
+    name: String(payload.name ?? "").trim(),
+  }),
+  beforeUpdate: async (_existing, payload) => ({
+    ...payload,
+    ...(payload.key !== undefined ? { key: String(payload.key).trim().toLowerCase() } : {}),
+    ...(payload.name !== undefined ? { name: String(payload.name).trim() } : {}),
+  }),
+});
+
+const subjectService = createCrudService({
+  model: Subject,
+  allowedSorts: ["createdAt", "updatedAt", "name", "examType"],
+  searchFields: ["name", "icon", "color"],
+  exactFilters: ["examType"],
+  beforeDelete: async (subject) => {
+    const [chapterCount, topicCount, questionCount] = await Promise.all([
+      Chapter.countDocuments({ subjectId: subject._id }),
+      Topic.countDocuments({ subjectId: subject._id }),
+      Question.countDocuments({ subjectId: subject._id }),
+    ]);
+    if (chapterCount > 0 || topicCount > 0 || questionCount > 0) {
+      throw new AppError("Delete related chapters, topics, and questions before removing this subject", 400);
+    }
+  },
+});
+
+const chapterService = createCrudService({
+  model: Chapter,
+  populate: ["subjectId"],
+  allowedSorts: ["createdAt", "updatedAt", "name"],
+  searchFields: ["name"],
+  exactFilters: ["subjectId"],
+  beforeDelete: async (chapter) => {
+    const [topicCount, questionCount] = await Promise.all([
+      Topic.countDocuments({ chapterId: chapter._id }),
+      Question.countDocuments({ chapterId: chapter._id }),
+    ]);
+    if (topicCount > 0 || questionCount > 0) {
+      throw new AppError("Delete related topics and questions before removing this chapter", 400);
+    }
+  },
+});
+
+const topicService = createCrudService({
+  model: Topic,
+  populate: ["subjectId", "chapterId"],
+  allowedSorts: ["createdAt", "updatedAt", "name"],
+  searchFields: ["name"],
+  exactFilters: ["subjectId", "chapterId"],
+  beforeCreate: async (payload) => {
+    const [subject, chapter] = await Promise.all([
+      Subject.findById(payload.subjectId),
+      Chapter.findById(payload.chapterId),
+    ]);
+    if (!subject) throw new AppError("Selected subject was not found", 400);
+    if (!chapter) throw new AppError("Selected chapter was not found", 400);
+    if (String(chapter.subjectId) !== String(subject._id)) {
+      throw new AppError("Chapter does not belong to the selected subject", 400);
+    }
+    return {
+      subjectId: String(subject._id),
+      chapterId: String(chapter._id),
+      name: String(payload.name || "").trim(),
+    };
+  },
+  beforeUpdate: async (existing, payload) => {
+    const nextSubjectId = payload.subjectId || String(existing.subjectId);
+    const nextChapterId = payload.chapterId || String(existing.chapterId);
+    const [subject, chapter] = await Promise.all([
+      Subject.findById(nextSubjectId),
+      Chapter.findById(nextChapterId),
+    ]);
+    if (!subject) throw new AppError("Selected subject was not found", 400);
+    if (!chapter) throw new AppError("Selected chapter was not found", 400);
+    if (String(chapter.subjectId) !== String(subject._id)) {
+      throw new AppError("Chapter does not belong to the selected subject", 400);
+    }
+    return {
+      ...(payload.subjectId !== undefined ? { subjectId: String(subject._id) } : {}),
+      ...(payload.chapterId !== undefined ? { chapterId: String(chapter._id) } : {}),
+      ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
+    };
+  },
+  beforeDelete: async (topic) => {
+    const questionCount = await Question.countDocuments({ topicId: topic._id });
+    if (questionCount > 0) throw new AppError("Delete related questions before removing this topic", 400);
+  },
+});
+
+const yearService = createCrudService({
+  model: Year,
+  allowedSorts: ["createdAt", "updatedAt", "name"],
+  searchFields: ["name"],
+  exactFilters: ["examType"],
+  beforeCreate: async (payload) => ({
+    ...payload,
+    examType: await ensureExamTypeExists(payload.examType),
+  }),
+  beforeUpdate: async (_existing, payload) => {
+    if (!payload.examType) return payload;
+    return {
+      ...payload,
+      examType: await ensureExamTypeExists(payload.examType),
+    };
+  },
+  beforeDelete: async (year) => {
+    const questionCount = await Question.countDocuments({ yearId: year._id });
+    if (questionCount > 0) throw new AppError("Delete related questions before removing this year", 400);
+  },
+});
+
+const questionTypeService = createCrudService({
+  model: QuestionType,
+  allowedSorts: ["createdAt", "updatedAt", "name", "examType", "label", "key"],
+  searchFields: ["name", "key", "label", "description"],
+  exactFilters: ["examType", "examCategory"],
+  beforeCreate: async (payload) => {
+    const examType = await ensureExamTypeExists(payload.examType || payload.examCategory);
+    return {
+      name: String(payload.name ?? payload.label ?? payload.key ?? "").trim(),
+      examType,
+      key: String(payload.key ?? "").trim() || undefined,
+      label: String(payload.label ?? "").trim() || undefined,
+      examCategory: examType,
+      description: String(payload.description ?? "").trim() || undefined,
+    };
+  },
+  beforeUpdate: async (existing, payload) => {
+    const examType = payload.examType || payload.examCategory || existing.examType || existing.examCategory;
+    const resolvedExamType = await ensureExamTypeExists(examType);
+    return {
+      ...(payload.name !== undefined ? { name: String(payload.name ?? payload.label ?? payload.key ?? "").trim() } : {}),
+      examType: resolvedExamType,
+      ...(payload.key !== undefined ? { key: String(payload.key).trim() || undefined } : {}),
+      ...(payload.label !== undefined ? { label: String(payload.label).trim() || undefined } : {}),
+      examCategory: resolvedExamType,
+      ...(payload.description !== undefined ? { description: String(payload.description ?? "").trim() || undefined } : {}),
+    };
+  },
+  beforeDelete: async (questionType) => {
+    const questionCount = await Question.countDocuments({ questionTypeId: questionType._id });
+    if (questionCount > 0) throw new AppError("Delete related questions before removing this question type", 400);
+  },
+});
+
+const questionService = createCrudService({
+  model: Question,
+  populate: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId"],
+  allowedSorts: ["createdAt", "updatedAt", "difficulty", "examMode", "exam"],
+  searchFields: ["question", "passage", "conceptTags"],
+  exactFilters: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId", "examMode", "difficulty", "responseType"],
+  beforeCreate: async (payload) => {
+    const normalizedPayload = normalizeQuestionExamFields(payload);
+    Object.assign(normalizedPayload, await resolveDifficultyPayload(normalizedPayload));
+    if (normalizedPayload.yearId) {
+      const year = await Year.findById(normalizedPayload.yearId);
+      if (!year) throw new AppError("Selected year was not found", 400);
+      normalizedPayload.yearId = String(year._id);
+    } else {
+      normalizedPayload.yearId = undefined;
+    }
+    const [subject, chapter, topic] = await Promise.all([
+      Subject.findById(normalizedPayload.subjectId),
+      normalizedPayload.chapterId ? Chapter.findById(normalizedPayload.chapterId) : Promise.resolve(null),
+      normalizedPayload.topicId ? Topic.findById(normalizedPayload.topicId) : Promise.resolve(null),
+    ]);
+    if (!subject) throw new AppError("Selected subject was not found", 400);
+    if (normalizedPayload.chapterId && !chapter) throw new AppError("Selected chapter was not found", 400);
+    if (!normalizedPayload.topicId || !topic) throw new AppError("Selected topic was not found", 400);
+    if (chapter && String(chapter.subjectId) !== String(subject._id)) {
+      throw new AppError("Chapter does not belong to the selected subject", 400);
+    }
+    if (String(topic.subjectId) !== String(subject._id) || String(topic.chapterId) !== String(chapter?._id)) {
+      throw new AppError("Topic does not belong to the selected chapter and subject", 400);
+    }
+    const examType = normalizedPayload.examType || deriveExamType(normalizedPayload.examMode, normalizedPayload.exam);
+    if (subject.examType !== examType) {
+      throw new AppError("Question exam selection must match the selected subject exam type", 400);
+    }
+    if (!isQuestionModeCompatible(normalizedPayload.examMode, normalizedPayload.exam)) {
+      throw new AppError("Question exam mode must match the selected exam", 400);
+    }
+    return normalizedPayload;
+  },
+  beforeUpdate: async (existing, payload) => {
+    const chapterIdWasProvided = Object.prototype.hasOwnProperty.call(payload, "chapterId");
+    const topicIdWasProvided = Object.prototype.hasOwnProperty.call(payload, "topicId");
+    const normalizedPayload = normalizeQuestionExamFields({
+      examType: payload.examType || deriveExamType(existing.examMode, existing.exam),
+      examMode: payload.examMode || existing.examMode,
+      exam: payload.exam || existing.exam,
+      ...payload,
+    });
+    if (Object.prototype.hasOwnProperty.call(payload, "difficultyId") || Object.prototype.hasOwnProperty.call(payload, "difficulty")) {
+      Object.assign(normalizedPayload, await resolveDifficultyPayload({
+        difficultyId: payload.difficultyId,
+        difficulty: payload.difficulty,
+      }));
+    }
+    if (normalizedPayload.yearId) {
+      const year = await Year.findById(normalizedPayload.yearId);
+      if (!year) throw new AppError("Selected year was not found", 400);
+      normalizedPayload.yearId = String(year._id);
+    } else if (Object.prototype.hasOwnProperty.call(payload, "yearId")) {
+      normalizedPayload.yearId = undefined;
+    }
+    const nextSubjectId = normalizedPayload.subjectId || String(existing.subjectId);
+    const nextChapterId = chapterIdWasProvided ? normalizedPayload.chapterId || undefined : String(existing.chapterId || "");
+    const nextTopicId = topicIdWasProvided ? normalizedPayload.topicId || undefined : String(existing.topicId || "");
+    const nextExamMode = normalizedPayload.examMode || existing.examMode;
+    const nextExam = normalizedPayload.exam || existing.exam;
+    const [subject, chapter, topic] = await Promise.all([
+      Subject.findById(nextSubjectId),
+      nextChapterId ? Chapter.findById(nextChapterId) : Promise.resolve(null),
+      nextTopicId ? Topic.findById(nextTopicId) : Promise.resolve(null),
+    ]);
+    if (!subject) throw new AppError("Selected subject was not found", 400);
+    if (nextChapterId && !chapter) throw new AppError("Selected chapter was not found", 400);
+    if (!nextTopicId || !topic) throw new AppError("Selected topic was not found", 400);
+    if (chapter && String(chapter.subjectId) !== String(subject._id)) {
+      throw new AppError("Chapter does not belong to the selected subject", 400);
+    }
+    if (String(topic.subjectId) !== String(subject._id) || String(topic.chapterId) !== String(chapter?._id)) {
+      throw new AppError("Topic does not belong to the selected chapter and subject", 400);
+    }
+    const examType = deriveExamType(nextExamMode, nextExam);
+    if (subject.examType !== examType) {
+      throw new AppError("Question exam selection must match the selected subject exam type", 400);
+    }
+    if (!isQuestionModeCompatible(nextExamMode, nextExam)) {
+      throw new AppError("Question exam mode must match the selected exam", 400);
+    }
+    if (chapterIdWasProvided && !normalizedPayload.chapterId) {
+      normalizedPayload.chapterId = undefined;
+    }
+    if (topicIdWasProvided && !normalizedPayload.topicId) {
+      normalizedPayload.topicId = undefined;
+    }
+    return normalizedPayload;
+  },
+});
+
+const userService = createCrudService({
+  model: User,
+  allowedSorts: ["createdAt", "updatedAt", "name", "mobile", "email"],
+  searchFields: ["name", "mobile", "email"],
+  exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete"],
+  beforeCreate: async (payload) => ({
+    ...payload,
+    passwordHash: payload.password ? hashPassword(payload.password) : undefined,
+    premiumExpiresAt: payload.premiumExpiresAt || undefined,
+  }),
+  beforeUpdate: async (_existing, payload) => ({
+    ...payload,
+    passwordHash: payload.password ? hashPassword(payload.password) : undefined,
+    premiumExpiresAt: payload.premiumExpiresAt || undefined,
+  }),
+  beforeDelete: async (user) => {
+    if (user.isAdmin) {
+      const adminCount = await User.countDocuments({ isAdmin: true });
+      if (adminCount <= 1) {
+        throw new AppError("Cannot delete the last admin", 400);
+      }
+    }
+  },
+});
+
+const couponService = createCrudService({
+  model: Coupon,
+  allowedSorts: ["createdAt", "updatedAt", "code", "value", "usedCount"],
+  searchFields: ["code", "type", "description"],
+  exactFilters: ["active", "type"],
+  beforeCreate: async (payload) => {
+    if (payload.type === "percent" && Number(payload.value) > 100) {
+      throw new AppError("Percentage coupon value cannot exceed 100", 400);
+    }
+    return {
+      ...payload,
+      code: String(payload.code || "").trim().toUpperCase(),
+      description: payload.description || undefined,
+      validFrom: payload.validFrom || undefined,
+      validUntil: payload.validUntil || undefined,
+      usageLimit: payload.usageLimit || undefined,
+      usedCount: payload.usedCount === "" || payload.usedCount === undefined ? 0 : payload.usedCount,
+    };
+  },
+  beforeUpdate: async (existing, payload) => {
+    const nextType = payload.type ?? existing.type;
+    const nextValue = payload.value ?? existing.value;
+    if (nextType === "percent" && Number(nextValue) > 100) {
+      throw new AppError("Percentage coupon value cannot exceed 100", 400);
+    }
+    return {
+      ...payload,
+      ...(payload.code !== undefined ? { code: String(payload.code || "").trim().toUpperCase() } : {}),
+      ...(payload.description !== undefined ? { description: payload.description || undefined } : {}),
+      ...(payload.validFrom !== undefined ? { validFrom: payload.validFrom || undefined } : {}),
+      ...(payload.validUntil !== undefined ? { validUntil: payload.validUntil || undefined } : {}),
+      ...(payload.usageLimit !== undefined ? { usageLimit: payload.usageLimit || undefined } : {}),
+      ...(payload.usedCount !== undefined ? { usedCount: payload.usedCount === "" ? 0 : payload.usedCount } : {}),
+    };
+  },
+});
+
+const subscriptionPlanService = createCrudService({
+  model: SubscriptionPlan,
+  allowedSorts: ["createdAt", "updatedAt", "name", "price", "durationMonths", "sortOrder"],
+  searchFields: ["planId", "name", "savings", "features"],
+  exactFilters: ["active"],
+  beforeCreate: async (payload) => {
+    const existingCount = await SubscriptionPlan.countDocuments();
+    if (existingCount > 0) {
+      throw new AppError("Only one subscription plan is supported right now. Update the existing plan instead.", 400);
+    }
+    return {
+      ...payload,
+      planId: String(payload.planId || "").trim(),
+      name: String(payload.name || "").trim(),
+      savings: payload.savings || undefined,
+      features: Array.isArray(payload.features) ? payload.features.map((item) => String(item).trim()).filter(Boolean) : [],
+    };
+  },
+  beforeUpdate: async (_existing, payload) => ({
+    ...payload,
+    planId: _existing.planId,
+    ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
+    ...(payload.savings !== undefined ? { savings: payload.savings || undefined } : {}),
+    ...(payload.features !== undefined
+      ? { features: Array.isArray(payload.features) ? payload.features.map((item) => String(item).trim()).filter(Boolean) : [] }
+      : {}),
+  }),
+  beforeDelete: async () => {
+    throw new AppError("Deleting subscription plans is disabled. Update the existing plan instead.", 400);
+  },
+});
+
+router.use("/modes", createCrudRouter({ key: "mode", label: "Mode", service: modeService }));
+router.use("/difficulties", createCrudRouter({ key: "difficulty", label: "Difficulty", service: difficultyService }));
+router.use("/exam-types", createCrudRouter({ key: "examType", label: "Exam Type", service: examTypeService }));
+router.use("/subjects", createCrudRouter({ key: "subject", label: "Subject", service: subjectService }));
+router.post("/chapters/free-access/bulk", asyncHandler(async (req, res) => {
+  const payload = chapterBulkFreeAccessSchema.parse(req.body || {});
+  const uniqueChapterIds = [...new Set((payload.chapterIds || []).map((item) => String(item).trim()).filter(Boolean))];
+  const shouldLock = Boolean(payload.isLockedForFreeUsers);
+
+  if (!payload.subjectId && uniqueChapterIds.length === 0) {
+    throw new AppError("Provide chapterIds or a subjectId for bulk chapter access update", 400);
+  }
+
+  let updateFilter = {};
+  if (payload.subjectId) {
+    updateFilter = { subjectId: payload.subjectId };
+  } else {
+    updateFilter = { _id: { $in: uniqueChapterIds } };
+  }
+
+  const updateResult = await Chapter.updateMany(updateFilter, { $set: { isLockedForFreeUsers: shouldLock } });
+  const updatedRows = await Chapter.find(updateFilter).select("_id name subjectId isLockedForFreeUsers").lean();
+
+  res.json({
+    success: true,
+    message: shouldLock ? "Selected chapters locked for free users" : "Selected chapters unlocked for free users",
+    data: {
+      matchedCount: Number(updateResult.matchedCount || 0),
+      modifiedCount: Number(updateResult.modifiedCount || 0),
+      chapters: updatedRows.map((item) => ({
+        id: String(item._id),
+        name: item.name,
+        subjectId: String(item.subjectId),
+        isLockedForFreeUsers: Boolean(item.isLockedForFreeUsers),
+      })),
+    },
+  });
+}));
+router.use("/chapters", createCrudRouter({ key: "chapter", label: "Chapter", service: chapterService }));
+router.use("/topics", createCrudRouter({ key: "topic", label: "Topic", service: topicService }));
+router.use("/years", createCrudRouter({ key: "year", label: "Year", service: yearService }));
+router.use("/question-types", createCrudRouter({ key: "questionType", label: "Question Type", service: questionTypeService }));
+router.use("/questions", createCrudRouter({ key: "question", label: "Question", service: questionService }));
+router.use("/users", createCrudRouter({ key: "user", label: "User", service: userService }));
+router.use("/coupons", createCrudRouter({ key: "coupon", label: "Coupon", service: couponService }));
+router.use(
+  "/subscription-plan-configs",
+  createCrudRouter({ key: "subscriptionPlan", label: "Subscription Plan", service: subscriptionPlanService }),
+);
+
+export default router;

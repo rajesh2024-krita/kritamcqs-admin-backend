@@ -1,0 +1,283 @@
+import { z } from "zod";
+import {
+  difficultySchema,
+  examCategorySchema,
+  examModeSchema,
+  examTypeSchema,
+  examSchema,
+  paginationQuerySchema,
+  passwordSchema,
+  responseTypeSchema,
+  userLevelSchema,
+} from "./common.js";
+
+export const listQuerySchema = z.object({
+  query: paginationQuerySchema.extend({
+    examMode: z.string().optional(),
+    examType: z.string().optional(),
+    mode: z.string().optional(),
+    modeId: z.string().optional(),
+    subjectId: z.string().optional(),
+    chapterId: z.string().optional(),
+    topicId: z.string().optional(),
+    yearId: z.string().optional(),
+    questionTypeId: z.string().optional(),
+    examCategory: z.string().optional(),
+    difficulty: z.string().optional(),
+    responseType: z.string().optional(),
+    isPremium: z.string().optional(),
+    isAdmin: z.string().optional(),
+    onboardingComplete: z.string().optional(),
+    active: z.string().optional(),
+    type: z.string().optional(),
+  }),
+});
+
+export const bulkDeleteSchema = z.object({
+  body: z.object({
+    ids: z.array(z.string().trim().min(1)).min(1).max(1000),
+  }),
+});
+
+export const modeBodySchema = z.object({
+  key: examModeSchema,
+  label: z.string().min(2).max(80),
+  description: z.string().max(500).optional().or(z.literal("")),
+});
+
+export const examTypeBodySchema = z.object({
+  name: examTypeSchema,
+  description: z.string().max(500).optional().or(z.literal("")),
+});
+
+export const subjectBodySchema = z.object({
+  name: z.string().min(2).max(120),
+  examType: examTypeSchema,
+  icon: z.string().max(80).optional().or(z.literal("")),
+  color: z.string().max(32).optional().or(z.literal("")),
+});
+
+export const chapterBodySchema = z.object({
+  subjectId: z.string().min(1),
+  name: z.string().min(2).max(120),
+  isLockedForFreeUsers: z.boolean().optional(),
+});
+
+export const topicBodySchema = z.object({
+  subjectId: z.string().min(1),
+  chapterId: z.string().min(1),
+  name: z.string().min(1).max(120),
+});
+
+export const difficultyBodySchema = z.object({
+  key: z.string().min(2).max(40),
+  name: z.string().min(2).max(80),
+  description: z.string().max(500).optional().or(z.literal("")),
+  sortOrder: z.coerce.number().int().min(0).optional().default(0),
+});
+
+export const yearBodySchema = z.object({
+  name: z.string().min(2).max(80),
+  examType: examTypeSchema,
+});
+
+export const questionTypeBodySchema = z.object({
+  name: z.string().min(2).max(120),
+  examType: examTypeSchema,
+  key: z.string().min(2).max(80).optional(),
+  label: z.string().min(2).max(120).optional(),
+  examCategory: examCategorySchema.optional(),
+  description: z.string().max(500).optional().or(z.literal("")),
+});
+
+export const questionBodySchema = z.object({
+  examType: examTypeSchema,
+  subjectId: z.string().min(1),
+  chapterId: z.string().min(1),
+  topicId: z.string().min(1),
+  yearId: z.string().min(1).optional().or(z.literal("")),
+  difficultyId: z.string().min(1).optional().or(z.literal("")),
+  questionTypeId: z.string().min(1),
+  question: z.string().trim().min(1),
+  questionImageUrl: z.string().optional().or(z.literal("")),
+  optionA: z.string().optional().or(z.literal("")),
+  optionAImageUrl: z.string().optional().or(z.literal("")),
+  optionB: z.string().optional().or(z.literal("")),
+  optionBImageUrl: z.string().optional().or(z.literal("")),
+  optionC: z.string().optional().or(z.literal("")),
+  optionCImageUrl: z.string().optional().or(z.literal("")),
+  optionD: z.string().optional().or(z.literal("")),
+  optionDImageUrl: z.string().optional().or(z.literal("")),
+  correctOption: z.enum(["A", "B", "C", "D"]).optional(),
+  explanation: z.string().optional().or(z.literal("")),
+  difficulty: difficultySchema.optional(),
+  examMode: examModeSchema.optional(),
+  exam: examSchema.optional(),
+  responseType: responseTypeSchema,
+  conceptTags: z.array(z.string().min(1)).optional().default([]),
+  numericAnswer: z.string().optional().or(z.literal("")),
+  passage: z.string().optional().or(z.literal("")),
+  hasDiagram: z.boolean().optional().default(false),
+  isNumerical: z.boolean().optional().default(false),
+}).superRefine((value, ctx) => {
+  if (!value.difficultyId && !value.difficulty) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["difficultyId"], message: "Difficulty is required." });
+  }
+  if (!value.question) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["question"], message: "Question text is required." });
+  }
+  if (value.responseType === "numeric" && !value.numericAnswer) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer is required." });
+  }
+  if (value.responseType !== "numeric" && !value.correctOption) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["correctOption"], message: "Correct option is required." });
+  }
+  if (value.responseType !== "numeric") {
+    ["A", "B", "C", "D"].forEach((optionKey) => {
+      const textValue = value[`option${optionKey}`];
+      if (!textValue) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [`option${optionKey}`],
+          message: `Option ${optionKey} is required.`,
+        });
+      }
+    });
+  }
+});
+
+export const questionUpdateBodySchema = z.object({
+  examType: examTypeSchema.optional(),
+  subjectId: z.string().min(1).optional(),
+  chapterId: z.string().min(1).optional().or(z.literal("")),
+  topicId: z.string().min(1).optional().or(z.literal("")),
+  yearId: z.string().min(1).optional().or(z.literal("")),
+  difficultyId: z.string().min(1).optional().or(z.literal("")),
+  questionTypeId: z.string().min(1).optional(),
+  question: z.string().trim().optional(),
+  questionImageUrl: z.string().optional().or(z.literal("")),
+  optionA: z.string().optional().or(z.literal("")),
+  optionAImageUrl: z.string().optional().or(z.literal("")),
+  optionB: z.string().optional().or(z.literal("")),
+  optionBImageUrl: z.string().optional().or(z.literal("")),
+  optionC: z.string().optional().or(z.literal("")),
+  optionCImageUrl: z.string().optional().or(z.literal("")),
+  optionD: z.string().optional().or(z.literal("")),
+  optionDImageUrl: z.string().optional().or(z.literal("")),
+  correctOption: z.enum(["A", "B", "C", "D"]).optional(),
+  explanation: z.string().optional().or(z.literal("")),
+  difficulty: difficultySchema.optional(),
+  examMode: examModeSchema.optional(),
+  exam: examSchema.optional(),
+  responseType: responseTypeSchema.optional(),
+  conceptTags: z.array(z.string().min(1)).optional(),
+  numericAnswer: z.string().optional().or(z.literal("")),
+  passage: z.string().optional().or(z.literal("")),
+  hasDiagram: z.boolean().optional(),
+  isNumerical: z.boolean().optional(),
+}).superRefine((value, ctx) => {
+  if (value.question !== undefined && value.question.trim() === "") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["question"], message: "Question text is required." });
+  }
+  if (value.responseType === "numeric" && value.numericAnswer === "") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer is required." });
+  }
+  if (value.responseType && value.responseType !== "numeric" && !value.correctOption) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["correctOption"], message: "Correct option is required when response type is objective." });
+  }
+  if (value.responseType && value.responseType !== "numeric") {
+    ["A", "B", "C", "D"].forEach((optionKey) => {
+      const textValue = value[`option${optionKey}`];
+      if (textValue !== undefined && String(textValue).trim() === "") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [`option${optionKey}`],
+          message: `Option ${optionKey} is required.`,
+        });
+      }
+    });
+  }
+});
+
+export const userBodySchema = z.object({
+  mobile: z.string().min(10).max(15),
+  email: z.string().email().optional().or(z.literal("")),
+  password: passwordSchema.optional(),
+  name: z.string().min(2).max(80),
+  examMode: examModeSchema.optional(),
+  level: userLevelSchema.optional(),
+  onboardingComplete: z.boolean().optional().default(false),
+  mobileVerified: z.boolean().optional().default(false),
+  isPremium: z.boolean().optional().default(false),
+  premiumExpiresAt: z.string().datetime().optional().or(z.literal("")),
+  isAdmin: z.boolean().optional().default(false),
+  migratedFromOldApp: z.boolean().optional().default(false),
+});
+
+export const userUpdateBodySchema = userBodySchema.partial();
+
+export const couponBodySchema = z.object({
+  code: z.string().min(2).max(40),
+  type: z.enum(["amount", "percent"]),
+  value: z.coerce.number().positive(),
+  active: z.boolean().optional().default(true),
+  validFrom: z.string().datetime().optional().or(z.literal("")),
+  validUntil: z.string().datetime().optional().or(z.literal("")),
+  usageLimit: z.union([z.literal(""), z.coerce.number().int().min(1)]).optional(),
+  usedCount: z.union([z.literal(""), z.coerce.number().int().min(0)]).optional().default(0),
+  description: z.string().max(500).optional().or(z.literal("")),
+});
+
+export const subscriptionPlanBodySchema = z.object({
+  planId: z.string().min(2).max(80),
+  name: z.string().min(2).max(120),
+  price: z.coerce.number().min(0),
+  durationMonths: z.coerce.number().int().min(1).max(60),
+  savings: z.string().max(160).optional().or(z.literal("")),
+  features: z.array(z.string().min(1)).optional().default([]),
+  active: z.boolean().optional().default(true),
+  sortOrder: z.coerce.number().int().min(0).optional().default(1),
+});
+
+export const dailyPlanBodySchema = z.object({
+  modeKey: examModeSchema,
+  selectionMode: z.enum(["random", "manual"]).optional().default("random"),
+  questionCount: z.coerce.number().int().min(1).max(200).optional().default(20),
+  manualQuestionIds: z.array(z.string().min(1)).optional().default([]),
+  autoFillRemaining: z.boolean().optional().default(true),
+  isActive: z.boolean().optional().default(true),
+  title: z.string().max(120).optional().or(z.literal("")),
+  description: z.string().max(500).optional().or(z.literal("")),
+});
+
+export const createSchemas = {
+  mode: z.object({ body: modeBodySchema }),
+  examType: z.object({ body: examTypeBodySchema }),
+  subject: z.object({ body: subjectBodySchema }),
+  chapter: z.object({ body: chapterBodySchema }),
+  topic: z.object({ body: topicBodySchema }),
+  difficulty: z.object({ body: difficultyBodySchema }),
+  year: z.object({ body: yearBodySchema }),
+  questionType: z.object({ body: questionTypeBodySchema }),
+  question: z.object({ body: questionBodySchema }),
+  user: z.object({ body: userBodySchema }),
+  coupon: z.object({ body: couponBodySchema }),
+  subscriptionPlan: z.object({ body: subscriptionPlanBodySchema }),
+  dailyPlan: z.object({ body: dailyPlanBodySchema }),
+};
+
+export const updateSchemas = {
+  mode: z.object({ body: modeBodySchema.partial() }),
+  examType: z.object({ body: examTypeBodySchema.partial() }),
+  subject: z.object({ body: subjectBodySchema.partial() }),
+  chapter: z.object({ body: chapterBodySchema.partial() }),
+  topic: z.object({ body: topicBodySchema.partial() }),
+  difficulty: z.object({ body: difficultyBodySchema.partial() }),
+  year: z.object({ body: yearBodySchema.partial() }),
+  questionType: z.object({ body: questionTypeBodySchema.partial() }),
+  question: z.object({ body: questionUpdateBodySchema }),
+  user: z.object({ body: userUpdateBodySchema }),
+  coupon: z.object({ body: couponBodySchema.partial() }),
+  subscriptionPlan: z.object({ body: subscriptionPlanBodySchema.partial() }),
+  dailyPlan: z.object({ body: dailyPlanBodySchema.partial() }),
+};
