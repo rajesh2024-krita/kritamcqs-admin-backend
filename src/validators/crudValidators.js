@@ -40,9 +40,17 @@ export const bulkDeleteSchema = z.object({
 });
 
 export const modeBodySchema = z.object({
-  key: examModeSchema,
+  key: z.string().trim().min(2).max(80),
   label: z.string().min(2).max(80),
   description: z.string().max(500).optional().or(z.literal("")),
+});
+
+export const learningLevelBodySchema = z.object({
+  key: z.string().trim().min(2).max(80),
+  label: z.string().trim().min(2).max(80),
+  description: z.string().max(500).optional().or(z.literal("")),
+  sortOrder: z.coerce.number().int().min(0).optional().default(0),
+  active: z.boolean().optional().default(true),
 });
 
 export const examTypeBodySchema = z.object({
@@ -252,6 +260,7 @@ export const dailyPlanBodySchema = z.object({
 
 export const createSchemas = {
   mode: z.object({ body: modeBodySchema }),
+  learningLevel: z.object({ body: learningLevelBodySchema }),
   examType: z.object({ body: examTypeBodySchema }),
   subject: z.object({ body: subjectBodySchema }),
   chapter: z.object({ body: chapterBodySchema }),
@@ -268,6 +277,7 @@ export const createSchemas = {
 
 export const updateSchemas = {
   mode: z.object({ body: modeBodySchema.partial() }),
+  learningLevel: z.object({ body: learningLevelBodySchema.partial() }),
   examType: z.object({ body: examTypeBodySchema.partial() }),
   subject: z.object({ body: subjectBodySchema.partial() }),
   chapter: z.object({ body: chapterBodySchema.partial() }),

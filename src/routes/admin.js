@@ -15,10 +15,15 @@ import {
   Difficulty,
   ExamType,
   ExamMarkingSettings,
+  Invoice,
+  InvoiceSettings,
   LearningSession,
+  LearningLevel,
   Mistake,
   MockTest,
   Mode,
+  NotificationSettings,
+  PaymentGatewaySettings,
   Question,
   QuestionAttempt,
   QuestionType,
@@ -29,6 +34,7 @@ import {
   Subscription,
   SubscriptionPlan,
   User,
+  UserNotification,
   Year,
 } from "../models/index.js";
 import { userInsightsController } from "../controllers/userInsightsController.js";
@@ -43,6 +49,7 @@ import { z } from "zod";
 import { questionBulkUploadService } from "../services/questionBulkUploadService.js";
 import { oldUserMigrationService } from "../services/oldUserMigrationService.js";
 import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName } from "../utils/uploadStorage.js";
+import { sendEmail } from "../utils/simpleEmail.js";
 import fs from "fs/promises";
 import { env } from "../config/env.js";
 import {
@@ -54,6 +61,49 @@ import { ownQuestionAssetUrl } from "../utils/questionAssetOwner.js";
 
 const router = Router();
 router.use(requireAdmin);
+
+const defaultInvoiceFields = [
+  { id: "invoiceNumber", label: "Invoice # {{invoiceNumber}}", x: 48, y: 118, size: 10, enabled: true },
+  { id: "issuedAt", label: "Issued: {{issuedAt}}", x: 48, y: 134, size: 10, enabled: true },
+  { id: "customer", label: "Bill To: {{userName}}", x: 48, y: 166, size: 11, enabled: true },
+  { id: "email", label: "Email: {{userEmail}}", x: 48, y: 182, size: 10, enabled: true },
+  { id: "paidStamp", label: "{{paidStampText}}", x: 430, y: 120, size: 30, enabled: true },
+];
+
+const defaultExpiryReminders = [10, 5, 2, 0].map((daysBefore) => ({
+  daysBefore,
+  enabled: true,
+  title: daysBefore === 0 ? "Premium expires today" : `Premium expires in ${daysBefore} days`,
+  body:
+    daysBefore === 0
+      ? "Your premium plan expires today. Renew to keep unlimited access."
+      : `Your premium plan expires in ${daysBefore} days. Renew to keep unlimited access.`,
+  emailSubject: daysBefore === 0 ? "Your Krita Premium expires today" : `Your Krita Premium expires in ${daysBefore} days`,
+  emailBody:
+    daysBefore === 0
+      ? "Hi {{userName}}, your premium plan expires today. Renew to continue uninterrupted access."
+      : "Hi {{userName}}, your premium plan expires in {{daysBefore}} days. Renew to continue uninterrupted access.",
+}));
+
+async function getInvoiceSettingsDoc() {
+  return InvoiceSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default", fields: defaultInvoiceFields } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
+
+async function getNotificationSettingsDoc() {
+  return NotificationSettings.findOneAndUpdate(
+    { key: "subscription-expiry" },
+    { $setOnInsert: { key: "subscription-expiry", reminders: defaultExpiryReminders } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
+
+function replaceTokens(template, data) {
+  return String(template || "").replace(/\{\{(\w+)\}\}/g, (_match, key) => String(data[key] ?? ""));
+}
 
 function resolvePublicAssetUrl(publicPath) {
   const appAssetBaseUrl = String(env.appAssetBaseUrl || "").replace(/\/+$/, "");
@@ -1650,11 +1700,107 @@ const cancelSubscriptionSchema = z.object({
   }),
 });
 
+const paymentGatewaySettingsSchema = z.object({
+  body: z.object({
+    provider: z.literal("razorpay").default("razorpay"),
+    razorpayKeyId: z.string().trim().min(1, "Razorpay Key ID is required"),
+    razorpayKeySecret: z.string().trim().optional().or(z.literal("")),
+    enabled: z.coerce.boolean().optional().default(true),
+  }),
+});
+
+function maskSecret(value) {
+  const text = String(value || "");
+  if (!text) return "";
+  if (text.length <= 8) return "••••";
+  return `${text.slice(0, 4)}••••${text.slice(-4)}`;
+}
+
+function mapPaymentGatewaySettings(settings) {
+  return {
+    provider: settings?.provider || "razorpay",
+    razorpayKeyId: settings?.razorpayKeyId || "",
+    razorpayKeySecretMasked: maskSecret(settings?.razorpayKeySecret),
+    hasRazorpayKeySecret: Boolean(settings?.razorpayKeySecret),
+    enabled: Boolean(settings?.enabled),
+    connectionStatus: settings?.connectionStatus || "not_configured",
+    connectionMessage: settings?.connectionMessage || "",
+    connectedAt: settings?.connectedAt,
+    updatedAt: settings?.updatedAt,
+  };
+}
+
+async function testRazorpayCredentials(keyId, keySecret) {
+  const credentials = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
+  const response = await fetch("https://api.razorpay.com/v1/payments?count=1", {
+    method: "GET",
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  if (!response.ok) {
+    let detail = "Razorpay rejected the configured credentials";
+    try {
+      const payload = await response.json();
+      detail = payload?.error?.description || payload?.error?.reason || detail;
+    } catch (_error) {
+      detail = `${detail} (${response.status})`;
+    }
+    throw new AppError(detail, 400);
+  }
+}
+
 router.get(
   "/subscription-plans",
   asyncHandler(async (_req, res) => {
     const plans = await SubscriptionPlan.find({}).sort({ sortOrder: 1, createdAt: 1 }).lean();
     res.json({ success: true, data: plans.map(mapSubscriptionPlan) });
+  }),
+);
+
+router.get(
+  "/payment-gateway-settings",
+  asyncHandler(async (_req, res) => {
+    const settings = await PaymentGatewaySettings.findOne({ provider: "razorpay" });
+    res.json({ success: true, data: mapPaymentGatewaySettings(settings) });
+  }),
+);
+
+router.post(
+  "/payment-gateway-settings",
+  validate(paymentGatewaySettingsSchema),
+  asyncHandler(async (req, res) => {
+    const { razorpayKeyId, razorpayKeySecret, enabled } = req.validated.body;
+    const existing = await PaymentGatewaySettings.findOne({ provider: "razorpay" });
+    const nextSecret = razorpayKeySecret || existing?.razorpayKeySecret;
+
+    if (!nextSecret) {
+      throw new AppError("Razorpay Key Secret is required", 400);
+    }
+
+    await testRazorpayCredentials(razorpayKeyId, nextSecret);
+
+    const settings = await PaymentGatewaySettings.findOneAndUpdate(
+      { provider: "razorpay" },
+      {
+        provider: "razorpay",
+        razorpayKeyId,
+        razorpayKeySecret: nextSecret,
+        enabled: Boolean(enabled),
+        connectionStatus: "connected",
+        connectionMessage: "Razorpay connection established successfully.",
+        connectedAt: new Date(),
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true },
+    );
+
+    res.json({
+      success: true,
+      message: "Razorpay connection established successfully",
+      data: mapPaymentGatewaySettings(settings),
+    });
   }),
 );
 
@@ -1830,6 +1976,7 @@ router.post(
   "/subscriptions/manual",
   validate(manualSubscriptionSchema),
   asyncHandler(async (req, res) => {
+    throw new AppError("Manual premium activation is disabled. Premium access is activated only after a successful Razorpay payment.", 400);
     const { userId, planId, status, startDate, endDate, paymentId, orderId, couponCode } = req.validated.body;
     const user = await User.findById(userId);
     if (!user) throw new AppError("Selected user was not found", 404);
@@ -1894,6 +2041,260 @@ router.post(
       success: true,
       message: "Subscription updated",
       data: subscription,
+    });
+  }),
+);
+
+router.get(
+  "/invoice-settings",
+  asyncHandler(async (_req, res) => {
+    const settings = await getInvoiceSettingsDoc();
+    res.json({ success: true, data: settings.toJSON() });
+  }),
+);
+
+router.post(
+  "/invoice-settings/logo",
+  upload.single("logo"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw new AppError("Logo file is required", 400);
+    const baseName = sanitizeFileName(req.file.originalname || "invoice-logo.png");
+    const dotIndex = baseName.lastIndexOf(".");
+    const ext = dotIndex > 0 ? baseName.slice(dotIndex) : ".png";
+    const fileName = `invoice-logo-${Date.now()}${ext}`;
+    const invoiceUploadsRoot = `${questionUploadsRoot}/../invoice-assets`;
+    ensureDir(invoiceUploadsRoot);
+    await fs.writeFile(`${invoiceUploadsRoot}/${fileName}`, req.file.buffer);
+    const logoUrl = `/uploads/invoice-assets/${fileName}`;
+    const settings = await getInvoiceSettingsDoc();
+    settings.logoUrl = logoUrl;
+    await settings.save();
+    res.status(201).json({ success: true, message: "Invoice logo uploaded", data: { logoUrl } });
+  }),
+);
+
+router.post(
+  "/invoice-settings",
+  asyncHandler(async (req, res) => {
+    const settings = await getInvoiceSettingsDoc();
+    const body = req.body || {};
+    settings.enabled = body.enabled === undefined ? settings.enabled : Boolean(body.enabled);
+    settings.emailEnabled = body.emailEnabled === undefined ? settings.emailEnabled : Boolean(body.emailEnabled);
+    settings.companyName = String(body.companyName || "Krita NEET JEE").trim();
+    settings.companyAddress = String(body.companyAddress || "");
+    settings.companyEmail = String(body.companyEmail || "");
+    settings.companyPhone = String(body.companyPhone || "");
+    settings.logoUrl = String(body.logoUrl || settings.logoUrl || "");
+    settings.templateTitle = String(body.templateTitle || "Tax Invoice");
+    settings.templateIntro = String(body.templateIntro || "");
+    settings.footerText = String(body.footerText || "");
+    settings.productDetailsTitle = String(body.productDetailsTitle || "Product Details");
+    settings.paidStampText = String(body.paidStampText || "PAID");
+    if (Array.isArray(body.fields)) {
+      settings.fields = body.fields.map((field) => ({
+        ...field,
+        id: String(field.id || `field-${Date.now()}`),
+        type: String(field.type || "text"),
+        label: String(field.label || field.content || ""),
+        content: String(field.content || field.label || ""),
+        src: String(field.src || ""),
+        x: Math.max(0, Math.min(560, Number(field.x || 48))),
+        y: Math.max(0, Math.min(820, Number(field.y || 120))),
+        width: Math.max(10, Math.min(595, Number(field.width || 120))),
+        height: Math.max(10, Math.min(842, Number(field.height || 80))),
+        size: Math.max(6, Math.min(96, Number(field.size || field.style?.fontSize || 10))),
+        rotation: Number(field.rotation || 0),
+        opacity: Math.max(0, Math.min(1, Number(field.opacity ?? 1))),
+        zIndex: Number(field.zIndex || 1),
+        enabled: field.enabled !== false,
+      }));
+    }
+    settings.page = body.page || settings.page || {};
+    settings.reusableBlocks = Array.isArray(body.reusableBlocks) ? body.reusableBlocks : settings.reusableBlocks;
+    settings.defaultTemplate = body.defaultTemplate === undefined ? settings.defaultTemplate : Boolean(body.defaultTemplate);
+    settings.versions = [
+      {
+        savedAt: new Date(),
+        label: `Version ${new Date().toLocaleString("en-IN")}`,
+        fields: settings.fields,
+        page: settings.page,
+      },
+      ...(Array.isArray(settings.versions) ? settings.versions.slice(0, 9) : []),
+    ];
+    const smtp = body.smtp || {};
+    settings.smtp = {
+      host: String(smtp.host || settings.smtp?.host || ""),
+      port: Number(smtp.port || settings.smtp?.port || 587),
+      secure: Boolean(smtp.secure),
+      user: String(smtp.user || settings.smtp?.user || ""),
+      pass: smtp.pass ? String(smtp.pass) : String(settings.smtp?.pass || ""),
+      fromName: String(smtp.fromName || settings.smtp?.fromName || "Krita Admin"),
+      fromEmail: String(smtp.fromEmail || settings.smtp?.fromEmail || ""),
+    };
+    await settings.save();
+    res.json({ success: true, message: "Invoice settings saved", data: settings.toJSON() });
+  }),
+);
+
+router.post(
+  "/invoice-settings/test-email",
+  asyncHandler(async (req, res) => {
+    const settings = await getInvoiceSettingsDoc();
+    const to = String(req.body?.to || settings.companyEmail || settings.smtp?.fromEmail || "").trim();
+    if (!to) throw new AppError("Test recipient email is required", 400);
+
+    const result = await sendEmail({
+      smtp: settings.smtp || {},
+      to,
+      subject: "Krita invoice SMTP test",
+      text: "SMTP is configured correctly for invoice and reminder emails.",
+    });
+
+    res.json({
+      success: true,
+      message: result.skipped ? "SMTP test skipped" : "SMTP test email sent",
+      data: result,
+    });
+  }),
+);
+
+router.get(
+  "/invoices",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 200);
+    const search = String(req.query.search || "").trim();
+    const filters = {};
+    if (req.query.status) filters.status = req.query.status;
+    if (req.query.emailStatus) filters.emailStatus = req.query.emailStatus;
+    if (search) {
+      filters.$or = [
+        { invoiceNumber: new RegExp(search, "i") },
+        { userName: new RegExp(search, "i") },
+        { userEmail: new RegExp(search, "i") },
+        { planId: new RegExp(search, "i") },
+      ];
+    }
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      Invoice.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Invoice.countDocuments(filters),
+    ]);
+    res.json({
+      success: true,
+      data: items.map((item) => ({ id: String(item._id), ...item })),
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.get(
+  "/notification-settings",
+  asyncHandler(async (_req, res) => {
+    const settings = await getNotificationSettingsDoc();
+    res.json({ success: true, data: settings.toJSON() });
+  }),
+);
+
+router.post(
+  "/notification-settings",
+  asyncHandler(async (req, res) => {
+    const settings = await getNotificationSettingsDoc();
+    const body = req.body || {};
+    settings.enabled = body.enabled === undefined ? settings.enabled : Boolean(body.enabled);
+    settings.emailEnabled = body.emailEnabled === undefined ? settings.emailEnabled : Boolean(body.emailEnabled);
+    settings.inAppEnabled = body.inAppEnabled === undefined ? settings.inAppEnabled : Boolean(body.inAppEnabled);
+    if (Array.isArray(body.reminders)) {
+      settings.reminders = body.reminders.map((item) => ({
+        daysBefore: Math.max(0, Number(item.daysBefore || 0)),
+        enabled: item.enabled !== false,
+        title: String(item.title || ""),
+        body: String(item.body || ""),
+        emailSubject: String(item.emailSubject || ""),
+        emailBody: String(item.emailBody || ""),
+      }));
+    }
+    await settings.save();
+    res.json({ success: true, message: "Notification settings saved", data: settings.toJSON() });
+  }),
+);
+
+router.post(
+  "/notification-settings/run-expiry-reminders",
+  asyncHandler(async (_req, res) => {
+    const settings = await getNotificationSettingsDoc();
+    let created = 0;
+    if (settings.enabled) {
+      const dayStart = new Date();
+      dayStart.setHours(0, 0, 0, 0);
+      for (const reminder of settings.reminders.filter((item) => item.enabled !== false)) {
+        const target = new Date(dayStart);
+        target.setDate(target.getDate() + Number(reminder.daysBefore || 0));
+        const next = new Date(target);
+        next.setDate(next.getDate() + 1);
+        const subscriptions = await Subscription.find({ status: "active", endDate: { $gte: target, $lt: next } }).lean();
+        for (const subscription of subscriptions) {
+          const user = await User.findById(subscription.userId).lean();
+          if (!user) continue;
+          const data = {
+            userName: user.name || user.mobile || "Learner",
+            daysBefore: reminder.daysBefore,
+            expiryDate: subscription.endDate ? new Date(subscription.endDate).toLocaleDateString("en-IN") : "",
+          };
+          const result = await UserNotification.updateOne(
+            { dedupeKey: `subscription-expiry:${subscription._id}:${reminder.daysBefore}` },
+            {
+              userId: String(subscription.userId),
+              type: "subscription",
+              title: replaceTokens(reminder.title, data),
+              body: replaceTokens(reminder.body, data),
+              visibleInApp: settings.inAppEnabled !== false,
+              dedupeKey: `subscription-expiry:${subscription._id}:${reminder.daysBefore}`,
+            },
+            { upsert: true },
+          );
+          if (result.upsertedCount) created += 1;
+        }
+      }
+    }
+    res.json({ success: true, message: "Expiry reminders processed", data: { created } });
+  }),
+);
+
+router.get(
+  "/sessions",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 200);
+    const search = String(req.query.search || "").trim();
+    const filters = {};
+    if (req.query.type) filters.type = req.query.type;
+    if (req.query.origin) filters.origin = req.query.origin;
+    if (req.query.userId) filters.userId = req.query.userId;
+    if (search) filters.title = new RegExp(search, "i");
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      LearningSession.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      LearningSession.countDocuments(filters),
+    ]);
+    const userIds = [...new Set(items.map((item) => String(item.userId)).filter(Boolean))];
+    const users = userIds.length ? await User.find({ _id: { $in: userIds } }).select("_id name email mobile").lean() : [];
+    const userMap = new Map(users.map((user) => [String(user._id), user]));
+    res.json({
+      success: true,
+      data: items.map((item) => ({
+        id: String(item._id),
+        ...item,
+        user: userMap.has(String(item.userId))
+          ? {
+              id: String(userMap.get(String(item.userId))._id),
+              name: userMap.get(String(item.userId)).name,
+              email: userMap.get(String(item.userId)).email,
+              mobile: userMap.get(String(item.userId)).mobile,
+            }
+          : null,
+      })),
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
     });
   }),
 );
@@ -2391,6 +2792,25 @@ const modeService = createCrudService({
   searchFields: ["key", "label", "description"],
 });
 
+const learningLevelService = createCrudService({
+  model: LearningLevel,
+  allowedSorts: ["createdAt", "updatedAt", "sortOrder", "label", "key"],
+  searchFields: ["key", "label", "description"],
+  exactFilters: ["active"],
+  beforeCreate: async (payload) => ({
+    ...payload,
+    key: String(payload.key || "").trim(),
+    label: String(payload.label || "").trim(),
+    description: payload.description || undefined,
+  }),
+  beforeUpdate: async (_existing, payload) => ({
+    ...payload,
+    ...(payload.key !== undefined ? { key: String(payload.key || "").trim() } : {}),
+    ...(payload.label !== undefined ? { label: String(payload.label || "").trim() } : {}),
+    ...(payload.description !== undefined ? { description: payload.description || undefined } : {}),
+  }),
+});
+
 const examTypeService = createCrudService({
   model: ExamType,
   allowedSorts: ["createdAt", "updatedAt", "name", "key", "label"],
@@ -2776,6 +3196,7 @@ const subscriptionPlanService = createCrudService({
 });
 
 router.use("/modes", createCrudRouter({ key: "mode", label: "Mode", service: modeService }));
+router.use("/learning-levels", createCrudRouter({ key: "learningLevel", label: "Learning Level", service: learningLevelService }));
 router.use("/difficulties", createCrudRouter({ key: "difficulty", label: "Difficulty", service: difficultyService }));
 router.use("/exam-types", createCrudRouter({ key: "examType", label: "Exam Type", service: examTypeService }));
 router.use("/subjects", createCrudRouter({ key: "subject", label: "Subject", service: subjectService }));

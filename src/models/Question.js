@@ -1,5 +1,5 @@
 import { Schema, Types, model, models, baseJsonOptions } from "./base.js";
-import { EXAMS, EXAM_MODES, QUESTION_DIFFICULTIES, QUESTION_RESPONSE_TYPES } from "../types/constants.js";
+import { EXAMS, QUESTION_DIFFICULTIES, QUESTION_RESPONSE_TYPES } from "../types/constants.js";
 
 const questionSchema = new Schema(
   {
@@ -22,7 +22,7 @@ const questionSchema = new Schema(
     correctOption: { type: String, enum: ["A", "B", "C", "D"] },
     explanation: { type: String, trim: true },
     difficulty: { type: String, enum: QUESTION_DIFFICULTIES, required: true, index: true },
-    examMode: { type: String, enum: EXAM_MODES, required: true, index: true },
+    examMode: { type: String, required: true, trim: true, index: true },
     exam: { type: String, enum: EXAMS, required: true, index: true },
     responseType: { type: String, enum: QUESTION_RESPONSE_TYPES, default: "single", index: true },
     conceptTags: { type: [String], default: [] },

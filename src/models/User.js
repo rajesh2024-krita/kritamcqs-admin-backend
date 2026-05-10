@@ -1,5 +1,4 @@
 import { Schema, model, models, baseJsonOptions } from "./base.js";
-import { EXAM_MODES, USER_LEVELS } from "../types/constants.js";
 
 const userSchema = new Schema(
   {
@@ -7,8 +6,9 @@ const userSchema = new Schema(
     email: { type: String, trim: true, lowercase: true, sparse: true, unique: true, index: true },
     passwordHash: { type: String },
     name: { type: String, trim: true },
-    examMode: { type: String, enum: EXAM_MODES, index: true },
-    level: { type: String, enum: USER_LEVELS },
+    address: { type: String, default: "" },
+    examMode: { type: String, trim: true, index: true },
+    level: { type: String, trim: true },
     onboardingComplete: { type: Boolean, default: false, index: true },
     mobileVerified: { type: Boolean, default: false, index: true },
     isPremium: { type: Boolean, default: false, index: true },

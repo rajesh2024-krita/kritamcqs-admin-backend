@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { EXAM_CATEGORIES, EXAM_MODES, EXAM_TYPES, EXAMS, QUESTION_DIFFICULTIES, QUESTION_RESPONSE_TYPES, USER_LEVELS } from "../types/constants.js";
+import { EXAM_CATEGORIES, EXAM_TYPES, EXAMS, QUESTION_DIFFICULTIES, QUESTION_RESPONSE_TYPES } from "../types/constants.js";
 
-export const examModeSchema = z.enum(EXAM_MODES);
+export const examModeSchema = z.string().trim().min(1).max(80);
 export const examTypeSchema = z.enum(EXAM_TYPES);
-export const userLevelSchema = z.enum(USER_LEVELS);
+export const userLevelSchema = z.string().trim().min(1).max(80);
 export const examCategorySchema = z.enum(EXAM_CATEGORIES).optional();
 export const examSchema = z.enum(EXAMS);
 export const difficultySchema = z.enum(QUESTION_DIFFICULTIES);
