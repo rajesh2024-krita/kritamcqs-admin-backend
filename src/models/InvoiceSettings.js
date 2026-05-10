@@ -3,7 +3,7 @@ import { Schema, model, models } from "./base.js";
 const fieldSchema = new Schema(
   {
     id: { type: String, required: true },
-    type: { type: String, enum: ["text", "image"], default: "text" },
+    type: { type: String, default: "text" },
     label: { type: String, default: "" },
     content: { type: String, default: "" },
     src: { type: String, default: "" },
@@ -40,6 +40,8 @@ const invoiceSettingsSchema = new Schema(
     productDetailsTitle: { type: String, default: "Product Details" },
     paidStampText: { type: String, default: "PAID" },
     fields: { type: [fieldSchema], default: [] },
+    activeTemplateId: { type: String, default: "" },
+    activeTemplateName: { type: String, default: "" },
     page: { type: Schema.Types.Mixed, default: { size: "A4", orientation: "portrait", margin: 32, snapToGrid: true, gridSize: 10 } },
     reusableBlocks: { type: [Schema.Types.Mixed], default: [] },
     versions: { type: [Schema.Types.Mixed], default: [] },

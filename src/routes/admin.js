@@ -48,9 +48,11 @@ import { upload } from "../middlewares/upload.js";
 import { z } from "zod";
 import { questionBulkUploadService } from "../services/questionBulkUploadService.js";
 import { oldUserMigrationService } from "../services/oldUserMigrationService.js";
-import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName } from "../utils/uploadStorage.js";
+import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName, uploadsRoot } from "../utils/uploadStorage.js";
 import { sendEmail } from "../utils/simpleEmail.js";
 import fs from "fs/promises";
+import path from "path";
+import crypto from "crypto";
 import { env } from "../config/env.js";
 import {
   deriveExamType,
@@ -103,6 +105,436 @@ async function getNotificationSettingsDoc() {
 
 function replaceTokens(template, data) {
   return String(template || "").replace(/\{\{(\w+)\}\}/g, (_match, key) => String(data[key] ?? ""));
+}
+
+function escPdf(value) {
+  return String(value ?? "").replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+}
+
+function textOp(text, x, y, size = 10) {
+  return `BT /F1 ${size} Tf ${x} ${842 - y} Td (${escPdf(text)}) Tj ET`;
+}
+
+function textStyleOp(raw = {}) {
+  const bold = String(raw.fontWeight || "").toLowerCase() === "bold" || Number(raw.fontWeight || 0) >= 600;
+  const italic = String(raw.fontStyle || "").toLowerCase() === "italic";
+  if (bold && italic) return "/F4";
+  if (bold) return "/F2";
+  if (italic) return "/F3";
+  return "/F1";
+}
+
+function hexToRgb(value, fallback = [0, 0, 0]) {
+  const hex = String(value || "").trim();
+  const match = hex.match(/^#?([0-9a-f]{6})$/i);
+  if (!match) return fallback;
+  const raw = match[1];
+  return [parseInt(raw.slice(0, 2), 16) / 255, parseInt(raw.slice(2, 4), 16) / 255, parseInt(raw.slice(4, 6), 16) / 255];
+}
+
+function colorOp(fill = "#000000", stroke = fill) {
+  const [fr, fg, fb] = hexToRgb(fill);
+  const [sr, sg, sb] = hexToRgb(stroke, [fr, fg, fb]);
+  return `${fr.toFixed(3)} ${fg.toFixed(3)} ${fb.toFixed(3)} rg ${sr.toFixed(3)} ${sg.toFixed(3)} ${sb.toFixed(3)} RG`;
+}
+
+function coloredTextOp(text, x, y, size = 10, color = "#000000") {
+  return `${colorOp(color)} ${textOp(text, x, y, size)} 0 0 0 rg 0 0 0 RG`;
+}
+
+function styledTextOp(text, x, y, size = 10, color = "#000000", raw = {}) {
+  const angle = Number(raw.angle || 0);
+  const font = textStyleOp(raw);
+  const safeText = escPdf(text);
+  const drawText = angle
+    ? `BT ${font} ${size} Tf ${angleMatrix(angle, x, 842 - y)} Tm (${safeText}) Tj ET`
+    : `BT ${font} ${size} Tf ${x} ${842 - y} Td (${safeText}) Tj ET`;
+  return `${colorOp(color)} ${drawText} 0 0 0 rg 0 0 0 RG`;
+}
+
+function angleMatrix(degrees, x = 0, y = 0) {
+  const radians = (Number(degrees || 0) * Math.PI) / 180;
+  const cos = Math.cos(radians).toFixed(6);
+  const sin = Math.sin(radians).toFixed(6);
+  return `${cos} ${sin} ${(-Math.sin(radians)).toFixed(6)} ${cos} ${x} ${y}`;
+}
+
+function lineOp(x1, y1, x2, y2) {
+  return `${x1} ${842 - y1} m ${x2} ${842 - y2} l S`;
+}
+
+function rectOp(x, y, width, height) {
+  return `${x} ${842 - y - height} ${width} ${height} re S`;
+}
+
+function fillRectOp(x, y, width, height, shade = 0.94) {
+  return `${shade} g ${x} ${842 - y - height} ${width} ${height} re f 0 g`;
+}
+
+function colorRectOp(x, y, width, height, fill = "#ffffff", stroke = "#000000", strokeWidth = 0) {
+  const draw = Number(strokeWidth || 0) > 0 ? "B" : "f";
+  return `${colorOp(fill, stroke)} ${Number(strokeWidth || 0)} w ${x} ${842 - y - height} ${width} ${height} re ${draw} 0 0 0 rg 0 0 0 RG 1 w`;
+}
+
+function rotateOp(inner, x, y, angle = 0) {
+  if (!Number(angle)) return inner;
+  const radians = (Number(angle) * Math.PI) / 180;
+  const cos = Math.cos(radians).toFixed(6);
+  const sin = Math.sin(radians).toFixed(6);
+  const px = Number(x || 0);
+  const py = 842 - Number(y || 0);
+  return `q 1 0 0 1 ${px} ${py} cm ${cos} ${sin} ${(-Math.sin(radians)).toFixed(6)} ${cos} 0 0 cm 1 0 0 1 ${-px} ${-py} cm ${inner} Q`;
+}
+
+function colorCircleOp(x, y, radius, fill = "#ffffff", stroke = "#000000", strokeWidth = 0) {
+  const c = 0.5522847498;
+  const cx = x + radius;
+  const cy = 842 - (y + radius);
+  const r = radius;
+  const draw = Number(strokeWidth || 0) > 0 ? "B" : "f";
+  return `${colorOp(fill, stroke)} ${Number(strokeWidth || 0)} w ${cx + r} ${cy} m ${cx + r} ${cy + c * r} ${cx + c * r} ${cy + r} ${cx} ${cy + r} c ${cx - c * r} ${cy + r} ${cx - r} ${cy + c * r} ${cx - r} ${cy} c ${cx - r} ${cy - c * r} ${cx - c * r} ${cy - r} ${cx} ${cy - r} c ${cx + c * r} ${cy - r} ${cx + r} ${cy - c * r} ${cx + r} ${cy} c ${draw} 0 0 0 rg 0 0 0 RG 1 w`;
+}
+
+function colorTriangleOp(x, y, width, height, fill = "#ffffff", stroke = "#000000", strokeWidth = 0) {
+  const draw = Number(strokeWidth || 0) > 0 ? "B" : "f";
+  return `${colorOp(fill, stroke)} ${Number(strokeWidth || 0)} w ${x + width / 2} ${842 - y} m ${x + width} ${842 - y - height} l ${x} ${842 - y - height} l h ${draw} 0 0 0 rg 0 0 0 RG 1 w`;
+}
+
+function textLines(text, x, y, size = 10, lineHeight = 14) {
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .filter((line) => line.trim())
+    .map((line, index) => textOp(line, x, y + index * lineHeight, size));
+}
+
+function pageMetricsFromFields(fields) {
+  const first = fields.find((field) => field?.raw?.pageWidth && field?.raw?.pageHeight);
+  const pageWidth = Number(first?.raw?.pageWidth || 794);
+  const pageHeight = Number(first?.raw?.pageHeight || 1123);
+  return {
+    scaleX: 595 / pageWidth,
+    scaleY: 842 / pageHeight,
+    pageLeft: 0,
+    pageTop: 0,
+  };
+}
+
+function imageSizeFromJpeg(buffer) {
+  let offset = 2;
+  while (offset < buffer.length) {
+    if (buffer[offset] !== 0xff) break;
+    const marker = buffer[offset + 1];
+    const length = buffer.readUInt16BE(offset + 2);
+    if (marker >= 0xc0 && marker <= 0xc3) {
+      return { width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5) };
+    }
+    offset += 2 + length;
+  }
+  return null;
+}
+
+function imageFromDataUrl(src, width, height) {
+  const match = String(src || "").match(/^data:image\/jpe?g;base64,(.+)$/i);
+  if (!match) return null;
+  const buffer = Buffer.from(match[1], "base64");
+  const size = imageSizeFromJpeg(buffer) || { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+  return { buffer, width: size.width, height: size.height };
+}
+
+function imageOp(name, x, y, width, height) {
+  return `q ${width} 0 0 ${height} ${x} ${842 - y - height} cm /${name} Do Q`;
+}
+
+function settingsWithInvoiceTemplate(settings, invoice = {}) {
+  const source = typeof settings?.toJSON === "function" ? settings.toJSON() : { ...(settings || {}) };
+  const templates = Array.isArray(source.reusableBlocks)
+    ? source.reusableBlocks.filter((item) => item?.type === "fabric-template")
+    : [];
+  const invoiceTemplate = invoice?.templateId
+    ? templates.find((item) => String(item.id) === String(invoice.templateId))
+    : null;
+  const active = invoiceTemplate || templates.find((item) => item.active) || templates.find((item) => String(item.id) === String(source.activeTemplateId)) || templates[0];
+  if (Array.isArray(active?.fields) && active.fields.length) {
+    return {
+      ...source,
+      fields: active.fields,
+      activeTemplateId: active.id || source.activeTemplateId,
+      activeTemplateName: active.name || source.activeTemplateName,
+    };
+  }
+  return source;
+}
+
+function fieldGeometry(field, metrics) {
+  const raw = field.raw || field;
+  const hasNormalized = Number.isFinite(Number(raw.pageX)) && Number.isFinite(Number(raw.pageY));
+  const x = Number(field.x ?? (hasNormalized ? Number(raw.pageX || 0) * metrics.scaleX : (Number(raw.left || 0) - metrics.pageLeft) * metrics.scaleX));
+  const y = Number(field.y ?? (hasNormalized ? Number(raw.pageY || 0) * metrics.scaleY : (Number(raw.top || 0) - metrics.pageTop) * metrics.scaleY));
+  const width = Number(field.width ?? ((raw.scaledWidth ?? Number(raw.width || 80) * Number(raw.scaleX ?? 1)) * metrics.scaleX));
+  const height = Number(field.height ?? ((raw.scaledHeight ?? Number(raw.height || 30) * Number(raw.scaleY ?? 1)) * metrics.scaleY));
+  return {
+    x: Math.max(0, x),
+    y: Math.max(0, y),
+    width: Math.max(1, width),
+    height: Math.max(1, height),
+  };
+}
+
+function drawInvoiceTable(field, data, metrics) {
+  const raw = field.raw || field;
+  const meta = raw.invoiceTable || field.invoiceTable;
+  if (!meta) return [];
+  const { x, y, width, height } = fieldGeometry(field, metrics);
+  const cols = Math.max(1, Number(meta.cols || meta.headers?.length || 1));
+  const rows = Math.max(1, Number(meta.rows || 1));
+  const rowHeight = height / rows;
+  const colWidth = width / cols;
+  const headers = Array.from({ length: cols }).map((_, index) => meta.headers?.[index] || `Column ${index + 1}`);
+  const cells = Array.isArray(meta.cells) ? meta.cells : [];
+  const ops = [];
+
+  headers.forEach((header, index) => {
+    const cellX = x + index * colWidth;
+    ops.push(colorRectOp(cellX, y, colWidth, rowHeight, "#0f172a", "#cbd5e1", 0.7));
+    ops.push(styledTextOp(replaceTokens(header, data), cellX + 6, y + rowHeight / 2 + 4, Math.max(4, rowHeight * 0.32), "#ffffff", { fontWeight: "bold" }));
+  });
+
+  for (let row = 1; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const cellX = x + col * colWidth;
+      const cellY = y + row * rowHeight;
+      const value = cells[row - 1]?.[col] ?? "";
+      ops.push(colorRectOp(cellX, cellY, colWidth, rowHeight, "#ffffff", "#cbd5e1", 0.5));
+      ops.push(styledTextOp(replaceTokens(value, data), cellX + 6, cellY + rowHeight / 2 + 4, Math.max(4, rowHeight * 0.3), "#334155", {}));
+    }
+  }
+  return ops;
+}
+
+function drawFieldObject(field, data, metrics, offsetX = 0, offsetY = 0, images = []) {
+  const raw = field.raw || field;
+  const type = String(raw.type || field.type || "").toLowerCase();
+  const geometry = fieldGeometry(field, metrics);
+  const x = geometry.x + offsetX;
+  const y = geometry.y + offsetY;
+  const width = geometry.width;
+  const height = geometry.height;
+  const fill = raw.fill || field.style?.fill || field.style?.color || "#111827";
+  const stroke = raw.stroke || field.style?.stroke || "#000000";
+  const strokeWidth = Number(raw.strokeWidth ?? field.style?.strokeWidth ?? 0);
+  const ops = [];
+
+  if ((type === "group" || type === "table") && (raw.invoiceTable || field.invoiceTable)) {
+    ops.push(...drawInvoiceTable(field, data, metrics));
+  } else if (type === "text" || type === "i-text") {
+    const content = replaceTokens(raw.text || field.content || field.label || "", data);
+    const fontSize = Math.max(1, Number(field.size ?? (Number(raw.fontSize || 10) * metrics.scaleY)));
+    ops.push(...String(content).split(/\r?\n/).flatMap((line, index) => styledTextOp(line, x, y + index * (fontSize + 4), fontSize, fill, raw)));
+  } else if (type === "rect") {
+    ops.push(rotateOp(colorRectOp(x, y, width, height, fill, stroke, strokeWidth), x, y, raw.angle));
+  } else if (type === "circle") {
+    ops.push(rotateOp(colorCircleOp(x, y, Math.max(1, Math.min(width, height) / 2), fill, stroke, strokeWidth), x, y, raw.angle));
+  } else if (type === "triangle") {
+    ops.push(rotateOp(colorTriangleOp(x, y, width, height, fill, stroke, strokeWidth), x, y, raw.angle));
+  } else if (type === "group" && Array.isArray(raw.objects)) {
+    raw.objects.forEach((child) => {
+      const childWidth = Math.max(1, Number(child.width || 40) * Number(child.scaleX ?? 1) * metrics.scaleX);
+      const childHeight = Math.max(1, Number(child.height || 20) * Number(child.scaleY ?? 1) * metrics.scaleY);
+      const childField = {
+        ...field,
+        raw: child,
+        x: x + (Number(child.left || 0) + Number(raw.width || 0) / 2) * metrics.scaleX,
+        y: y + (Number(child.top || 0) + Number(raw.height || 0) / 2) * metrics.scaleY,
+        width: childWidth,
+        height: childHeight,
+        size: Math.max(1, Number(child.fontSize || 10) * metrics.scaleY),
+      };
+      ops.push(...drawFieldObject(childField, data, metrics, 0, 0, images));
+    });
+  } else if (type === "image") {
+    const image = imageFromDataUrl(raw.src || field.src, width, height);
+    if (image) {
+      const name = `Im${images.length + 1}`;
+      images.push({ name, ...image });
+      ops.push(rotateOp(imageOp(name, x, y, width, height), x, y, raw.angle));
+    }
+  }
+
+  return ops;
+}
+
+function buildPdf(lines, images = []) {
+  const objects = [];
+  const add = (value) => {
+    objects.push(value);
+    return objects.length;
+  };
+  const content = lines.join("\n");
+  const addStream = (dict, buffer) => add({
+    dict: `<< ${dict} /Length ${buffer.length} >>`,
+    stream: buffer,
+  });
+  const contentId = addStream("", Buffer.from(content, "utf8"));
+  const fontId = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>");
+  const boldFontId = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>");
+  const italicFontId = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Oblique >>");
+  const boldItalicFontId = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-BoldOblique >>");
+  const imageIds = images.map((image) => addStream(
+    `/Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode`,
+    image.buffer,
+  ));
+  const xObjectResources = imageIds.length
+    ? ` /XObject << ${images.map((image, index) => `/${image.name} ${imageIds[index]} 0 R`).join(" ")} >>`
+    : "";
+  const pageId = objects.length + 1;
+  const pagesId = pageId + 1;
+  add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 ${fontId} 0 R /F2 ${boldFontId} 0 R /F3 ${italicFontId} 0 R /F4 ${boldItalicFontId} 0 R >>${xObjectResources} >> /Contents ${contentId} 0 R >>`);
+  add(`<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`);
+  const catalogId = add(`<< /Type /Catalog /Pages ${pagesId} 0 R >>`);
+  const chunks = [Buffer.from("%PDF-1.4\n", "utf8")];
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.concat(chunks).length);
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n`, "utf8"));
+    if (typeof object === "string") {
+      chunks.push(Buffer.from(`${object}\n`, "utf8"));
+    } else {
+      chunks.push(Buffer.from(`${object.dict}\nstream\n`, "utf8"), object.stream, Buffer.from("\nendstream\n", "utf8"));
+    }
+    chunks.push(Buffer.from("endobj\n", "utf8"));
+  });
+  const xref = Buffer.concat(chunks).length;
+  chunks.push(Buffer.from(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`, "utf8"));
+  offsets.slice(1).forEach((offset) => chunks.push(Buffer.from(`${String(offset).padStart(10, "0")} 00000 n \n`, "utf8")));
+  chunks.push(Buffer.from(`trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF`, "utf8"));
+  return Buffer.concat(chunks);
+}
+
+function invoiceData(input = {}) {
+  const firstItem = Array.isArray(input.items) ? input.items[0] || {} : {};
+  const formatCurrency = (value) => `${input.currency || "INR"} ${Number(value || 0).toFixed(2)}`;
+  return {
+    invoiceNumber: input.invoiceNumber || "",
+    invoiceDate: input.invoiceDate ? new Date(input.invoiceDate).toLocaleDateString("en-IN") : new Date().toLocaleDateString("en-IN"),
+    dueDate: input.dueDate ? new Date(input.dueDate).toLocaleDateString("en-IN") : "",
+    userName: input.userName || input.customerCompany?.name || "Customer",
+    userEmail: input.userEmail || input.customerCompany?.email || "",
+    userMobile: input.userMobile || input.customerCompany?.phone || "",
+    customerAddress: input.customerCompany?.address || "",
+    customerGstin: input.customerCompany?.gstin || "",
+    planName: input.planName || input.planId || firstItem.product || "Premium Subscription",
+    productDescription: firstItem.description || "Premium subscription purchase",
+    quantity: firstItem.quantity || 1,
+    baseAmount: formatCurrency(input.subtotal ?? firstItem.price ?? input.amount),
+    discountAmount: formatCurrency(input.discountTotal || 0),
+    taxAmount: formatCurrency(input.taxTotal || 0),
+    amount: formatCurrency(input.amount || input.grandTotal),
+    totalAmount: formatCurrency(input.grandTotal || input.amount),
+    paymentStatus: String(input.status || "paid").toUpperCase(),
+    transactionId: input.transactionId || "",
+    paidStampText: input.paidStampText || "PAID",
+  };
+}
+
+function getActiveInvoiceTemplate(settings) {
+  const templates = Array.isArray(settings?.reusableBlocks)
+    ? settings.reusableBlocks.filter((item) => item?.type === "fabric-template")
+    : [];
+  return templates.find((item) => item.active) || templates[0] || null;
+}
+
+async function renderInvoicePdf(invoice, settings, extras = {}) {
+  const source = { ...(typeof invoice?.toJSON === "function" ? invoice.toJSON() : invoice), ...extras };
+  const effectiveSettings = settingsWithInvoiceTemplate(settings, source);
+  const data = invoiceData({ ...source, paidStampText: effectiveSettings.paidStampText });
+  const mappedFields = Array.isArray(effectiveSettings.fields)
+    ? effectiveSettings.fields.filter((field) => field?.enabled !== false && (field?.raw || String(field?.label || field?.content || "").trim()))
+    : [];
+  if (mappedFields.length) {
+    const metrics = pageMetricsFromFields(mappedFields);
+    const images = [];
+    const content = [
+      fillRectOp(0, 0, 595, 842, 1),
+      ...mappedFields
+        .sort((left, right) => Number(left.zIndex || 0) - Number(right.zIndex || 0))
+        .flatMap((field) => drawFieldObject(field, data, metrics, 0, 0, images)),
+    ];
+    return buildPdf(content, images);
+  }
+  const items = Array.isArray(source.items) && source.items.length
+    ? source.items
+    : [{ product: data.planName, description: data.productDescription, quantity: data.quantity, price: source.amount, discount: 0, tax: 0, total: source.amount }];
+  const companyLines = [effectiveSettings.companyName || "Krita NEET JEE", effectiveSettings.companyAddress, effectiveSettings.companyEmail, effectiveSettings.companyPhone].filter(Boolean);
+  const customerLines = [
+    source.customerCompany?.name || data.userName,
+    source.customerCompany?.email || data.userEmail,
+    source.customerCompany?.phone || data.userMobile,
+    source.customerCompany?.address || data.customerAddress,
+    source.customerCompany?.gstin ? `GSTIN: ${source.customerCompany.gstin}` : "",
+  ].filter(Boolean);
+  const content = [
+    fillRectOp(0, 0, 595, 96, 0.97),
+    ...textLines(companyLines.join("\n"), 42, 34, 10, 13),
+    textOp(String(effectiveSettings.templateTitle || "Tax Invoice").toUpperCase(), 392, 34, 14),
+    textOp("INVOICE", 392, 54, 30),
+    lineOp(42, 112, 553, 112),
+    textOp(`Invoice No: ${data.invoiceNumber || "-"}`, 42, 136, 10),
+    textOp(`Invoice Date: ${data.invoiceDate || "-"}`, 42, 153, 10),
+    textOp(`Due Date: ${data.dueDate || "-"}`, 42, 170, 10),
+    textOp(`Status: ${data.paymentStatus || "-"}`, 392, 136, 10),
+    textOp(`Transaction ID: ${data.transactionId || "-"}`, 392, 153, 10),
+    textOp("Bill To", 42, 214, 13),
+    rectOp(42, 226, 230, 88),
+    ...textLines(customerLines.join("\n") || "Customer", 54, 246, 9, 13),
+    textOp("Payment Summary", 332, 214, 13),
+    rectOp(332, 226, 221, 88),
+    textOp(`Subtotal: ${data.baseAmount}`, 344, 246, 9),
+    textOp(`Discount: ${data.discountAmount}`, 344, 263, 9),
+    textOp(`Tax: ${data.taxAmount}`, 344, 280, 9),
+    textOp(`Total: ${data.totalAmount}`, 344, 300, 11),
+    textOp(String(effectiveSettings.productDetailsTitle || "Product Details"), 42, 348, 13),
+    fillRectOp(42, 362, 511, 24, 0.92),
+    textOp("Item", 54, 378, 9),
+    textOp("Qty", 300, 378, 9),
+    textOp("Rate", 350, 378, 9),
+    textOp("Discount", 418, 378, 9),
+    textOp("Amount", 500, 378, 9),
+  ];
+  items.slice(0, 8).forEach((item, index) => {
+    const y = 406 + index * 28;
+    const amount = Number((item.total ?? (Number(item.quantity || 1) * Number(item.price || 0) - Number(item.discount || 0))) || 0);
+    content.push(
+      lineOp(42, y - 13, 553, y - 13),
+      textOp(String(item.product || item.description || data.planName || "Item").slice(0, 45), 54, y, 9),
+      textOp(String(item.quantity || 1), 304, y, 9),
+      textOp(`${source.currency || "INR"} ${Number(item.price || 0).toFixed(2)}`, 350, y, 9),
+      textOp(`${source.currency || "INR"} ${Number(item.discount || 0).toFixed(2)}`, 418, y, 9),
+      textOp(`${source.currency || "INR"} ${amount.toFixed(2)}`, 500, y, 9),
+    );
+  });
+  content.push(
+    lineOp(42, 634, 553, 634),
+    textOp(`Grand Total: ${data.totalAmount}`, 392, 662, 14),
+    ...(source.notes ? [textOp("Notes", 42, 680, 11), ...textLines(source.notes, 42, 696, 9, 13)] : []),
+    ...(source.terms ? [textOp("Terms", 42, 736, 11), ...textLines(source.terms, 42, 752, 9, 13)] : []),
+    textOp(effectiveSettings.footerText || "This is a computer-generated invoice.", 42, 802, 8),
+  );
+  return buildPdf(content);
+}
+
+async function saveInvoicePdf(buffer, invoiceNumber) {
+  const dir = path.join(uploadsRoot, "invoices");
+  ensureDir(dir);
+  const fileName = `${String(invoiceNumber || `INV-${Date.now()}`).replace(/[^a-z0-9_-]/gi, "-")}.pdf`;
+  await fs.writeFile(path.join(dir, fileName), buffer);
+  return `/uploads/invoices/${fileName}`;
+}
+
+async function regenerateInvoicePdf(invoice, settings = null, extras = {}) {
+  const resolvedSettings = settings || await getInvoiceSettingsDoc();
+  const pdf = await renderInvoicePdf(invoice, resolvedSettings, extras);
+  invoice.pdfPath = await saveInvoicePdf(pdf, invoice.invoiceNumber);
+  return pdf;
 }
 
 function resolvePublicAssetUrl(publicPath) {
@@ -2090,8 +2522,7 @@ router.post(
     settings.footerText = String(body.footerText || "");
     settings.productDetailsTitle = String(body.productDetailsTitle || "Product Details");
     settings.paidStampText = String(body.paidStampText || "PAID");
-    if (Array.isArray(body.fields)) {
-      settings.fields = body.fields.map((field) => ({
+    const normalizeFields = (fields = []) => fields.map((field) => ({
         ...field,
         id: String(field.id || `field-${Date.now()}`),
         type: String(field.type || "text"),
@@ -2108,9 +2539,25 @@ router.post(
         zIndex: Number(field.zIndex || 1),
         enabled: field.enabled !== false,
       }));
+    if (Array.isArray(body.fields)) {
+      settings.fields = normalizeFields(body.fields);
     }
     settings.page = body.page || settings.page || {};
-    settings.reusableBlocks = Array.isArray(body.reusableBlocks) ? body.reusableBlocks : settings.reusableBlocks;
+    if (Array.isArray(body.reusableBlocks)) {
+      const blocks = body.reusableBlocks.map((block) => ({
+        ...block,
+        id: String(block.id || `template-${Date.now()}-${Math.floor(Math.random() * 1000)}`),
+        name: String(block.name || "Invoice Template"),
+        type: String(block.type || "fabric-template"),
+        fields: Array.isArray(block.fields) ? normalizeFields(block.fields) : block.fields,
+      }));
+      const activeIndex = blocks.findIndex((block) => block.type === "fabric-template" && block.active);
+      settings.reusableBlocks = blocks.map((block, index) => block.type === "fabric-template" ? { ...block, active: activeIndex >= 0 ? index === activeIndex : index === 0 } : block);
+      const active = getActiveInvoiceTemplate(settings);
+      settings.activeTemplateId = active?.id || "";
+      settings.activeTemplateName = active?.name || "";
+      if (Array.isArray(active?.fields) && active.fields.length) settings.fields = normalizeFields(active.fields);
+    }
     settings.defaultTemplate = body.defaultTemplate === undefined ? settings.defaultTemplate : Boolean(body.defaultTemplate);
     settings.versions = [
       {
@@ -2158,21 +2605,135 @@ router.post(
   }),
 );
 
+router.post(
+  "/invoice-settings/test-invoice",
+  asyncHandler(async (req, res) => {
+    const settings = await getInvoiceSettingsDoc();
+    const to = String(req.body?.to || settings.companyEmail || settings.smtp?.fromEmail || "").trim();
+    if (!to) throw new AppError("Test recipient email is required", 400);
+    const now = new Date();
+    const sampleInvoice = {
+      invoiceNumber: `TEST-${now.toISOString().slice(0, 10).replace(/-/g, "")}`,
+      userName: "Test Customer",
+      userEmail: to,
+      userMobile: "8000000001",
+      customerCompany: { name: "Test Customer", email: to, phone: "8000000001", address: "Sample billing address" },
+      planId: "test-plan",
+      planName: "Premium Plan",
+      currency: "INR",
+      status: "paid",
+      invoiceDate: now,
+      dueDate: now,
+      transactionId: "test_txn_123456",
+      subtotal: 1000,
+      discountTotal: 100,
+      taxTotal: 162,
+      grandTotal: 1062,
+      amount: 1062,
+      notes: "This is a test invoice generated for template and email verification.",
+      terms: "No payment is required for this test invoice.",
+      items: [{ product: "Premium Subscription", description: "Template test item", quantity: 1, price: 1000, discount: 100, tax: 18, total: 1062 }],
+    };
+    const pdf = await renderInvoicePdf(sampleInvoice, settings, { planName: "Premium Plan" });
+    const result = await sendEmail({
+      smtp: settings.smtp || {},
+      to,
+      subject: `Test Invoice from ${settings.companyName}`,
+      text: `Hi,\n\nThis is a test invoice from ${settings.companyName}. Please check the attached PDF layout and email delivery.\n\nNo payment is required.`,
+      attachments: [{ filename: `${sampleInvoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }],
+    });
+    res.json({ success: true, message: result.skipped ? "Test invoice email skipped" : "Test invoice email sent", data: result });
+  }),
+);
+
+function calculateInvoiceTotals(items = []) {
+  return items.reduce(
+    (acc, item) => {
+      const quantity = Math.max(0, Number(item.quantity || 0));
+      const price = Math.max(0, Number(item.price || 0));
+      const discount = Math.max(0, Number(item.discount || 0));
+      const tax = Math.max(0, Number(item.tax || 0));
+      const lineBase = quantity * price;
+      const lineDiscount = Math.min(lineBase, discount);
+      const taxable = Math.max(0, lineBase - lineDiscount);
+      const lineTax = (taxable * tax) / 100;
+      const total = taxable + lineTax;
+      acc.subtotal += lineBase;
+      acc.discountTotal += lineDiscount;
+      acc.taxTotal += lineTax;
+      acc.grandTotal += total;
+      acc.items.push({ ...item, quantity, price, discount: lineDiscount, tax, total });
+      return acc;
+    },
+    { subtotal: 0, discountTotal: 0, taxTotal: 0, grandTotal: 0, items: [] },
+  );
+}
+
+function normalizeInvoicePayload(body = {}, existing = {}) {
+  const totals = calculateInvoiceTotals(Array.isArray(body.items) ? body.items : existing.items || []);
+  const now = new Date();
+  const allowedStatuses = new Set(["draft", "sent", "paid", "pending", "overdue", "cancelled", "void", "failed"]);
+  const status = String(body.status || existing.status || "draft").toLowerCase();
+  return {
+    invoiceNumber: String(body.invoiceNumber || existing.invoiceNumber || `INV-${now.toISOString().slice(0, 10).replace(/-/g, "")}-${String(Date.now()).slice(-6)}`).trim(),
+    userId: String(body.userId || existing.userId || "manual"),
+    subscriptionId: String(body.subscriptionId || existing.subscriptionId || `manual-${Date.now()}`),
+    planId: String(body.planId || existing.planId || "manual"),
+    userName: String(body.userName || body.customerCompany?.name || existing.userName || ""),
+    userEmail: String(body.userEmail || body.customerCompany?.email || existing.userEmail || ""),
+    userMobile: String(body.userMobile || body.customerCompany?.phone || existing.userMobile || ""),
+    amount: Number(totals.grandTotal || body.amount || existing.amount || 0),
+    currency: String(body.currency || existing.currency || "INR"),
+    status: allowedStatuses.has(status) ? status : "draft",
+    transactionId: String(body.transactionId || existing.transactionId || ""),
+    invoiceDate: body.invoiceDate ? new Date(String(body.invoiceDate)) : existing.invoiceDate || now,
+    dueDate: body.dueDate ? new Date(String(body.dueDate)) : existing.dueDate,
+    billingCompany: body.billingCompany || existing.billingCompany || {},
+    customerCompany: body.customerCompany || existing.customerCompany || {},
+    taxDetails: body.taxDetails || existing.taxDetails || {},
+    items: totals.items,
+    subtotal: Math.round(totals.subtotal * 100) / 100,
+    taxTotal: Math.round(totals.taxTotal * 100) / 100,
+    discountTotal: Math.round(totals.discountTotal * 100) / 100,
+    grandTotal: Math.round(totals.grandTotal * 100) / 100,
+    notes: String(body.notes || existing.notes || ""),
+    terms: String(body.terms || existing.terms || ""),
+    signatureUrl: String(body.signatureUrl || existing.signatureUrl || ""),
+    logoUrl: String(body.logoUrl || existing.logoUrl || ""),
+    qrCode: String(body.qrCode || existing.qrCode || ""),
+    templateId: String(body.templateId || existing.templateId || ""),
+    templateName: String(body.templateName || existing.templateName || ""),
+    shareToken: String(body.shareToken || existing.shareToken || crypto.randomBytes(12).toString("hex")),
+    paymentHistory: Array.isArray(body.paymentHistory) ? body.paymentHistory : existing.paymentHistory || [],
+  };
+}
+
 router.get(
   "/invoices",
   asyncHandler(async (req, res) => {
     const page = Math.max(Number(req.query.page || 1), 1);
     const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 200);
-    const search = String(req.query.search || "").trim();
+    const search = String(req.query.search || req.query.q || "").trim();
     const filters = {};
     if (req.query.status) filters.status = req.query.status;
     if (req.query.emailStatus) filters.emailStatus = req.query.emailStatus;
+    if (req.query.templateId) filters.templateId = req.query.templateId;
+    if (req.query.dateFrom || req.query.dateTo) {
+      filters.createdAt = {};
+      if (req.query.dateFrom) filters.createdAt.$gte = new Date(String(req.query.dateFrom));
+      if (req.query.dateTo) {
+        const end = new Date(String(req.query.dateTo));
+        end.setHours(23, 59, 59, 999);
+        filters.createdAt.$lte = end;
+      }
+    }
     if (search) {
       filters.$or = [
         { invoiceNumber: new RegExp(search, "i") },
         { userName: new RegExp(search, "i") },
         { userEmail: new RegExp(search, "i") },
         { planId: new RegExp(search, "i") },
+        { transactionId: new RegExp(search, "i") },
       ];
     }
     const skip = (page - 1) * limit;
@@ -2185,6 +2746,202 @@ router.get(
       data: items.map((item) => ({ id: String(item._id), ...item })),
       meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
     });
+  }),
+);
+
+router.get(
+  "/invoices/:id",
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid invoice id", 400);
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) throw new AppError("Invoice not found", 404);
+    res.json({ success: true, data: invoice.toJSON() });
+  }),
+);
+
+router.post(
+  "/invoices",
+  asyncHandler(async (req, res) => {
+    const settings = await getInvoiceSettingsDoc();
+    const active = getActiveInvoiceTemplate(settings);
+    const payload = normalizeInvoicePayload({
+      ...(req.body || {}),
+      templateId: req.body?.templateId || active?.id || settings.activeTemplateId || "",
+      templateName: req.body?.templateName || active?.name || settings.activeTemplateName || "",
+    });
+    const invoice = await Invoice.create({
+      ...payload,
+      emailStatus: "pending",
+      issuedAt: payload.invoiceDate || new Date(),
+      activityLogs: [{ action: "created", message: "Manual invoice created", at: new Date() }],
+    });
+    await regenerateInvoicePdf(invoice, settings);
+    await invoice.save();
+    res.status(201).json({ success: true, message: "Invoice created", data: invoice.toJSON() });
+  }),
+);
+
+router.put(
+  "/invoices/:id",
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid invoice id", 400);
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) throw new AppError("Invoice not found", 404);
+    Object.assign(invoice, normalizeInvoicePayload(req.body || {}, invoice.toJSON()));
+    invoice.activityLogs = [...(invoice.activityLogs || []), { action: "updated", message: "Invoice edited", at: new Date() }];
+    await regenerateInvoicePdf(invoice);
+    await invoice.save();
+    res.json({ success: true, message: "Invoice updated", data: invoice.toJSON() });
+  }),
+);
+
+router.post(
+  "/invoices/:id/duplicate",
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid invoice id", 400);
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) throw new AppError("Invoice not found", 404);
+    const raw = invoice.toJSON();
+    delete raw.id;
+    delete raw._id;
+    const copy = await Invoice.create({
+      ...raw,
+      invoiceNumber: `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(Date.now()).slice(-6)}`,
+      status: "draft",
+      emailStatus: "pending",
+      shareToken: crypto.randomBytes(12).toString("hex"),
+      activityLogs: [{ action: "duplicated", message: `Duplicated from ${invoice.invoiceNumber}`, at: new Date() }],
+    });
+    await regenerateInvoicePdf(copy);
+    await copy.save();
+    res.status(201).json({ success: true, message: "Invoice duplicated", data: copy.toJSON() });
+  }),
+);
+
+router.post(
+  "/invoices/:id/send",
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid invoice id", 400);
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) throw new AppError("Invoice not found", 404);
+    const settings = await getInvoiceSettingsDoc();
+    if (!invoice.userEmail) throw new AppError("Invoice customer email is missing", 400);
+    const pdf = await regenerateInvoicePdf(invoice, settings);
+    const result = await sendEmail({
+      smtp: settings.smtp || {},
+      to: invoice.userEmail,
+      subject: String(req.body?.subject || `Invoice ${invoice.invoiceNumber} from ${settings.companyName}`),
+      text: String(req.body?.body || `Hi ${invoice.userName || "Customer"},\n\nYour invoice ${invoice.invoiceNumber} amount is ${invoice.currency} ${invoice.amount}.\nPayment status: ${invoice.status}.\nTransaction ID: ${invoice.transactionId || "-"}.\n\n${settings.companyName}`),
+      attachments: [{ filename: `${invoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }],
+    });
+    invoice.emailStatus = result.skipped ? "skipped" : "sent";
+    invoice.status = invoice.status === "draft" ? "sent" : invoice.status;
+    invoice.sentAt = result.skipped ? undefined : new Date();
+    invoice.emailError = result.skipped ? result.reason : "";
+    invoice.activityLogs = [...(invoice.activityLogs || []), { action: "email", message: result.skipped ? "Email skipped" : "Invoice email sent", at: new Date() }];
+    await invoice.save();
+    res.json({ success: true, message: result.skipped ? "Invoice email skipped" : "Invoice email sent", data: invoice.toJSON() });
+  }),
+);
+
+router.get(
+  "/invoices/:id/pdf",
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid invoice id", 400);
+    const invoice = await Invoice.findById(req.params.id);
+    if (!invoice) throw new AppError("Invoice not found", 404);
+    const pdf = await regenerateInvoicePdf(invoice);
+    await invoice.save();
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${invoice.invoiceNumber}.pdf"`);
+    res.send(pdf);
+  }),
+);
+
+router.delete(
+  "/invoices/:id",
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid invoice id", 400);
+    await Invoice.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: "Invoice deleted", data: null });
+  }),
+);
+
+router.post(
+  "/invoices/subscriptions/:subscriptionId/generate",
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.subscriptionId)) throw new AppError("Invalid subscription id", 400);
+    const existing = await Invoice.findOne({ subscriptionId: req.params.subscriptionId });
+    if (existing) return res.status(201).json({ success: true, message: "Invoice already exists", data: existing.toJSON() });
+    const [subscription, settings] = await Promise.all([
+      Subscription.findById(req.params.subscriptionId),
+      getInvoiceSettingsDoc(),
+    ]);
+    if (!subscription) throw new AppError("Subscription not found", 404);
+    const [user, plan] = await Promise.all([
+      User.findById(subscription.userId),
+      SubscriptionPlan.findOne({ planId: subscription.planId }),
+    ]);
+    const active = getActiveInvoiceTemplate(settings);
+    const invoiceNumber = `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(Date.now()).slice(-6)}`;
+    const invoice = await Invoice.create({
+      invoiceNumber,
+      userId: String(subscription.userId || ""),
+      subscriptionId: String(subscription._id),
+      planId: String(subscription.planId || ""),
+      userName: user?.name || user?.mobile || "Learner",
+      userEmail: user?.email || "",
+      userMobile: user?.mobile || "",
+      customerCompany: { name: user?.name || user?.mobile || "Learner", email: user?.email || "", phone: user?.mobile || "", address: user?.address || "" },
+      amount: Number(subscription.amount || 0),
+      subtotal: Number(subscription.baseAmount || subscription.amount || 0),
+      discountTotal: Number(subscription.discountAmount || 0),
+      taxTotal: 0,
+      grandTotal: Number(subscription.amount || 0),
+      currency: "INR",
+      status: subscription.status === "active" ? "paid" : "pending",
+      templateId: active?.id || settings.activeTemplateId || "",
+      templateName: active?.name || settings.activeTemplateName || "",
+      transactionId: subscription.razorpayPaymentId || subscription.razorpayOrderId || "",
+      invoiceDate: new Date(),
+      dueDate: subscription.endDate,
+      items: [{
+        product: plan?.name || subscription.planId,
+        description: "Premium subscription purchase",
+        quantity: 1,
+        price: Number(subscription.baseAmount || subscription.amount || 0),
+        discount: Number(subscription.discountAmount || 0),
+        tax: 0,
+        total: Number(subscription.amount || 0),
+      }],
+      emailStatus: "pending",
+      issuedAt: new Date(),
+      paymentHistory: [{
+        status: subscription.status === "active" ? "paid" : "pending",
+        amount: Number(subscription.amount || 0),
+        transactionId: subscription.razorpayPaymentId || subscription.razorpayOrderId || "",
+        paidAt: new Date(),
+        note: "Subscription payment",
+      }],
+      activityLogs: [{ action: "created", message: "Invoice generated from subscription", at: new Date() }],
+    });
+    const pdf = await regenerateInvoicePdf(invoice, settings, { planName: plan?.name || subscription.planId });
+    await invoice.save();
+    if (settings.enabled && settings.emailEnabled && invoice.userEmail) {
+      const data = invoiceData({ ...invoice.toJSON(), planName: plan?.name || subscription.planId });
+      const result = await sendEmail({
+        smtp: settings.smtp || {},
+        to: invoice.userEmail,
+        subject: `Invoice ${invoice.invoiceNumber} from ${settings.companyName}`,
+        text: `Hi ${invoice.userName || "Learner"},\n\nYour purchase invoice is attached.\n\nInvoice: ${invoice.invoiceNumber}\nProduct: ${data.planName}\nAmount: ${data.totalAmount}\nPayment Status: ${data.paymentStatus}\nTransaction ID: ${data.transactionId || "-"}\n\n${settings.companyName}`,
+        attachments: [{ filename: `${invoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }],
+      });
+      invoice.emailStatus = result.skipped ? "skipped" : "sent";
+      invoice.emailError = result.skipped ? result.reason : "";
+      invoice.sentAt = result.skipped ? undefined : new Date();
+      await invoice.save();
+    }
+    res.status(201).json({ success: true, message: "Invoice generated", data: invoice.toJSON() });
   }),
 );
 
