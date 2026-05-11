@@ -133,6 +133,10 @@ export const questionBodySchema = z.object({
   hasDiagram: z.boolean().optional().default(false),
   isNumerical: z.boolean().optional().default(false),
 }).superRefine((value, ctx) => {
+  const isNumeric = value.responseType === "numeric" || value.isNumerical === true;
+  if (value.examType === "NEET" && isNumeric) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["responseType"], message: "NEET supports MCQ questions only." });
+  }
   if (!value.difficultyId && !value.difficulty) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["difficultyId"], message: "Difficulty is required." });
   }
@@ -141,6 +145,9 @@ export const questionBodySchema = z.object({
   }
   if (value.responseType === "numeric" && !value.numericAnswer) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer is required." });
+  }
+  if (value.responseType === "numeric" && value.numericAnswer && !/^-?\d+(\.\d+)?$/.test(String(value.numericAnswer).trim())) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer must be a valid integer or decimal." });
   }
   if (value.responseType !== "numeric" && !value.correctOption) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["correctOption"], message: "Correct option is required." });
@@ -189,11 +196,18 @@ export const questionUpdateBodySchema = z.object({
   hasDiagram: z.boolean().optional(),
   isNumerical: z.boolean().optional(),
 }).superRefine((value, ctx) => {
+  const isNumeric = value.responseType === "numeric" || value.isNumerical === true;
+  if (value.examType === "NEET" && isNumeric) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["responseType"], message: "NEET supports MCQ questions only." });
+  }
   if (value.question !== undefined && value.question.trim() === "") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["question"], message: "Question text is required." });
   }
   if (value.responseType === "numeric" && value.numericAnswer === "") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer is required." });
+  }
+  if (value.responseType === "numeric" && value.numericAnswer && !/^-?\d+(\.\d+)?$/.test(String(value.numericAnswer).trim())) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer must be a valid integer or decimal." });
   }
   if (value.responseType && value.responseType !== "numeric" && !value.correctOption) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["correctOption"], message: "Correct option is required when response type is objective." });

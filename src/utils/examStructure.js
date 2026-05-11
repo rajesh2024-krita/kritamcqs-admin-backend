@@ -3,6 +3,29 @@ export const EXAM_SUBJECTS = {
   JEE: ["Physics", "Chemistry", "Mathematics"],
 };
 
+export const EXAM_PATTERN_CONFIG = {
+  NEET: {
+    durationMinutes: 180,
+    totalQuestions: 180,
+    totalMarks: 720,
+    subjects: { Biology: 90, Physics: 45, Chemistry: 45 },
+    responseTypes: ["single"],
+    marking: { mcq: { correct: 4, wrong: -1, unanswered: 0 } },
+  },
+  JEE: {
+    durationMinutes: 180,
+    totalQuestions: 75,
+    totalMarks: 300,
+    subjects: {
+      Physics: { mcq: 20, numerical: 5 },
+      Chemistry: { mcq: 20, numerical: 5 },
+      Mathematics: { mcq: 20, numerical: 5 },
+    },
+    responseTypes: ["single", "numeric"],
+    marking: { mcq: { correct: 4, wrong: -1, unanswered: 0 }, numerical: { correct: 4, wrong: 0, unanswered: 0 } },
+  },
+};
+
 export function deriveExamType(examMode, exam) {
   if (String(exam || "").startsWith("JEE")) return "JEE";
   if (exam === "NEET") return "NEET";

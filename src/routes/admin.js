@@ -1385,17 +1385,16 @@ router.post("/daily-test/reset", asyncHandler(async (req, res) => {
 const MOCK_TEST_PRESETS = {
   NEET_REAL: {
     examType: "NEET",
-    durationMinutes: 200,
+    durationMinutes: 180,
     maxScore: 720,
     marksPerQuestion: 4,
     negativeMarks: 1,
     predictionTitle: "Predicted NEET Score",
     predictionDescription: "This mock follows the real NEET marking pattern, so your final score is the closest estimate of your actual NEET score.",
     instructions: [
-      "Physics: Section A 35 compulsory and Section B 15 with attempt any 10.",
-      "Chemistry: Section A 35 compulsory and Section B 15 with attempt any 10.",
-      "Biology: Section A 70 compulsory and Section B 30 with attempt any 20.",
+      "Biology has 90 MCQs, Physics has 45 MCQs, and Chemistry has 45 MCQs.",
       "Correct answer +4, wrong answer -1, unattempted 0.",
+      "Total questions 180, total marks 720, duration 180 minutes.",
     ],
   },
   JEE_REAL: {
@@ -1407,9 +1406,10 @@ const MOCK_TEST_PRESETS = {
     predictionTitle: "Predicted JEE Score",
     predictionDescription: "This mock follows the real JEE structure, so your result is a direct prediction of your likely exam-day score.",
     instructions: [
-      "Each subject has 20 MCQs and 10 numerical questions with attempt any 5 numerical.",
+      "Each subject has 20 MCQs and 5 numerical value questions.",
       "MCQ correct +4 and wrong -1.",
-      "Numerical correct +4 and wrong 0.",
+      "Numerical correct +4; wrong numerical marking follows the configured JEE Main pattern.",
+      "Total questions 75, total marks 300, duration 180 minutes.",
       "Chemistry first, then Physics, then Maths is the recommended time strategy.",
     ],
   },
@@ -1431,19 +1431,16 @@ const AUTO_MOCK_HISTORY_LIMIT = 30;
 const AUTO_MOCK_PRESET_BY_EXAM = {
   NEET: {
     patternPreset: "NEET_REAL",
-    durationMinutes: 200,
+    durationMinutes: 180,
     marksPerQuestion: 4,
     negativeMarks: 1,
     maxScore: 720,
-    totalQuestions: 200,
+    totalQuestions: 180,
     totalAttemptQuestions: 180,
     sectionGroups: [
-      { key: "PHY_A", label: "Physics - Section A", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 35, attemptQuestions: 35 },
-      { key: "PHY_B", label: "Physics - Section B", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 15, attemptQuestions: 10 },
-      { key: "CHEM_A", label: "Chemistry - Section A", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 35, attemptQuestions: 35 },
-      { key: "CHEM_B", label: "Chemistry - Section B", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 15, attemptQuestions: 10 },
-      { key: "BIO_A", label: "Biology - Section A", subjectKey: "BIOLOGY", questionType: "MCQ", totalQuestions: 70, attemptQuestions: 70 },
-      { key: "BIO_B", label: "Biology - Section B", subjectKey: "BIOLOGY", questionType: "MCQ", totalQuestions: 30, attemptQuestions: 20 },
+      { key: "BIO", label: "Biology", subjectKey: "BIOLOGY", questionType: "MCQ", totalQuestions: 90, attemptQuestions: 90 },
+      { key: "PHY", label: "Physics", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 45, attemptQuestions: 45 },
+      { key: "CHEM", label: "Chemistry", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 45, attemptQuestions: 45 },
     ],
   },
   JEE: {
@@ -1452,15 +1449,15 @@ const AUTO_MOCK_PRESET_BY_EXAM = {
     marksPerQuestion: 4,
     negativeMarks: 1,
     maxScore: 300,
-    totalQuestions: 90,
+    totalQuestions: 75,
     totalAttemptQuestions: 75,
     sectionGroups: [
       { key: "PHY_MCQ", label: "Physics - MCQ", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
-      { key: "PHY_NUM", label: "Physics - Numerical", subjectKey: "PHYSICS", questionType: "NUMERICAL", totalQuestions: 10, attemptQuestions: 5 },
+      { key: "PHY_NUM", label: "Physics - Numerical", subjectKey: "PHYSICS", questionType: "NUMERICAL", totalQuestions: 5, attemptQuestions: 5 },
       { key: "CHEM_MCQ", label: "Chemistry - MCQ", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
-      { key: "CHEM_NUM", label: "Chemistry - Numerical", subjectKey: "CHEMISTRY", questionType: "NUMERICAL", totalQuestions: 10, attemptQuestions: 5 },
+      { key: "CHEM_NUM", label: "Chemistry - Numerical", subjectKey: "CHEMISTRY", questionType: "NUMERICAL", totalQuestions: 5, attemptQuestions: 5 },
       { key: "MATH_MCQ", label: "Mathematics - MCQ", subjectKey: "MATHEMATICS", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
-      { key: "MATH_NUM", label: "Mathematics - Numerical", subjectKey: "MATHEMATICS", questionType: "NUMERICAL", totalQuestions: 10, attemptQuestions: 5 },
+      { key: "MATH_NUM", label: "Mathematics - Numerical", subjectKey: "MATHEMATICS", questionType: "NUMERICAL", totalQuestions: 5, attemptQuestions: 5 },
     ],
   },
 };
