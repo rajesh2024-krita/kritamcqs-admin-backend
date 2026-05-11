@@ -1,13 +1,11 @@
 import { Schema, model, models, baseJsonOptions } from "./base.js";
-import { EXAM_CATEGORIES, EXAM_TYPES } from "../types/constants.js";
 
 function normalizeExamType(value) {
   const normalized = String(value ?? "").trim().toUpperCase();
   const canonical = normalized.replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
   if (normalized === "NEET") return "NEET";
   if (normalized === "JEE" || normalized === "JEE_MAIN" || normalized === "JEE_ADVANCED") return "JEE";
-  if (EXAM_TYPES.includes(canonical)) return canonical;
-  return "";
+  return canonical;
 }
 
 function slugify(value) {
@@ -21,10 +19,16 @@ function slugify(value) {
 const questionTypeSchema = new Schema(
   {
     name: { type: String, required: true, trim: true, unique: true, index: true },
-    examType: { type: String, enum: EXAM_TYPES, required: true, index: true },
+    examType: { type: String, required: true, index: true },
     key: { type: String, trim: true, unique: true, index: true },
     label: { type: String, trim: true },
-    examCategory: { type: String, enum: [...EXAM_CATEGORIES, "JEE"], index: true },
+    examCategory: { type: String, index: true },
+    responseType: { type: String, enum: ["single", "multiple", "numeric"], default: "single" },
+    displayVariant: { type: String, trim: true, default: "single_choice" },
+    exampleQuestion: { type: String, trim: true },
+    exampleOptions: { type: String, trim: true },
+    exampleAnswer: { type: String, trim: true },
+    exampleExplanation: { type: String, trim: true },
     description: { type: String, trim: true },
   },
   baseJsonOptions,

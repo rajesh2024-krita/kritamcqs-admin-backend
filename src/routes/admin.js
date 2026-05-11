@@ -186,6 +186,10 @@ function rotateOp(inner, x, y, angle = 0) {
   return `q 1 0 0 1 ${px} ${py} cm ${cos} ${sin} ${(-Math.sin(radians)).toFixed(6)} ${cos} 0 0 cm 1 0 0 1 ${-px} ${-py} cm ${inner} Q`;
 }
 
+function rotateCenterOp(inner, x, y, width, height, angle = 0) {
+  return rotateOp(inner, x + width / 2, y + height / 2, angle);
+}
+
 function colorCircleOp(x, y, radius, fill = "#ffffff", stroke = "#000000", strokeWidth = 0) {
   const c = 0.5522847498;
   const cx = x + radius;
@@ -287,28 +291,52 @@ function drawInvoiceTable(field, data, metrics) {
   const { x, y, width, height } = fieldGeometry(field, metrics);
   const cols = Math.max(1, Number(meta.cols || meta.headers?.length || 1));
   const rows = Math.max(1, Number(meta.rows || 1));
-  const rowHeight = height / rows;
-  const colWidth = width / cols;
+  const style = {
+    borderColor: "#cbd5e1",
+    borderWidth: 0.5,
+    borderStyle: "solid",
+    headerBackground: "#0f172a",
+    headerTextColor: "#ffffff",
+    bodyTextColor: "#334155",
+    bodyBackground: "#ffffff",
+    alternateRowBackground: "#f8fafc",
+    useAlternateRows: false,
+    padding: 6,
+    ...(meta.style || {}),
+  };
+  const rowHeights = Array.from({ length: rows }).map((_, index) => Number(meta.rowHeights?.[index] || height / rows));
+  const rowTotal = rowHeights.reduce((sum, value) => sum + value, 0) || 1;
+  const scaledRows = rowHeights.map((value) => (value / rowTotal) * height);
+  const colWidths = Array.from({ length: cols }).map((_, index) => Number(meta.colWidths?.[index] || width / cols));
+  const colTotal = colWidths.reduce((sum, value) => sum + value, 0) || 1;
+  const scaledCols = colWidths.map((value) => (value / colTotal) * width);
   const headers = Array.from({ length: cols }).map((_, index) => meta.headers?.[index] || `Column ${index + 1}`);
   const cells = Array.isArray(meta.cells) ? meta.cells : [];
   const ops = [];
+  const borderWidth = Number(style.borderWidth || 0);
 
+  let currentX = x;
   headers.forEach((header, index) => {
-    const cellX = x + index * colWidth;
-    ops.push(colorRectOp(cellX, y, colWidth, rowHeight, "#0f172a", "#cbd5e1", 0.7));
-    ops.push(styledTextOp(replaceTokens(header, data), cellX + 6, y + rowHeight / 2 + 4, Math.max(4, rowHeight * 0.32), "#ffffff", { fontWeight: "bold" }));
+    const colWidth = scaledCols[index];
+    ops.push(colorRectOp(currentX, y, colWidth, scaledRows[0], style.headerBackground, style.borderColor, borderWidth));
+    ops.push(styledTextOp(replaceTokens(header, data), currentX + Number(style.padding || 0), y + scaledRows[0] / 2 + 4, Math.max(4, scaledRows[0] * 0.32), style.headerTextColor, { fontWeight: "bold" }));
+    currentX += colWidth;
   });
 
+  let currentY = y + scaledRows[0];
   for (let row = 1; row < rows; row += 1) {
+    currentX = x;
     for (let col = 0; col < cols; col += 1) {
-      const cellX = x + col * colWidth;
-      const cellY = y + row * rowHeight;
       const value = cells[row - 1]?.[col] ?? "";
-      ops.push(colorRectOp(cellX, cellY, colWidth, rowHeight, "#ffffff", "#cbd5e1", 0.5));
-      ops.push(styledTextOp(replaceTokens(value, data), cellX + 6, cellY + rowHeight / 2 + 4, Math.max(4, rowHeight * 0.3), "#334155", {}));
+      const colWidth = scaledCols[col];
+      const fill = meta.rowColors?.[row] || meta.colColors?.[col] || (style.useAlternateRows && row % 2 === 0 ? style.alternateRowBackground : style.bodyBackground);
+      ops.push(colorRectOp(currentX, currentY, colWidth, scaledRows[row], fill, style.borderColor, borderWidth));
+      ops.push(styledTextOp(replaceTokens(value, data), currentX + Number(style.padding || 0), currentY + scaledRows[row] / 2 + 4, Math.max(4, scaledRows[row] * 0.3), style.bodyTextColor, {}));
+      currentX += colWidth;
     }
+    currentY += scaledRows[row];
   }
-  return ops;
+  return Number(raw.angle || 0) ? [rotateCenterOp(ops.join("\n"), x, y, width, height, raw.angle)] : ops;
 }
 
 function drawFieldObject(field, data, metrics, offsetX = 0, offsetY = 0, images = []) {
@@ -331,11 +359,11 @@ function drawFieldObject(field, data, metrics, offsetX = 0, offsetY = 0, images 
     const fontSize = Math.max(1, Number(field.size ?? (Number(raw.fontSize || 10) * metrics.scaleY)));
     ops.push(...String(content).split(/\r?\n/).flatMap((line, index) => styledTextOp(line, x, y + index * (fontSize + 4), fontSize, fill, raw)));
   } else if (type === "rect") {
-    ops.push(rotateOp(colorRectOp(x, y, width, height, fill, stroke, strokeWidth), x, y, raw.angle));
+    ops.push(rotateCenterOp(colorRectOp(x, y, width, height, fill, stroke, strokeWidth), x, y, width, height, raw.angle));
   } else if (type === "circle") {
-    ops.push(rotateOp(colorCircleOp(x, y, Math.max(1, Math.min(width, height) / 2), fill, stroke, strokeWidth), x, y, raw.angle));
+    ops.push(rotateCenterOp(colorCircleOp(x, y, Math.max(1, Math.min(width, height) / 2), fill, stroke, strokeWidth), x, y, width, height, raw.angle));
   } else if (type === "triangle") {
-    ops.push(rotateOp(colorTriangleOp(x, y, width, height, fill, stroke, strokeWidth), x, y, raw.angle));
+    ops.push(rotateCenterOp(colorTriangleOp(x, y, width, height, fill, stroke, strokeWidth), x, y, width, height, raw.angle));
   } else if (type === "group" && Array.isArray(raw.objects)) {
     raw.objects.forEach((child) => {
       const childWidth = Math.max(1, Number(child.width || 40) * Number(child.scaleX ?? 1) * metrics.scaleX);
@@ -356,7 +384,7 @@ function drawFieldObject(field, data, metrics, offsetX = 0, offsetY = 0, images 
     if (image) {
       const name = `Im${images.length + 1}`;
       images.push({ name, ...image });
-      ops.push(rotateOp(imageOp(name, x, y, width, height), x, y, raw.angle));
+      ops.push(rotateCenterOp(imageOp(name, x, y, width, height), x, y, width, height, raw.angle));
     }
   }
 
@@ -413,6 +441,18 @@ function buildPdf(lines, images = []) {
 function invoiceData(input = {}) {
   const firstItem = Array.isArray(input.items) ? input.items[0] || {} : {};
   const formatCurrency = (value) => `${input.currency || "INR"} ${Number(value || 0).toFixed(2)}`;
+  const convenienceCharge = Number(input.convenienceCharge || 0);
+  const convenienceChargeGst = Number(input.convenienceChargeGst || 0);
+  const totalCharges = convenienceCharge + convenienceChargeGst;
+  const configuredChargeGstPercent = Number(input.taxDetails?.convenienceChargeGstPercent ?? 0);
+  const derivedChargeGstPercent = convenienceCharge > 0 && convenienceChargeGst > 0
+    ? (convenienceChargeGst / convenienceCharge) * 100
+    : 0;
+  const displayChargeGstPercent = configuredChargeGstPercent > 0
+    ? configuredChargeGstPercent
+    : Math.abs(derivedChargeGstPercent - Math.round(derivedChargeGstPercent)) < 0.1
+      ? Math.round(derivedChargeGstPercent)
+      : Number(derivedChargeGstPercent.toFixed(2));
   return {
     invoiceNumber: input.invoiceNumber || "",
     invoiceDate: input.invoiceDate ? new Date(input.invoiceDate).toLocaleDateString("en-IN") : new Date().toLocaleDateString("en-IN"),
@@ -425,9 +465,16 @@ function invoiceData(input = {}) {
     planName: input.planName || input.planId || firstItem.product || "Premium Subscription",
     productDescription: firstItem.description || "Premium subscription purchase",
     quantity: firstItem.quantity || 1,
+    planAmount: formatCurrency(input.subtotal ?? firstItem.price ?? input.amount),
     baseAmount: formatCurrency(input.subtotal ?? firstItem.price ?? input.amount),
     discountAmount: formatCurrency(input.discountTotal || 0),
+    taxPercent: Number(input.taxDetails?.taxPercent ?? firstItem.tax ?? 0),
     taxAmount: formatCurrency(input.taxTotal || 0),
+    convenienceCharge: formatCurrency(convenienceCharge),
+    convenienceChargeGstPercent: displayChargeGstPercent,
+    convenienceChargeGst: formatCurrency(convenienceChargeGst),
+    totalCharges: formatCurrency(totalCharges),
+    finalAmount: formatCurrency(input.grandTotal || input.amount),
     amount: formatCurrency(input.amount || input.grandTotal),
     totalAmount: formatCurrency(input.grandTotal || input.amount),
     paymentStatus: String(input.status || "paid").toUpperCase(),
@@ -491,7 +538,9 @@ async function renderInvoicePdf(invoice, settings, extras = {}) {
     textOp(`Subtotal: ${data.baseAmount}`, 344, 246, 9),
     textOp(`Discount: ${data.discountAmount}`, 344, 263, 9),
     textOp(`Tax: ${data.taxAmount}`, 344, 280, 9),
-    textOp(`Total: ${data.totalAmount}`, 344, 300, 11),
+    textOp(`Convenience: ${data.convenienceCharge}`, 344, 297, 9),
+    textOp(`GST on Charges: ${data.convenienceChargeGst}`, 344, 314, 9),
+    textOp(`Total: ${data.totalAmount}`, 344, 334, 11),
     textOp(String(effectiveSettings.productDetailsTitle || "Product Details"), 42, 348, 13),
     fillRectOp(42, 362, 511, 24, 0.92),
     textOp("Item", 54, 378, 9),
@@ -1563,7 +1612,7 @@ async function buildMockTestPayload(payload, existing = null) {
   const availableWeekdays = [...new Set((Array.isArray(payload.availableWeekdays) ? payload.availableWeekdays : existing?.availableWeekdays || []).map((value) => String(value).toUpperCase()).filter((value) => WEEKDAY_OPTIONS.includes(value)))];
 
   if (!title) throw new AppError("Title is required", 400);
-  if (!questionIds.length) throw new AppError("Select at least one question", 400);
+  if (questionIds.length < 2) throw new AppError("Select at least two questions", 400);
   if (!Number.isFinite(durationMinutes) || durationMinutes < 1) throw new AppError("Duration must be at least 1 minute", 400);
   if (!["all", "day_wise", "week_wise"].includes(availabilityMode)) throw new AppError("Availability mode is invalid", 400);
   if (availabilityMode === "day_wise" && !availableDaysOfMonth.length) throw new AppError("Select at least one day of month", 400);
@@ -2522,6 +2571,9 @@ router.post(
     settings.footerText = String(body.footerText || "");
     settings.productDetailsTitle = String(body.productDetailsTitle || "Product Details");
     settings.paidStampText = String(body.paidStampText || "PAID");
+    settings.defaultTaxPercent = Math.max(0, Math.min(100, Number(body.defaultTaxPercent ?? settings.defaultTaxPercent ?? 0)));
+    settings.defaultConvenienceChargePercent = Math.max(0, Math.min(100, Number(body.defaultConvenienceChargePercent ?? settings.defaultConvenienceChargePercent ?? 0)));
+    settings.defaultConvenienceChargeGstPercent = Math.max(0, Math.min(100, Number(body.defaultConvenienceChargeGstPercent ?? settings.defaultConvenienceChargeGstPercent ?? 0)));
     const normalizeFields = (fields = []) => fields.map((field) => ({
         ...field,
         id: String(field.id || `field-${Date.now()}`),
@@ -2612,6 +2664,17 @@ router.post(
     const to = String(req.body?.to || settings.companyEmail || settings.smtp?.fromEmail || "").trim();
     if (!to) throw new AppError("Test recipient email is required", 400);
     const now = new Date();
+    const testSubtotal = 1000;
+    const testDiscount = 100;
+    const testTaxPercent = Number(settings.defaultTaxPercent ?? 0);
+    const testConveniencePercent = Number(settings.defaultConvenienceChargePercent ?? 0);
+    const testConvenienceGstPercent = Number(settings.defaultConvenienceChargeGstPercent ?? 0);
+    const testTaxable = Math.max(0, testSubtotal - testDiscount);
+    const testTax = Math.round(((testTaxable * testTaxPercent) / 100) * 100) / 100;
+    const testAmountBeforeCharges = Math.round((testTaxable + testTax) * 100) / 100;
+    const testConvenience = Math.round(((testAmountBeforeCharges * testConveniencePercent) / 100) * 100) / 100;
+    const testConvenienceGst = Math.floor(((testConvenience * testConvenienceGstPercent) / 100) * 100) / 100;
+    const testGrandTotal = Math.round((testAmountBeforeCharges + testConvenience + testConvenienceGst) * 100) / 100;
     const sampleInvoice = {
       invoiceNumber: `TEST-${now.toISOString().slice(0, 10).replace(/-/g, "")}`,
       userName: "Test Customer",
@@ -2625,14 +2688,16 @@ router.post(
       invoiceDate: now,
       dueDate: now,
       transactionId: "test_txn_123456",
-      subtotal: 1000,
-      discountTotal: 100,
-      taxTotal: 162,
-      grandTotal: 1062,
-      amount: 1062,
+      subtotal: testSubtotal,
+      discountTotal: testDiscount,
+      taxTotal: testTax,
+      convenienceCharge: testConvenience,
+      convenienceChargeGst: testConvenienceGst,
+      grandTotal: testGrandTotal,
+      amount: testGrandTotal,
       notes: "This is a test invoice generated for template and email verification.",
       terms: "No payment is required for this test invoice.",
-      items: [{ product: "Premium Subscription", description: "Template test item", quantity: 1, price: 1000, discount: 100, tax: 18, total: 1062 }],
+      items: [{ product: "Premium Subscription", description: "Template test item", quantity: 1, price: testSubtotal, discount: testDiscount, tax: testTaxPercent, total: testAmountBeforeCharges }],
     };
     const pdf = await renderInvoicePdf(sampleInvoice, settings, { planName: "Premium Plan" });
     const result = await sendEmail({
@@ -2893,13 +2958,23 @@ router.post(
       userEmail: user?.email || "",
       userMobile: user?.mobile || "",
       customerCompany: { name: user?.name || user?.mobile || "Learner", email: user?.email || "", phone: user?.mobile || "", address: user?.address || "" },
-      amount: Number(subscription.amount || 0),
+      amount: Number(subscription.finalAmount || subscription.amount || 0),
       subtotal: Number(subscription.baseAmount || subscription.amount || 0),
       discountTotal: Number(subscription.discountAmount || 0),
-      taxTotal: 0,
-      grandTotal: Number(subscription.amount || 0),
-      currency: "INR",
+      taxTotal: Number(subscription.taxAmount || 0),
+      convenienceCharge: Number(subscription.convenienceCharge || 0),
+      convenienceChargeGst: Number(subscription.convenienceChargeGst || 0),
+      grandTotal: Number(subscription.finalAmount || subscription.amount || 0),
+      currency: subscription.currency || "INR",
       status: subscription.status === "active" ? "paid" : "pending",
+      taxDetails: {
+        type: "GST",
+        taxPercent: Number(subscription.taxPercent ?? settings.defaultTaxPercent ?? 0),
+        taxableAmount: Math.max(0, Number(subscription.baseAmount || subscription.amount || 0) - Number(subscription.discountAmount || 0)),
+        amountBeforeCharges: Number(subscription.amountBeforeCharges || (Number(subscription.baseAmount || subscription.amount || 0) - Number(subscription.discountAmount || 0) + Number(subscription.taxAmount || 0))),
+        convenienceChargePercent: Number(subscription.convenienceChargePercent ?? settings.defaultConvenienceChargePercent ?? 0),
+        convenienceChargeGstPercent: Number(subscription.convenienceChargeGstPercent ?? settings.defaultConvenienceChargeGstPercent ?? 0),
+      },
       templateId: active?.id || settings.activeTemplateId || "",
       templateName: active?.name || settings.activeTemplateName || "",
       transactionId: subscription.razorpayPaymentId || subscription.razorpayOrderId || "",
@@ -2911,17 +2986,21 @@ router.post(
         quantity: 1,
         price: Number(subscription.baseAmount || subscription.amount || 0),
         discount: Number(subscription.discountAmount || 0),
-        tax: 0,
-        total: Number(subscription.amount || 0),
+        tax: Number(subscription.taxPercent ?? settings.defaultTaxPercent ?? 0),
+        total: Number(subscription.amountBeforeCharges || (Number(subscription.baseAmount || subscription.amount || 0) - Number(subscription.discountAmount || 0) + Number(subscription.taxAmount || 0))),
       }],
       emailStatus: "pending",
       issuedAt: new Date(),
       paymentHistory: [{
         status: subscription.status === "active" ? "paid" : "pending",
-        amount: Number(subscription.amount || 0),
+        amount: Number(subscription.finalAmount || subscription.amount || 0),
+        convenienceCharge: Number(subscription.convenienceCharge || 0),
+        convenienceChargeGst: Number(subscription.convenienceChargeGst || 0),
         transactionId: subscription.razorpayPaymentId || subscription.razorpayOrderId || "",
-        paidAt: new Date(),
+        paidAt: subscription.transactionDate || new Date(),
         note: "Subscription payment",
+        razorpayOrderId: subscription.razorpayOrderId || "",
+        razorpayPaymentId: subscription.razorpayPaymentId || "",
       }],
       activityLogs: [{ action: "created", message: "Invoice generated from subscription", at: new Date() }],
     });
@@ -2933,7 +3012,7 @@ router.post(
         smtp: settings.smtp || {},
         to: invoice.userEmail,
         subject: `Invoice ${invoice.invoiceNumber} from ${settings.companyName}`,
-        text: `Hi ${invoice.userName || "Learner"},\n\nYour purchase invoice is attached.\n\nInvoice: ${invoice.invoiceNumber}\nProduct: ${data.planName}\nAmount: ${data.totalAmount}\nPayment Status: ${data.paymentStatus}\nTransaction ID: ${data.transactionId || "-"}\n\n${settings.companyName}`,
+        text: `Hi ${invoice.userName || "Learner"},\n\nYour payment was successful and your invoice PDF is attached.\n\nInvoice: ${invoice.invoiceNumber}\nProduct: ${data.planName}\nSubtotal: ${data.baseAmount}\nDiscount: ${data.discountAmount}\nTax (${data.taxPercent}%): ${data.taxAmount}\nConvenience Charges: ${data.convenienceCharge}\nGST on Convenience Charges: ${data.convenienceChargeGst}\nTotal Paid: ${data.totalAmount}\nPayment Status: ${data.paymentStatus}\nTransaction ID: ${data.transactionId || "-"}\n\nFor support, contact ${settings.companyEmail || settings.smtp?.fromEmail || "support"}.\n\n${settings.companyName}`,
         attachments: [{ filename: `${invoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }],
       });
       invoice.emailStatus = result.skipped ? "skipped" : "sent";
@@ -3484,10 +3563,15 @@ function createCrudRouter({ key, label, service }) {
 }
 
 function normalizeExamType(value) {
-  const normalized = String(value || "").trim().toUpperCase();
+  const normalized = String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
   if (normalized === "NEET") return "NEET";
   if (normalized === "JEE" || normalized === "JEE_MAIN" || normalized === "JEE_ADVANCED") return "JEE";
-  throw new AppError("Invalid exam type. Use NEET or JEE.", 400);
+  if (normalized) return normalized;
+  throw new AppError("Invalid exam type.", 400);
 }
 
 function normalizeDifficultyKey(value) {
@@ -3731,7 +3815,7 @@ const questionTypeService = createCrudService({
   model: QuestionType,
   allowedSorts: ["createdAt", "updatedAt", "name", "examType", "label", "key"],
   searchFields: ["name", "key", "label", "description"],
-  exactFilters: ["examType", "examCategory"],
+  exactFilters: ["examType", "examCategory", "responseType"],
   beforeCreate: async (payload) => {
     const examType = await ensureExamTypeExists(payload.examType || payload.examCategory);
     return {
@@ -3740,6 +3824,12 @@ const questionTypeService = createCrudService({
       key: String(payload.key ?? "").trim() || undefined,
       label: String(payload.label ?? "").trim() || undefined,
       examCategory: examType,
+      responseType: payload.responseType || "single",
+      displayVariant: String(payload.displayVariant ?? "").trim() || "single_choice",
+      exampleQuestion: String(payload.exampleQuestion ?? "").trim() || undefined,
+      exampleOptions: String(payload.exampleOptions ?? "").trim() || undefined,
+      exampleAnswer: String(payload.exampleAnswer ?? "").trim() || undefined,
+      exampleExplanation: String(payload.exampleExplanation ?? "").trim() || undefined,
       description: String(payload.description ?? "").trim() || undefined,
     };
   },
@@ -3752,6 +3842,12 @@ const questionTypeService = createCrudService({
       ...(payload.key !== undefined ? { key: String(payload.key).trim() || undefined } : {}),
       ...(payload.label !== undefined ? { label: String(payload.label).trim() || undefined } : {}),
       examCategory: resolvedExamType,
+      ...(payload.responseType !== undefined ? { responseType: payload.responseType || "single" } : {}),
+      ...(payload.displayVariant !== undefined ? { displayVariant: String(payload.displayVariant ?? "").trim() || "single_choice" } : {}),
+      ...(payload.exampleQuestion !== undefined ? { exampleQuestion: String(payload.exampleQuestion ?? "").trim() || undefined } : {}),
+      ...(payload.exampleOptions !== undefined ? { exampleOptions: String(payload.exampleOptions ?? "").trim() || undefined } : {}),
+      ...(payload.exampleAnswer !== undefined ? { exampleAnswer: String(payload.exampleAnswer ?? "").trim() || undefined } : {}),
+      ...(payload.exampleExplanation !== undefined ? { exampleExplanation: String(payload.exampleExplanation ?? "").trim() || undefined } : {}),
       ...(payload.description !== undefined ? { description: String(payload.description ?? "").trim() || undefined } : {}),
     };
   },

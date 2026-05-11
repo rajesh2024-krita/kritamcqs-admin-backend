@@ -1,7 +1,6 @@
 import { z } from "zod";
 import {
   difficultySchema,
-  examCategorySchema,
   examModeSchema,
   examTypeSchema,
   examSchema,
@@ -54,7 +53,7 @@ export const learningLevelBodySchema = z.object({
 });
 
 export const examTypeBodySchema = z.object({
-  name: examTypeSchema,
+  name: z.string().trim().min(2).max(80),
   description: z.string().max(500).optional().or(z.literal("")),
 });
 
@@ -91,10 +90,16 @@ export const yearBodySchema = z.object({
 
 export const questionTypeBodySchema = z.object({
   name: z.string().min(2).max(120),
-  examType: examTypeSchema,
+  examType: z.string().trim().min(2).max(80),
   key: z.string().min(2).max(80).optional(),
   label: z.string().min(2).max(120).optional(),
-  examCategory: examCategorySchema.optional(),
+  examCategory: z.string().trim().min(2).max(80).optional(),
+  responseType: responseTypeSchema.optional().default("single"),
+  displayVariant: z.string().trim().min(2).max(80).optional().or(z.literal("")),
+  exampleQuestion: z.string().max(2000).optional().or(z.literal("")),
+  exampleOptions: z.string().max(2000).optional().or(z.literal("")),
+  exampleAnswer: z.string().max(500).optional().or(z.literal("")),
+  exampleExplanation: z.string().max(2000).optional().or(z.literal("")),
   description: z.string().max(500).optional().or(z.literal("")),
 });
 
