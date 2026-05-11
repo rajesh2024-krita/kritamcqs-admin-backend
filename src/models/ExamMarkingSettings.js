@@ -52,6 +52,7 @@ const examMarkingSettingsSchema = new Schema(
         active: true,
       }),
     },
+    predictionMinimumMockTests: { type: Number, default: 5, min: 1, max: 50 },
   },
   baseJsonOptions,
 );

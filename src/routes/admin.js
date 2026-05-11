@@ -33,6 +33,7 @@ import {
   Subject,
   Subscription,
   SubscriptionPlan,
+  SupportTicket,
   User,
   UserNotification,
   Year,
@@ -795,6 +796,7 @@ const markingRuleSchema = z.object({
 });
 
 const examMarkingSettingsSchema = z.object({
+  predictionMinimumMockTests: z.coerce.number().int().min(1).max(50).optional(),
   neet: z.object({
     version: z.string().trim().min(1),
     mcq: markingRuleSchema,
@@ -815,6 +817,81 @@ const examMarkingSettingsSchema = z.object({
   }).optional(),
 });
 
+const supportReplySchema = z.object({
+  message: z.string().trim().min(1).max(2000),
+  sendEmail: z.coerce.boolean().optional().default(true),
+  sendNotification: z.coerce.boolean().optional().default(true),
+});
+
+const notificationBroadcastSchema = z.object({
+  title: z.string().trim().min(2).max(160),
+  body: z.string().trim().min(1).max(3000),
+  type: z.enum(["text", "image", "offer", "announcement", "update"]).default("text"),
+  targetGroup: z.enum(["all", "premium", "non_premium", "highest_premium", "middle_premium", "lowest_premium"]).default("all"),
+  deliveryMode: z.enum(["notification", "email", "both"]).default("notification"),
+  linkUrl: z.string().trim().optional().default(""),
+});
+
+function notificationLinkForType(type) {
+  const normalized = String(type || "").toLowerCase();
+  if (normalized === "offer") return "/subscription";
+  if (normalized === "announcement" || normalized === "update") return "/notifications";
+  return "/notifications";
+}
+
+function splitPremiumUsersBySpend(users, targetGroup) {
+  const sorted = [...users].sort((a, b) => Number(b.lastPurchase?.finalAmount || 0) - Number(a.lastPurchase?.finalAmount || 0));
+  if (!["highest_premium", "middle_premium", "lowest_premium"].includes(targetGroup)) return sorted;
+  const bucketSize = Math.max(1, Math.ceil(sorted.length / 3));
+  if (targetGroup === "highest_premium") return sorted.slice(0, bucketSize);
+  if (targetGroup === "lowest_premium") return sorted.slice(-bucketSize);
+  return sorted.slice(bucketSize, sorted.length - bucketSize);
+}
+
+async function getNotificationRecipients(targetGroup) {
+  if (targetGroup === "all") return User.find({ isAdmin: { $ne: true } }).lean();
+  if (targetGroup === "non_premium") return User.find({ isAdmin: { $ne: true }, isPremium: { $ne: true } }).lean();
+
+  const premiumUsers = await User.find({ isAdmin: { $ne: true }, isPremium: true }).lean();
+  if (targetGroup === "premium") return premiumUsers;
+  return splitPremiumUsersBySpend(premiumUsers, targetGroup);
+}
+
+async function saveNotificationAttachment(file) {
+  if (!file) return { attachmentUrl: "", imageUrl: "", attachmentName: "" };
+
+  const allowed = new Set([
+    "image/jpeg",
+    "image/jpg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "application/pdf",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/plain",
+  ]);
+  const mimeType = String(file.mimetype || "").toLowerCase();
+  if (!allowed.has(mimeType)) throw new AppError("Unsupported notification attachment type", 400);
+
+  const root = path.join(uploadsRoot, "notifications");
+  ensureDir(root);
+  const baseName = sanitizeFileName(file.originalname || "notification-file");
+  const ext = path.extname(baseName) || (mimeType === "application/pdf" ? ".pdf" : ".png");
+  const name = path.basename(baseName, ext);
+  const fileName = `${name}-${Date.now()}-${crypto.randomInt(1000, 9999)}${ext}`;
+  await fs.writeFile(path.join(root, fileName), file.buffer);
+  const publicPath = `/uploads/notifications/${fileName}`;
+
+  return {
+    attachmentUrl: publicPath,
+    imageUrl: mimeType.startsWith("image/") ? publicPath : "",
+    attachmentName: file.originalname || fileName,
+  };
+}
+
 function getTodayRange() {
   const now = new Date();
   const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0));
@@ -833,6 +910,7 @@ function resolveDateRange(dateValue) {
 
 function createDefaultMarkingSettingsPayload() {
   return {
+    predictionMinimumMockTests: 5,
     neet: {
       version: "v1",
       examType: "NEET",
@@ -878,6 +956,7 @@ function normalizeMarkingScheme(scheme, fallback) {
 function normalizeMarkingSettingsDocument(doc) {
   const fallback = createDefaultMarkingSettingsPayload();
   return {
+    predictionMinimumMockTests: Math.max(1, Math.min(50, Number(doc?.predictionMinimumMockTests ?? fallback.predictionMinimumMockTests))),
     neet: normalizeMarkingScheme(doc?.neet, fallback.neet),
     jeeMain: normalizeMarkingScheme(doc?.jeeMain, fallback.jeeMain),
     jeeAdvanced: normalizeMarkingScheme(doc?.jeeAdvanced, fallback.jeeAdvanced),
@@ -913,6 +992,7 @@ function mapMarkingSettingsResponse(doc) {
     neet: normalized.neet,
     jeeMain: normalized.jeeMain,
     jeeAdvanced: normalized.jeeAdvanced,
+    predictionMinimumMockTests: normalized.predictionMinimumMockTests,
     updated_at: doc?.updatedAt,
   };
 }
@@ -1683,12 +1763,21 @@ async function buildMockTestPayload(payload, existing = null) {
 async function serializeMockTests(items) {
   const subjectIds = [...new Set(items.flatMap((item) => item.subjectIds || []).map(String).filter(Boolean))];
   const chapterIds = [...new Set(items.flatMap((item) => item.chapterIds || []).map(String).filter(Boolean))];
-  const [subjects, chapters] = await Promise.all([
+  const questionIds = [...new Set(items.flatMap((item) => item.questionIds || []).map(String).filter(Boolean))];
+  const [subjects, chapters, questions] = await Promise.all([
     subjectIds.length ? Subject.find({ _id: { $in: subjectIds } }).select("name") : [],
     chapterIds.length ? Chapter.find({ _id: { $in: chapterIds } }).select("name") : [],
+    questionIds.length
+      ? Question.find({ _id: { $in: questionIds } })
+        .select("_id question subjectId chapterId difficulty difficultyId")
+        .populate("subjectId", "name")
+        .populate("chapterId", "name")
+        .populate("difficultyId", "name")
+      : [],
   ]);
   const subjectMap = new Map(subjects.map((item) => [String(item._id), item.name]));
   const chapterMap = new Map(chapters.map((item) => [String(item._id), item.name]));
+  const questionMap = new Map(questions.map((item) => [String(item._id), item]));
 
   return items.map((item) => {
     const raw = typeof item?.toJSON === "function" ? item.toJSON() : item;
@@ -1703,6 +1792,16 @@ async function serializeMockTests(items) {
       totalQuestions: Number(raw.totalQuestions || raw.questionIds?.length || 0),
       maxScore: Number(raw.maxScore || 0),
       questionIds: (raw.questionIds || []).map(String),
+      manualQuestions: (raw.questionIds || [])
+        .map((id) => questionMap.get(String(id)))
+        .filter(Boolean)
+        .map((question) => ({
+          id: String(question._id),
+          question: question.question || "[Image Question]",
+          subjectName: question.subjectId?.name || "-",
+          chapterName: question.chapterId?.name || "-",
+          difficulty: question.difficultyId?.name || question.difficulty || "-",
+        })),
       subjectIds: (raw.subjectIds || []).map(String),
       chapterIds: (raw.chapterIds || []).map(String),
       subjectNames: (raw.subjectIds || []).map((id) => subjectMap.get(String(id))).filter(Boolean),
@@ -3095,6 +3194,135 @@ router.post(
 );
 
 router.get(
+  "/notifications",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const search = String(req.query.search || "").trim();
+    const type = String(req.query.type || "").trim();
+    const filter = {};
+    if (type && type !== "all") filter.type = type;
+    if (search) {
+      filter.$or = [
+        { title: new RegExp(search, "i") },
+        { body: new RegExp(search, "i") },
+        { targetGroup: new RegExp(search, "i") },
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      UserNotification.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
+      UserNotification.countDocuments(filter),
+    ]);
+    const userIds = [...new Set(items.map((item) => String(item.userId)).filter(Boolean))];
+    const users = userIds.length ? await User.find({ _id: { $in: userIds } }).select("name email mobile").lean() : [];
+    const userMap = new Map(users.map((user) => [String(user._id), user]));
+
+    res.json({
+      success: true,
+      data: items.map((item) => ({
+        ...item.toJSON(),
+        user: userMap.has(String(item.userId))
+          ? {
+              id: String(userMap.get(String(item.userId))._id),
+              name: userMap.get(String(item.userId)).name,
+              email: userMap.get(String(item.userId)).email,
+              mobile: userMap.get(String(item.userId)).mobile,
+            }
+          : null,
+      })),
+      meta: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.post(
+  "/notifications/broadcast",
+  upload.single("attachment"),
+  asyncHandler(async (req, res) => {
+    const payload = notificationBroadcastSchema.parse(req.body || {});
+    const recipients = await getNotificationRecipients(payload.targetGroup);
+    if (!recipients.length) throw new AppError("No users found for selected target group", 400);
+
+    const settings = await InvoiceSettings.findOne({ key: "default" });
+    const attachment = await saveNotificationAttachment(req.file);
+    const shouldNotify = payload.deliveryMode === "notification" || payload.deliveryMode === "both";
+    const shouldEmail = payload.deliveryMode === "email" || payload.deliveryMode === "both";
+    const broadcastId = `broadcast-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
+    const docs = [];
+    let emailSent = 0;
+    let emailFailed = 0;
+    let emailSkipped = 0;
+
+    for (const user of recipients) {
+      let emailStatus = shouldEmail ? "pending" : "not_requested";
+      let emailError = "";
+      if (shouldEmail) {
+        if (!user.email) {
+          emailStatus = "skipped";
+          emailError = "User email missing";
+          emailSkipped += 1;
+        } else {
+          try {
+            const result = await sendEmail({
+              smtp: settings?.smtp || {},
+              to: user.email,
+              subject: payload.title,
+              text: `${payload.body}\n\nKrita NEET JEE`,
+              attachments: req.file
+                ? [{ filename: req.file.originalname, contentType: req.file.mimetype, content: req.file.buffer }]
+                : [],
+            });
+            emailStatus = result.skipped ? "skipped" : "sent";
+            emailError = result.skipped ? result.reason || "" : "";
+            if (result.skipped) emailSkipped += 1;
+            else emailSent += 1;
+          } catch (error) {
+            emailStatus = "failed";
+            emailError = error instanceof Error ? error.message : "Email failed";
+            emailFailed += 1;
+          }
+        }
+      }
+
+      docs.push({
+        userId: String(user._id),
+        type: payload.type,
+        title: payload.title,
+        body: payload.body,
+        dedupeKey: `${broadcastId}:${String(user._id)}`,
+        visibleInApp: shouldNotify,
+        linkUrl: payload.linkUrl || notificationLinkForType(payload.type),
+        imageUrl: attachment.imageUrl,
+        attachmentUrl: attachment.attachmentUrl,
+        attachmentName: attachment.attachmentName,
+        targetGroup: payload.targetGroup,
+        deliveryMode: payload.deliveryMode,
+        notificationStatus: shouldNotify ? "sent" : "not_requested",
+        senderId: String(req.admin?._id || ""),
+        senderName: req.admin?.name || req.admin?.email || "Admin",
+        emailStatus,
+        emailError,
+        sentAt: new Date(),
+      });
+    }
+
+    await UserNotification.insertMany(docs, { ordered: false });
+    res.status(201).json({
+      success: true,
+      message: "Notification broadcast created",
+      data: {
+        totalRecipients: recipients.length,
+        notificationCreated: shouldNotify ? recipients.length : 0,
+        emailSent,
+        emailSkipped,
+        emailFailed,
+      },
+    });
+  }),
+);
+
+router.get(
   "/sessions",
   asyncHandler(async (req, res) => {
     const page = Math.max(Number(req.query.page || 1), 1);
@@ -3224,6 +3452,81 @@ router.get(
   }),
 );
 
+router.get(
+  "/support-tickets",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const search = String(req.query.search || "").trim();
+    const status = String(req.query.status || "").trim();
+    const filter = {};
+    if (status && status !== "all") filter.status = status;
+    if (search) {
+      filter.$or = [
+        { ticketId: new RegExp(search, "i") },
+        { userName: new RegExp(search, "i") },
+        { userEmail: new RegExp(search, "i") },
+        { userMobile: new RegExp(search, "i") },
+        { category: new RegExp(search, "i") },
+      ];
+    }
+
+    const [items, total] = await Promise.all([
+      SupportTicket.find(filter).sort({ isReadByAdmin: 1, updatedAt: -1 }).skip((page - 1) * limit).limit(limit),
+      SupportTicket.countDocuments(filter),
+    ]);
+    res.json({ success: true, data: items, meta: { page, limit, total, pages: Math.ceil(total / limit) } });
+  }),
+);
+
+router.patch(
+  "/support-tickets/:id/read",
+  asyncHandler(async (req, res) => {
+    const ticket = await SupportTicket.findByIdAndUpdate(req.params.id, { isReadByAdmin: true }, { new: true });
+    if (!ticket) throw new AppError("Support ticket not found", 404);
+    res.json({ success: true, data: ticket });
+  }),
+);
+
+router.post(
+  "/support-tickets/:id/reply",
+  asyncHandler(async (req, res) => {
+    const payload = supportReplySchema.parse(req.body || {});
+    const ticket = await SupportTicket.findById(req.params.id);
+    if (!ticket) throw new AppError("Support ticket not found", 404);
+
+    ticket.messages.push({ sender: "admin", message: payload.message, createdAt: new Date() });
+    ticket.status = "pending";
+    ticket.isReadByAdmin = true;
+    await ticket.save();
+
+    if (payload.sendNotification) {
+      await UserNotification.create({
+        userId: ticket.userId,
+        type: "support",
+        title: `Reply for ${ticket.ticketId}`,
+        body: payload.message,
+        dedupeKey: `support-reply-${ticket.id}-${Date.now()}`,
+        visibleInApp: true,
+      }).catch(() => undefined);
+    }
+
+    if (payload.sendEmail && ticket.userEmail) {
+      const settings = await InvoiceSettings.findOne({ key: "default" });
+      if (settings?.smtp) {
+        await sendEmail({
+          smtp: settings.smtp,
+          to: ticket.userEmail,
+          subject: `Support reply ${ticket.ticketId}`,
+          text: `Hi ${ticket.userName || "Learner"},\n\n${payload.message}\n\nTicket: ${ticket.ticketId}\n\nKrita Support`,
+        }).catch(() => undefined);
+      }
+    }
+
+    res.json({ success: true, message: "Support reply sent", data: ticket });
+  }),
+);
+
 router.post(
   "/mock-tests/marking-settings",
   asyncHandler(async (req, res) => {
@@ -3233,6 +3536,10 @@ router.post(
     const normalizedExisting = normalizeMarkingSettingsDocument(existing);
 
     const nextValues = {
+      predictionMinimumMockTests: Math.max(
+        1,
+        Math.min(50, Number(payload.predictionMinimumMockTests ?? normalizedExisting.predictionMinimumMockTests ?? defaults.predictionMinimumMockTests)),
+      ),
       neet: normalizeMarkingScheme(payload.neet ?? normalizedExisting.neet, defaults.neet),
       jeeMain: normalizeMarkingScheme(payload.jeeMain ?? normalizedExisting.jeeMain, defaults.jeeMain),
       jeeAdvanced: normalizeMarkingScheme(payload.jeeAdvanced ?? normalizedExisting.jeeAdvanced, defaults.jeeAdvanced),
@@ -3728,7 +4035,7 @@ const chapterService = createCrudService({
   populate: ["subjectId"],
   allowedSorts: ["createdAt", "updatedAt", "name"],
   searchFields: ["name"],
-  exactFilters: ["subjectId"],
+  exactFilters: ["_id", "subjectId"],
   beforeDelete: async (chapter) => {
     const [topicCount, questionCount] = await Promise.all([
       Topic.countDocuments({ chapterId: chapter._id }),
@@ -3745,7 +4052,7 @@ const topicService = createCrudService({
   populate: ["subjectId", "chapterId"],
   allowedSorts: ["createdAt", "updatedAt", "name"],
   searchFields: ["name"],
-  exactFilters: ["subjectId", "chapterId"],
+  exactFilters: ["_id", "subjectId", "chapterId"],
   beforeCreate: async (payload) => {
     const [subject, chapter] = await Promise.all([
       Subject.findById(payload.subjectId),
@@ -3812,7 +4119,7 @@ const questionTypeService = createCrudService({
   model: QuestionType,
   allowedSorts: ["createdAt", "updatedAt", "name", "examType", "label", "key"],
   searchFields: ["name", "key", "label", "description"],
-  exactFilters: ["examType", "examCategory", "responseType"],
+  exactFilters: ["examType", "examCategory", "responseType", "displayVariant"],
   beforeCreate: async (payload) => {
     const examType = await ensureExamTypeExists(payload.examType || payload.examCategory);
     return {

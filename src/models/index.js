@@ -35,3 +35,4 @@ export * from "./InvoiceSettings.js";
 export * from "./Invoice.js";
 export * from "./NotificationSettings.js";
 export * from "./UserNotification.js";
+export * from "./SupportTicket.js";
