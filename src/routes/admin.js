@@ -6,6 +6,7 @@ import { requireAdmin } from "../middlewares/auth.js";
 import { validate } from "../middlewares/validate.js";
 import {
   Chapter,
+  AuthSettings,
   Topic,
   Coupon,
   DailyTest,
@@ -13,6 +14,8 @@ import {
   DailyTestSettings,
   DailyPlanConfig,
   Difficulty,
+  EmailLog,
+  EmailTemplate,
   ExamType,
   ExamMarkingSettings,
   Invoice,
@@ -51,6 +54,7 @@ import { questionBulkUploadService } from "../services/questionBulkUploadService
 import { oldUserMigrationService } from "../services/oldUserMigrationService.js";
 import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName, uploadsRoot } from "../utils/uploadStorage.js";
 import { sendEmail } from "../utils/simpleEmail.js";
+import { EMAIL_TEMPLATE_KEYS } from "../utils/templatedEmail.js";
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
@@ -64,6 +68,119 @@ import { ownQuestionAssetUrl } from "../utils/questionAssetOwner.js";
 
 const router = Router();
 router.use(requireAdmin);
+
+function renderTemplate(template, values) {
+  return String(template || "").replace(/\{\{(\w+)\}\}/g, (_match, key) => String(values[key] ?? ""));
+}
+
+function sampleEmailVariables(overrides = {}) {
+  const now = new Date();
+  return {
+    user_name: "Test User",
+    email: "test@example.com",
+    mobile: "+91 98765 43210",
+    app_name: "Krita",
+    company_name: "Krita NEET JEE",
+    support_email: "support@krita.com",
+    invoice_number: "INV-TEST-001",
+    invoice_date: now.toLocaleDateString("en-IN"),
+    payment_amount: "₹1,000.00",
+    invoice_amount: "₹1,000.00",
+    tax_amount: "₹180.00",
+    convenience_fee: "₹20.00",
+    convenience_fee_gst: "₹3.60",
+    total_amount: "₹1,203.60",
+    payment_status: "PAID",
+    transaction_id: "TXN-123456",
+    otp: "123456",
+    otp_code: "123456",
+    otp_expiry: "10 minutes",
+    expiry_date: now.toLocaleDateString("en-IN"),
+    expiry_type: "Subscription",
+    days_before: "7",
+    plan_name: "Premium Plan",
+    ticket_id: "SUP-TEST-001",
+    ticket_category: "Account Help",
+    ticket_status: "Open",
+    ticket_message: "This is a sample support ticket update.",
+    admin_email: "admin@example.com",
+    announcement_title: "New Announcement",
+    announcement_message: "This is a sample announcement message.",
+    update_title: "Product Update",
+    update_message: "A new platform update is ready.",
+    offer_title: "Special Offer",
+    offer_code: "SAVE20",
+    offer_discount: "20%",
+    notification_title: "Reminder",
+    notification_message: "This is a sample notification.",
+    current_date: now.toLocaleDateString("en-IN"),
+    current_time: now.toLocaleTimeString("en-IN"),
+    ...overrides,
+  };
+}
+
+async function sendTemplatedEmail(templateKey, to, variables, attachments = []) {
+  const template = await EmailTemplate.findOne({ key: templateKey, isActive: true });
+  if (!template) {
+    console.warn(`[EMAIL] Template not found or inactive: ${templateKey}. Will skip sending to ${to}`);
+    throw new Error(`Email template '${templateKey}' not found or inactive`);
+  }
+
+  const settings = await InvoiceSettings.findOne({ key: "default" });
+  const mergedData = sampleEmailVariables({ ...(template.sampleData || {}), ...(variables || {}) });
+  const subject = renderTemplate(template.subject, mergedData);
+  const textContent = renderTemplate(template.textContent, mergedData);
+  const htmlContent = renderTemplate(template.htmlContent, mergedData);
+
+  console.log(
+    `[EMAIL] Sending template: ${templateKey} | To: ${to} | Subject: ${subject} | Variables: ${Object.keys(variables || {}).join(", ")}`
+  );
+
+  const log = await EmailLog.create({
+    templateKey,
+    templateName: template.name,
+    module: template.module || template.type,
+    to,
+    subject,
+    status: "pending",
+    attempts: 0,
+    payload: mergedData,
+  });
+
+  try {
+    const result = await sendEmail({
+      smtp: settings?.smtp,
+      to,
+      subject,
+      text: textContent,
+      html: htmlContent,
+      attachments,
+    });
+
+    log.attempts += 1;
+    log.lastAttemptAt = new Date();
+    log.status = result.skipped ? "skipped" : "sent";
+    log.error = result.skipped ? result.reason || "" : "";
+    log.sentAt = result.skipped ? undefined : new Date();
+    await log.save();
+
+    if (result.skipped) {
+      console.warn(`[EMAIL] Email skipped for ${templateKey}: ${result.reason}`);
+    } else {
+      console.info(`[EMAIL] Email sent successfully for ${templateKey} to ${to} (LogId: ${log._id})`);
+    }
+
+    return { ...result, logId: String(log._id) };
+  } catch (error) {
+    log.attempts += 1;
+    log.lastAttemptAt = new Date();
+    log.status = "failed";
+    log.error = error instanceof Error ? error.message : String(error);
+    await log.save();
+    console.error(`[EMAIL] Email send failed for ${templateKey}: ${log.error}`);
+    throw error;
+  }
+}
 
 const defaultInvoiceFields = [
   { id: "invoiceNumber", label: "Invoice # {{invoiceNumber}}", x: 48, y: 118, size: 10, enabled: true },
@@ -2738,11 +2855,12 @@ router.post(
     const to = String(req.body?.to || settings.companyEmail || settings.smtp?.fromEmail || "").trim();
     if (!to) throw new AppError("Test recipient email is required", 400);
 
-    const result = await sendEmail({
-      smtp: settings.smtp || {},
-      to,
-      subject: "Krita invoice SMTP test",
-      text: "SMTP is configured correctly for invoice and reminder emails.",
+    const result = await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.SMTP_TEST, to, {
+      user_name: "Test User",
+      email: to,
+      app_name: settings.companyName || "Krita",
+      company_name: settings.companyName || "Krita",
+      support_email: settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com",
     });
 
     res.json({
@@ -2796,12 +2914,17 @@ router.post(
       items: [{ product: "Premium Subscription", description: "Template test item", quantity: 1, price: testSubtotal, discount: testDiscount, tax: testTaxPercent, total: testAmountBeforeCharges }],
     };
     const pdf = await renderInvoicePdf(sampleInvoice, settings, { planName: "Premium Plan" });
-    const result = await sendEmail({
+    const result = await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.INVOICE_TEST, to, {
+      user_name: sampleInvoice.userName,
+      customer_name: sampleInvoice.userName,
+      email: to,
+      invoice_number: sampleInvoice.invoiceNumber,
+      invoice_amount: `${sampleInvoice.currency} ${Number(sampleInvoice.amount || 0).toFixed(2)}`,
+      company_name: settings.companyName || "Krita",
+      support_email: settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com",
+    }, [{ filename: `${sampleInvoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }], {
       smtp: settings.smtp || {},
-      to,
-      subject: `Test Invoice from ${settings.companyName}`,
-      text: `Hi,\n\nThis is a test invoice from ${settings.companyName}. Please check the attached PDF layout and email delivery.\n\nNo payment is required.`,
-      attachments: [{ filename: `${sampleInvoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }],
+      logger: req.logger || console,
     });
     res.json({ success: true, message: result.skipped ? "Test invoice email skipped" : "Test invoice email sent", data: result });
   }),
@@ -2988,12 +3111,21 @@ router.post(
     const settings = await getInvoiceSettingsDoc();
     if (!invoice.userEmail) throw new AppError("Invoice customer email is missing", 400);
     const pdf = await regenerateInvoicePdf(invoice, settings);
-    const result = await sendEmail({
+    const result = await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.INVOICE_GENERATED, invoice.userEmail, {
+      user_name: invoice.userName || "Customer",
+      customer_name: invoice.userName || "Customer",
+      email: invoice.userEmail,
+      invoice_number: invoice.invoiceNumber,
+      invoice_amount: `${invoice.currency} ${Number(invoice.amount || 0).toFixed(2)}`,
+      payment_amount: `${invoice.currency} ${Number(invoice.amount || 0).toFixed(2)}`,
+      due_date: invoice.dueDate ? new Date(invoice.dueDate).toLocaleDateString("en-IN") : "",
+      payment_status: invoice.status || "sent",
+      transaction_id: invoice.transactionId || "-",
+      company_name: settings.companyName || "Krita",
+      support_email: settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com",
+    }, [{ filename: `${invoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }], {
       smtp: settings.smtp || {},
-      to: invoice.userEmail,
-      subject: String(req.body?.subject || `Invoice ${invoice.invoiceNumber} from ${settings.companyName}`),
-      text: String(req.body?.body || `Hi ${invoice.userName || "Customer"},\n\nYour invoice ${invoice.invoiceNumber} amount is ${invoice.currency} ${invoice.amount}.\nPayment status: ${invoice.status}.\nTransaction ID: ${invoice.transactionId || "-"}.\n\n${settings.companyName}`),
-      attachments: [{ filename: `${invoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }],
+      logger: req.logger || console,
     });
     invoice.emailStatus = result.skipped ? "skipped" : "sent";
     invoice.status = invoice.status === "draft" ? "sent" : invoice.status;
@@ -3104,12 +3236,26 @@ router.post(
     await invoice.save();
     if (settings.enabled && settings.emailEnabled && invoice.userEmail) {
       const data = invoiceData({ ...invoice.toJSON(), planName: plan?.name || subscription.planId });
-      const result = await sendEmail({
+      const result = await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.INVOICE_GENERATED, invoice.userEmail, {
+        user_name: invoice.userName || "Learner",
+        customer_name: invoice.userName || "Learner",
+        email: invoice.userEmail,
+        invoice_number: invoice.invoiceNumber,
+        invoice_amount: `${data.currency} ${Number(data.totalAmount || 0).toFixed(2)}`,
+        payment_amount: `${data.currency} ${Number(data.totalAmount || 0).toFixed(2)}`,
+        invoice_date: new Date(invoice.invoiceDate || invoice.createdAt).toLocaleDateString("en-IN"),
+        due_date: invoice.dueDate ? new Date(invoice.dueDate).toLocaleDateString("en-IN") : "",
+        tax_amount: `${data.currency} ${Number(data.taxAmount || 0).toFixed(2)}`,
+        convenience_fee: `${data.currency} ${Number(data.convenienceCharge || 0).toFixed(2)}`,
+        convenience_fee_gst: `${data.currency} ${Number(data.convenienceChargeGst || 0).toFixed(2)}`,
+        total_amount: `${data.currency} ${Number(data.totalAmount || 0).toFixed(2)}`,
+        payment_status: data.paymentStatus,
+        transaction_id: data.transactionId || "-",
+        company_name: settings.companyName || "Krita",
+        support_email: settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com",
+      }, [{ filename: `${invoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }], {
         smtp: settings.smtp || {},
-        to: invoice.userEmail,
-        subject: `Invoice ${invoice.invoiceNumber} from ${settings.companyName}`,
-        text: `Hi ${invoice.userName || "Learner"},\n\nYour payment was successful and your invoice PDF is attached.\n\nInvoice: ${invoice.invoiceNumber}\nProduct: ${data.planName}\nSubtotal: ${data.baseAmount}\nDiscount: ${data.discountAmount}\nTax (${data.taxPercent}%): ${data.taxAmount}\nConvenience Charges: ${data.convenienceCharge}\nGST on Convenience Charges: ${data.convenienceChargeGst}\nTotal Paid: ${data.totalAmount}\nPayment Status: ${data.paymentStatus}\nTransaction ID: ${data.transactionId || "-"}\n\nFor support, contact ${settings.companyEmail || settings.smtp?.fromEmail || "support"}.\n\n${settings.companyName}`,
-        attachments: [{ filename: `${invoice.invoiceNumber}.pdf`, contentType: "application/pdf", content: pdf }],
+        logger: req.logger || console,
       });
       invoice.emailStatus = result.skipped ? "skipped" : "sent";
       invoice.emailError = result.skipped ? result.reason : "";
@@ -3264,22 +3410,20 @@ router.post(
           emailSkipped += 1;
         } else {
           try {
-            const result = await sendEmail({
-              smtp: settings?.smtp || {},
-              to: user.email,
-              subject: payload.title,
-              text: `${payload.body}\n\nKrita NEET JEE`,
-              attachments: req.file
-                ? [{ filename: req.file.originalname, contentType: req.file.mimetype, content: req.file.buffer }]
-                : [],
-            });
-            emailStatus = result.skipped ? "skipped" : "sent";
-            emailError = result.skipped ? result.reason || "" : "";
-            if (result.skipped) emailSkipped += 1;
-            else emailSent += 1;
+            await sendTemplatedEmail("broadcast_default", user.email, {
+              user_name: user.name || user.mobile || "Learner",
+              broadcast_title: payload.title,
+              broadcast_body: payload.body,
+              support_email: settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com",
+            }, req.file
+              ? [{ filename: req.file.originalname, contentType: req.file.mimetype, content: req.file.buffer }]
+              : []);
+
+            emailStatus = "sent";
+            emailSent += 1;
           } catch (error) {
             emailStatus = "failed";
-            emailError = error instanceof Error ? error.message : "Email failed";
+            emailError = error.message;
             emailFailed += 1;
           }
         }
@@ -3514,11 +3658,16 @@ router.post(
     if (payload.sendEmail && ticket.userEmail) {
       const settings = await InvoiceSettings.findOne({ key: "default" });
       if (settings?.smtp) {
-        await sendEmail({
+        await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.HELPDESK_TICKET_REPLY, ticket.userEmail, {
+          user_name: ticket.userName || "Learner",
+          email: ticket.userEmail,
+          ticket_id: ticket.ticketId,
+          ticket_status: ticket.status || "open",
+          reply_message: payload.message,
+          support_email: settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com",
+        }, [], {
           smtp: settings.smtp,
-          to: ticket.userEmail,
-          subject: `Support reply ${ticket.ticketId}`,
-          text: `Hi ${ticket.userName || "Learner"},\n\n${payload.message}\n\nTicket: ${ticket.ticketId}\n\nKrita Support`,
+          logger: req.logger || console,
         }).catch(() => undefined);
       }
     }
@@ -4260,17 +4409,19 @@ const questionService = createCrudService({
 
 const userService = createCrudService({
   model: User,
-  allowedSorts: ["createdAt", "updatedAt", "name", "mobile", "email"],
+  allowedSorts: ["createdAt", "updatedAt", "lastLoginAt", "name", "mobile", "email"],
   searchFields: ["name", "mobile", "email"],
-  exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete"],
+  exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete", "isActive", "isBlocked"],
   beforeCreate: async (payload) => ({
     ...payload,
     passwordHash: payload.password ? hashPassword(payload.password) : undefined,
+    authTypes: payload.password ? ["email"] : payload.authTypes,
     premiumExpiresAt: payload.premiumExpiresAt || undefined,
   }),
   beforeUpdate: async (_existing, payload) => ({
     ...payload,
     passwordHash: payload.password ? hashPassword(payload.password) : undefined,
+    authTypes: payload.password ? [...new Set([...(Array.isArray(_existing.authTypes) ? _existing.authTypes : []), "email"])] : _existing.authTypes,
     premiumExpiresAt: payload.premiumExpiresAt || undefined,
   }),
   beforeDelete: async (user) => {
@@ -4396,6 +4547,209 @@ router.use("/topics", createCrudRouter({ key: "topic", label: "Topic", service: 
 router.use("/years", createCrudRouter({ key: "year", label: "Year", service: yearService }));
 router.use("/question-types", createCrudRouter({ key: "questionType", label: "Question Type", service: questionTypeService }));
 router.use("/questions", createCrudRouter({ key: "question", label: "Question", service: questionService }));
+
+// Email Templates (System)
+const emailTemplateService = createCrudService({
+  model: EmailTemplate,
+  allowedSorts: ["createdAt", "updatedAt", "name", "key", "type"],
+  searchFields: ["name", "key", "type", "subject"],
+  exactFilters: ["isActive", "type", "key", "module"],
+  beforeCreate: async (payload) => ({
+    ...payload,
+    key: String(payload.key || "").trim(),
+    name: String(payload.name || "").trim(),
+    type: payload.type,
+    module: String(payload.module || payload.type || "").trim(),
+    subject: String(payload.subject || "").trim(),
+    htmlContent: String(payload.htmlContent || ""),
+    textContent: String(payload.textContent || ""),
+    variables: Array.isArray(payload.variables) ? payload.variables.map((v) => String(v).trim()).filter(Boolean) : [],
+    sampleData: payload.sampleData || {},
+    isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : true,
+    isDefault: payload.isDefault !== undefined ? Boolean(payload.isDefault) : false,
+    createdBy: String(payload.createdBy || ""),
+    updatedBy: String(payload.updatedBy || ""),
+  }),
+  beforeUpdate: async (_existing, payload) => ({
+    ...payload,
+    ...(payload.key !== undefined ? { key: String(payload.key || "").trim() } : {}),
+    ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
+    ...(payload.module !== undefined ? { module: String(payload.module || "").trim() } : {}),
+    ...(payload.subject !== undefined ? { subject: String(payload.subject || "").trim() } : {}),
+    ...(payload.htmlContent !== undefined ? { htmlContent: String(payload.htmlContent || "") } : {}),
+    ...(payload.textContent !== undefined ? { textContent: String(payload.textContent || "") } : {}),
+    ...(payload.variables !== undefined
+      ? { variables: Array.isArray(payload.variables) ? payload.variables.map((v) => String(v).trim()).filter(Boolean) : [] }
+      : {}),
+    ...(payload.sampleData !== undefined ? { sampleData: payload.sampleData } : {}),
+    ...(payload.isActive !== undefined ? { isActive: Boolean(payload.isActive) } : {}),
+    ...(payload.isDefault !== undefined ? { isDefault: Boolean(payload.isDefault) } : {}),
+    ...(payload.updatedBy !== undefined ? { updatedBy: String(payload.updatedBy || "") } : {}),
+  }),
+});
+
+router.get(
+  "/email-templates/catalog",
+  asyncHandler(async (req, res) => {
+    const templateDocs = await EmailTemplate.find().select("key name type module variables").lean();
+    const modules = [...new Set(templateDocs.map((item) => String(item.module || item.type || "").trim()).filter(Boolean))];
+    const types = [...new Set(templateDocs.map((item) => String(item.type || "").trim()).filter(Boolean))];
+    const templateList = templateDocs.map((item) => ({
+      ...item,
+      id: item._id?.toString(),
+      module: String(item.module || item.type || "").trim(),
+    }));
+    sendResponse(res, {
+      data: {
+        modules: modules.sort(),
+        types: types.sort(),
+        templates: templateList,
+        variables: [
+          "user_name",
+          "email",
+          "mobile",
+          "app_name",
+          "support_email",
+          "company_name",
+          "invoice_number",
+          "invoice_date",
+          "payment_amount",
+          "invoice_amount",
+          "tax_amount",
+          "convenience_fee",
+          "convenience_fee_gst",
+          "total_amount",
+          "payment_status",
+          "transaction_id",
+          "otp",
+          "otp_code",
+          "otp_expiry",
+          "expiry_date",
+          "expiry_type",
+          "days_before",
+          "plan_name",
+          "ticket_id",
+          "ticket_category",
+          "ticket_status",
+          "ticket_message",
+          "admin_email",
+          "announcement_title",
+          "announcement_message",
+          "update_title",
+          "update_message",
+          "offer_title",
+          "offer_code",
+          "offer_discount",
+          "notification_title",
+          "notification_message",
+          "current_date",
+          "current_time",
+        ],
+        sampleData: sampleEmailVariables(),
+      },
+    });
+  }),
+);
+
+router.use("/email-templates", createCrudRouter({ key: "emailTemplate", label: "Email Template", service: emailTemplateService }));
+
+router.post(
+  "/email-templates/:id/preview",
+  asyncHandler(async (req, res) => {
+    const template = await EmailTemplate.findById(req.params.id);
+    if (!template) throw new AppError("Email template not found", 404);
+    const values = sampleEmailVariables({ ...(template.sampleData || {}), ...(req.body?.variables || {}) });
+    sendResponse(res, {
+      data: {
+        subject: renderTemplate(template.subject, values),
+        htmlContent: renderTemplate(template.htmlContent, values),
+        textContent: renderTemplate(template.textContent, values),
+        variables: values,
+      },
+    });
+  }),
+);
+
+router.get(
+  "/email-logs",
+  asyncHandler(async (req, res) => {
+    const page = Math.max(Number(req.query.page || 1), 1);
+    const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 200);
+    const search = String(req.query.search || "").trim();
+    const filters = {};
+    if (req.query.status) filters.status = String(req.query.status);
+    if (req.query.module) filters.module = String(req.query.module);
+    if (req.query.templateKey) filters.templateKey = String(req.query.templateKey);
+    if (search) {
+      filters.$or = [
+        { to: new RegExp(search, "i") },
+        { subject: new RegExp(search, "i") },
+        { templateName: new RegExp(search, "i") },
+        { templateKey: new RegExp(search, "i") },
+      ];
+    }
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      EmailLog.find(filters).sort({ createdAt: -1 }).skip(skip).limit(limit),
+      EmailLog.countDocuments(filters),
+    ]);
+    sendResponse(res, {
+      data: items,
+      meta: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.post(
+  "/email-logs/:id/retry",
+  asyncHandler(async (req, res) => {
+    const log = await EmailLog.findById(req.params.id);
+    if (!log) throw new AppError("Email log not found", 404);
+    if (!log.templateKey) throw new AppError("Only templated emails can be retried", 400);
+    const result = await sendTemplatedEmail(log.templateKey, log.to, { ...(log.payload || {}), ...(req.body?.variables || {}) });
+    log.status = result.skipped ? "skipped" : "sent";
+    log.error = result.skipped ? result.reason || "" : "";
+    log.attempts = Number(log.attempts || 0) + 1;
+    log.lastAttemptAt = new Date();
+    log.sentAt = result.skipped ? undefined : new Date();
+    await log.save();
+    sendResponse(res, { data: result, message: result.skipped ? "Retry skipped" : "Retry email sent" });
+  }),
+);
+
+router.get("/auth-settings", asyncHandler(async (_req, res) => {
+  const settings = await AuthSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default" } }, { upsert: true, new: true });
+  sendResponse(res, { data: settings });
+}));
+router.post("/auth-settings", asyncHandler(async (req, res) => {
+  const current = await AuthSettings.findOne({ key: "default" });
+  const body = req.body || {};
+  const payload = {
+    emailPasswordEnabled: Boolean(body.emailPasswordEnabled),
+    googleEnabled: Boolean(body.googleEnabled),
+    googleClientId: String(body.googleClientId || "").trim(),
+    googleCallbackUrl: String(body.googleCallbackUrl || "").trim(),
+    profileMobileRequired: Boolean(body.profileMobileRequired),
+    googleRedirectUrls: Array.isArray(body.googleRedirectUrls)
+      ? body.googleRedirectUrls.map((item) => String(item || "").trim()).filter(Boolean)
+      : String(body.googleRedirectUrls || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean),
+    resetOtpExpiryMinutes: Math.max(1, Math.min(60, Number(body.resetOtpExpiryMinutes || 10))),
+    resetOtpMaxAttempts: Math.max(1, Math.min(10, Number(body.resetOtpMaxAttempts || 5))),
+    resetOtpMaxResends: Math.max(1, Math.min(10, Number(body.resetOtpMaxResends || 3))),
+    sessionTimeoutMinutes: Math.max(15, Number(body.sessionTimeoutMinutes || 43200)),
+    resetOtpEmailSubject: String(body.resetOtpEmailSubject || "Krita password reset OTP").trim(),
+    resetOtpEmailTemplate: String(body.resetOtpEmailTemplate || "Your Krita password reset OTP is {{otp}}. It expires in {{expiryMinutes}} minutes.").trim(),
+  };
+  const secret = String(body.googleClientSecret || "").trim();
+  if (secret) payload.googleClientSecret = secret;
+  else if (current?.googleClientSecret) payload.googleClientSecret = current.googleClientSecret;
+  const settings = await AuthSettings.findOneAndUpdate(
+    { key: "default" },
+    { $set: payload, $setOnInsert: { key: "default" } },
+    { upsert: true, new: true },
+  );
+  sendResponse(res, { message: "Authentication settings saved", data: settings });
+}));
 router.use("/users", createCrudRouter({ key: "user", label: "User", service: userService }));
 router.use("/coupons", createCrudRouter({ key: "coupon", label: "Coupon", service: couponService }));
 router.use(

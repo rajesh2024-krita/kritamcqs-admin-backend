@@ -13,5 +13,9 @@ export function signAdminToken(user) {
 }
 
 export function verifyToken(token) {
-  return jwt.verify(token, env.jwtSecret);
+  if (!token || typeof token !== "string") {
+    throw new Error("Invalid or expired token");
+  }
+
+  return jwt.verify(token.trim(), env.jwtSecret);
 }

@@ -4,14 +4,18 @@ import { verifyToken } from "../utils/token.js";
 
 export async function requireAdmin(req, _res, next) {
   try {
-    const header = req.headers.authorization || "";
-    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    const header = String(req.headers.authorization || "");
+    const token = header.match(/^Bearer\s+(.+)$/i)?.[1] ?? null;
 
     if (!token) {
       throw new AppError("Authentication required", 401);
     }
 
     const decoded = verifyToken(token);
+    if (!decoded || typeof decoded !== "object" || !decoded.userId) {
+      throw new AppError("Invalid token payload", 401);
+    }
+
     const admin = await User.findById(decoded.userId);
 
     if (!admin || !admin.isAdmin) {

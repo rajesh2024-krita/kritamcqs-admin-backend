@@ -90,6 +90,20 @@ export const yearBodySchema = z.object({
   examType: examTypeSchema,
 });
 
+export const emailTemplateBodySchema = z.object({
+  key: z.string().trim().min(2).max(120),
+  name: z.string().trim().min(2).max(120),
+  type: z.enum(["forgot_password", "otp_verification", "welcome", "notification", "offer", "announcement", "update", "invoice", "registration", "verification", "subscription", "payment_success", "reminder", "broadcast"]),
+  module: z.string().trim().max(80).optional().or(z.literal("")),
+  subject: z.string().trim().min(2).max(180),
+  htmlContent: z.string().optional().or(z.literal("")),
+  textContent: z.string().optional().or(z.literal("")),
+  variables: z.array(z.string().trim().min(1)).optional().default([]),
+  sampleData: z.record(z.any()).optional().default({}),
+  isActive: z.boolean().optional().default(true),
+  isDefault: z.boolean().optional().default(false),
+});
+
 export const questionTypeBodySchema = z.object({
   name: z.string().min(2).max(120),
   examType: z.string().trim().min(2).max(80),
@@ -229,7 +243,7 @@ export const questionUpdateBodySchema = z.object({
 });
 
 export const userBodySchema = z.object({
-  mobile: z.string().min(10).max(15),
+  mobile: z.string().min(10).max(15).optional().or(z.literal("")),
   email: z.string().email().optional().or(z.literal("")),
   password: passwordSchema.optional(),
   name: z.string().min(2).max(80),
@@ -238,6 +252,8 @@ export const userBodySchema = z.object({
   onboardingComplete: z.boolean().optional().default(false),
   mobileVerified: z.boolean().optional().default(false),
   isPremium: z.boolean().optional().default(false),
+  isActive: z.boolean().optional().default(true),
+  isBlocked: z.boolean().optional().default(false),
   premiumExpiresAt: z.string().datetime().optional().or(z.literal("")),
   isAdmin: z.boolean().optional().default(false),
   migratedFromOldApp: z.boolean().optional().default(false),
@@ -291,6 +307,7 @@ export const createSchemas = {
   questionType: z.object({ body: questionTypeBodySchema }),
   question: z.object({ body: questionBodySchema }),
   user: z.object({ body: userBodySchema }),
+  emailTemplate: z.object({ body: emailTemplateBodySchema }),
   coupon: z.object({ body: couponBodySchema }),
   subscriptionPlan: z.object({ body: subscriptionPlanBodySchema }),
   dailyPlan: z.object({ body: dailyPlanBodySchema }),
@@ -308,6 +325,7 @@ export const updateSchemas = {
   questionType: z.object({ body: questionTypeBodySchema.partial() }),
   question: z.object({ body: questionUpdateBodySchema }),
   user: z.object({ body: userUpdateBodySchema }),
+  emailTemplate: z.object({ body: emailTemplateBodySchema.partial() }),
   coupon: z.object({ body: couponBodySchema.partial() }),
   subscriptionPlan: z.object({ body: subscriptionPlanBodySchema.partial() }),
   dailyPlan: z.object({ body: dailyPlanBodySchema.partial() }),
