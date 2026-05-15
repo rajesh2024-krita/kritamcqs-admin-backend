@@ -5,8 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js",
-    "seed:subscription-plan": "node scripts/seed-subscription-plan.js"
+    "start": "node src/server.js"
   },
   "dependencies": {
     "cors": "^2.8.5",
