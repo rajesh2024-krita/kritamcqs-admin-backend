@@ -65,6 +65,19 @@ function normalizeImageSourceUrl(rawValue) {
   }
 }
 
+function isDataUri(value) {
+  return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(String(value || "").trim());
+}
+
+function parseDataUri(dataUri) {
+  const match = String(dataUri || "").trim().match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+  if (!match) throw new Error("Invalid data URI image");
+  return {
+    contentType: match[1],
+    buffer: Buffer.from(match[2], "base64"),
+  };
+}
+
 async function fetchImageWithFallback(urlValue) {
   const firstUrl = normalizeImageSourceUrl(urlValue);
   const attempts = [firstUrl];
@@ -107,6 +120,15 @@ export function isOwnableImageUrl(rawValue) {
 export async function ownQuestionAssetUrl(sourceUrl) {
   const normalizedSourceUrl = String(sourceUrl || "").trim();
   if (!normalizedSourceUrl || normalizedSourceUrl.startsWith("/uploads/")) return normalizedSourceUrl;
+  if (isDataUri(normalizedSourceUrl)) {
+    const { buffer, contentType } = parseDataUri(normalizedSourceUrl);
+    ensureDir(questionUploadsRoot);
+    const ext = inferImageExtensionFromUrl(normalizedSourceUrl, contentType);
+    const fileName = `question-image-${Date.now()}-${Math.floor(Math.random() * 10000)}${ext}`;
+    await fs.writeFile(`${questionUploadsRoot}/${fileName}`, buffer);
+    return buildPublicUploadPath(fileName);
+  }
+
   if (!isOwnableImageUrl(normalizedSourceUrl)) return normalizedSourceUrl;
 
   const parsed = new URL(normalizeImageSourceUrl(normalizedSourceUrl));

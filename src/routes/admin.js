@@ -3578,13 +3578,23 @@ router.post(
   }),
 );
 
+router.get(
+  "/questions/bulk-upload/:batchId/status",
+  asyncHandler(async (req, res) => {
+    const data = await questionBulkUploadService.getStatus({
+      batchId: req.params.batchId,
+    });
+    res.json({ success: true, message: "Bulk upload status loaded", data });
+  }),
+);
+
 router.post(
   "/questions/bulk-upload/:batchId/approve",
   asyncHandler(async (req, res) => {
     const data = await questionBulkUploadService.approve({
       batchId: req.params.batchId,
     });
-    res.status(201).json({ success: true, message: "Questions uploaded successfully", data });
+    res.status(202).json({ success: true, message: "Bulk upload approved and processing started", data });
   }),
 );
 
