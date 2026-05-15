@@ -9,11 +9,30 @@ import { uploadsRoot } from "./utils/uploadStorage.js";
 
 export const app = express();
 
+// app.use(
+//   cors({
+//     origin: env.clientOrigin === "*" ? true : env.clientOrigin,
+//     credentials: true,
+//   }),
+// );
+const allowedOrigins = env.clientOrigin
+  .split(",")
+  .map(origin => origin.trim());
+
 app.use(
   cors({
-    origin: env.clientOrigin === "*" ? true : env.clientOrigin,
+    origin: function (origin, callback) {
+      // allow requests with no origin (mobile apps/postman)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
-  }),
+  })
 );
 app.use(express.json({ limit: "2mb" }));
 app.use("/uploads", express.static(uploadsRoot));
