@@ -54,7 +54,12 @@ import { questionBulkUploadService } from "../services/questionBulkUploadService
 import { oldUserMigrationService } from "../services/oldUserMigrationService.js";
 import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName, uploadsRoot } from "../utils/uploadStorage.js";
 import { sendEmail } from "../utils/simpleEmail.js";
-import { EMAIL_TEMPLATE_KEYS } from "../utils/templatedEmail.js";
+import {
+  COMMON_EMAIL_VARIABLES,
+  EMAIL_TEMPLATE_DEFINITIONS,
+  EMAIL_TEMPLATE_KEYS,
+  buildDefaultTemplate,
+} from "../utils/templatedEmail.js";
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
@@ -70,7 +75,7 @@ const router = Router();
 router.use(requireAdmin);
 
 function renderTemplate(template, values) {
-  return String(template || "").replace(/\{\{(\w+)\}\}/g, (_match, key) => String(values[key] ?? ""));
+  return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
 }
 
 function sampleEmailVariables(overrides = {}) {
@@ -81,9 +86,11 @@ function sampleEmailVariables(overrides = {}) {
     mobile: "+91 98765 43210",
     app_name: "Krita",
     company_name: "Krita NEET JEE",
+    customer_name: "Test User",
     support_email: "support@krita.com",
     invoice_number: "INV-TEST-001",
     invoice_date: now.toLocaleDateString("en-IN"),
+    due_date: now.toLocaleDateString("en-IN"),
     payment_amount: "₹1,000.00",
     invoice_amount: "₹1,000.00",
     tax_amount: "₹180.00",
@@ -120,14 +127,44 @@ function sampleEmailVariables(overrides = {}) {
 }
 
 async function sendTemplatedEmail(templateKey, to, variables, attachments = []) {
-  const template = await EmailTemplate.findOne({ key: templateKey, isActive: true });
-  if (!template) {
-    console.warn(`[EMAIL] Template not found or inactive: ${templateKey}. Will skip sending to ${to}`);
-    throw new Error(`Email template '${templateKey}' not found or inactive`);
+  const template = await EmailTemplate.findOne({ key: templateKey });
+  const settings = await InvoiceSettings.findOne({ key: "default" });
+  const definition = EMAIL_TEMPLATE_DEFINITIONS.find((item) => item.key === templateKey);
+  const mergedData = sampleEmailVariables({ ...(template?.sampleData || {}), ...(variables || {}) });
+
+  if (!template || template.isActive === false) {
+    const reason = !template ? `Email template '${templateKey}' is missing` : `Email template '${templateKey}' is inactive`;
+    const log = await EmailLog.create({
+      templateKey,
+      templateName: template?.name || definition?.name || templateKey,
+      module: template?.module || definition?.module || "",
+      to,
+      subject: template?.subject || definition?.name || templateKey,
+      status: "skipped",
+      attempts: 0,
+      error: reason,
+      payload: mergedData,
+    });
+    console.warn(`[EMAIL] ${reason}. Skipping send to ${to}`);
+    return { skipped: true, reason, logId: String(log._id) };
   }
 
-  const settings = await InvoiceSettings.findOne({ key: "default" });
-  const mergedData = sampleEmailVariables({ ...(template.sampleData || {}), ...(variables || {}) });
+  if (settings?.emailEnabled === false) {
+    const reason = "Email delivery is disabled in invoice/email settings";
+    const log = await EmailLog.create({
+      templateKey,
+      templateName: template.name,
+      module: template.module || template.type,
+      to,
+      subject: template.subject,
+      status: "skipped",
+      attempts: 0,
+      error: reason,
+      payload: mergedData,
+    });
+    return { skipped: true, reason, logId: String(log._id) };
+  }
+
   const subject = renderTemplate(template.subject, mergedData);
   const textContent = renderTemplate(template.textContent, mergedData);
   const htmlContent = renderTemplate(template.htmlContent, mergedData);
@@ -3433,7 +3470,7 @@ router.post(
           emailSkipped += 1;
         } else {
           try {
-            await sendTemplatedEmail("broadcast_default", user.email, {
+            await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.NOTIFICATION_GENERAL, user.email, {
               user_name: user.name || user.mobile || "Learner",
               broadcast_title: payload.title,
               broadcast_body: payload.body,
@@ -4636,67 +4673,123 @@ const emailTemplateService = createCrudService({
 router.get(
   "/email-templates/catalog",
   asyncHandler(async (req, res) => {
-    const templateDocs = await EmailTemplate.find().select("key name type module variables").lean();
-    const modules = [...new Set(templateDocs.map((item) => String(item.module || item.type || "").trim()).filter(Boolean))];
-    const types = [...new Set(templateDocs.map((item) => String(item.type || "").trim()).filter(Boolean))];
-    const templateList = templateDocs.map((item) => ({
-      ...item,
-      id: item._id?.toString(),
-      module: String(item.module || item.type || "").trim(),
-    }));
+    const templateDocs = await EmailTemplate.find({
+      key: { $in: EMAIL_TEMPLATE_DEFINITIONS.map((item) => item.key) },
+    }).lean();
+    const docsByKey = new Map(templateDocs.map((item) => [item.key, item]));
+    const templateList = EMAIL_TEMPLATE_DEFINITIONS.map((definition) => {
+      const existing = docsByKey.get(definition.key);
+      const fallback = buildDefaultTemplate(definition);
+      return {
+        ...definition,
+        id: existing?._id?.toString(),
+        subject: existing?.subject || fallback.subject,
+        htmlContent: existing?.htmlContent || fallback.htmlContent,
+        textContent: existing?.textContent || fallback.textContent,
+        sampleData: existing?.sampleData || sampleEmailVariables(),
+        variables: existing?.variables?.length ? existing.variables : definition.variables || [],
+        placeholders: (definition.variables || []).map((name) => `{{${name}}}`),
+        status: {
+          exists: Boolean(existing),
+          isActive: existing?.isActive !== false,
+          templateId: existing?._id?.toString() || null,
+        },
+      };
+    });
+    const modules = [...new Set(templateList.map((item) => String(item.module || "").trim()).filter(Boolean))];
+    const types = [...new Set(templateList.map((item) => String(item.type || "").trim()).filter(Boolean))];
+    const mappings = Object.fromEntries(templateList.map((item) => [item.key, item]));
     sendResponse(res, {
       data: {
         modules: modules.sort(),
         types: types.sort(),
         templates: templateList,
-        variables: [
-          "user_name",
-          "email",
-          "mobile",
-          "app_name",
-          "support_email",
-          "company_name",
-          "invoice_number",
-          "invoice_date",
-          "payment_amount",
-          "invoice_amount",
-          "tax_amount",
-          "convenience_fee",
-          "convenience_fee_gst",
-          "total_amount",
-          "payment_status",
-          "transaction_id",
-          "otp",
-          "otp_code",
-          "otp_expiry",
-          "expiry_date",
-          "expiry_type",
-          "days_before",
-          "plan_name",
-          "ticket_id",
-          "ticket_category",
-          "ticket_status",
-          "ticket_message",
-          "admin_email",
-          "announcement_title",
-          "announcement_message",
-          "update_title",
-          "update_message",
-          "offer_title",
-          "offer_code",
-          "offer_discount",
-          "notification_title",
-          "notification_message",
-          "current_date",
-          "current_time",
-        ],
+        variables: COMMON_EMAIL_VARIABLES,
         sampleData: sampleEmailVariables(),
+        mappings,
       },
     });
   }),
 );
 
-router.use("/email-templates", createCrudRouter({ key: "emailTemplate", label: "Email Template", service: emailTemplateService }));
+router.get(
+  "/email-templates/audit",
+  asyncHandler(async (req, res) => {
+    const templateDocs = await EmailTemplate.find({
+      key: { $in: EMAIL_TEMPLATE_DEFINITIONS.map((item) => item.key) },
+    }).lean();
+    const docsByKey = new Map(templateDocs.map((item) => [item.key, item]));
+    const modules = EMAIL_TEMPLATE_DEFINITIONS.map((definition) => {
+      const existing = docsByKey.get(definition.key);
+      return {
+        moduleName: definition.module,
+        functionality: definition.name,
+        emailTriggerEvent: definition.trigger,
+        templateKey: definition.key,
+        status: !existing ? "Missing" : existing.isActive === false ? "Inactive" : "Working",
+        templateId: existing?._id?.toString() || null,
+      };
+    });
+    const totals = modules.reduce(
+      (acc, item) => {
+        acc.total += 1;
+        acc[item.status.toLowerCase()] += 1;
+        return acc;
+      },
+      { total: 0, working: 0, inactive: 0, missing: 0 },
+    );
+    sendResponse(res, { data: { modules, totals } });
+  }),
+);
+
+router.post(
+  "/email-templates/seed-defaults",
+  asyncHandler(async (req, res) => {
+    const updateExisting = Boolean(req.body?.updateExisting);
+    const created = [];
+    const updated = [];
+    const skipped = [];
+
+    for (const definition of EMAIL_TEMPLATE_DEFINITIONS) {
+      const existing = await EmailTemplate.findOne({ key: definition.key });
+      const payload = {
+        ...buildDefaultTemplate(definition),
+        sampleData: sampleEmailVariables(),
+        updatedBy: "system",
+      };
+
+      if (!existing) {
+        const doc = await EmailTemplate.create({ ...payload, createdBy: "system" });
+        created.push({ key: doc.key, id: doc._id?.toString() });
+        continue;
+      }
+
+      if (updateExisting) {
+        existing.set({
+          name: payload.name,
+          type: payload.type,
+          module: payload.module,
+          subject: payload.subject,
+          htmlContent: payload.htmlContent,
+          textContent: payload.textContent,
+          variables: payload.variables,
+          sampleData: { ...(existing.sampleData || {}), ...(payload.sampleData || {}) },
+          isDefault: true,
+          updatedBy: "system",
+        });
+        await existing.save();
+        updated.push({ key: existing.key, id: existing._id?.toString() });
+      } else {
+        skipped.push({ key: existing.key, reason: "Already exists" });
+      }
+    }
+
+    sendResponse(res, {
+      data: { created, updated, skipped },
+      message: `Default templates processed: ${created.length} created, ${updated.length} updated, ${skipped.length} skipped.`,
+    });
+  }),
+);
 
 router.post(
   "/email-templates/:id/preview",
@@ -4714,6 +4807,20 @@ router.post(
     });
   }),
 );
+
+router.post(
+  "/email-templates/:id/test",
+  asyncHandler(async (req, res) => {
+    const template = await EmailTemplate.findById(req.params.id);
+    if (!template) throw new AppError("Email template not found", 404);
+    const to = String(req.body?.to || "").trim();
+    if (!to) throw new AppError("Test recipient email is required", 400);
+    const result = await sendTemplatedEmail(template.key, to, req.body?.variables || {});
+    sendResponse(res, { data: result, message: result.skipped ? "Test email skipped" : "Test email sent" });
+  }),
+);
+
+router.use("/email-templates", createCrudRouter({ key: "emailTemplate", label: "Email Template", service: emailTemplateService }));
 
 router.get(
   "/email-logs",
@@ -4765,6 +4872,7 @@ router.post(
 router.get("/auth-settings", asyncHandler(async (_req, res) => {
   const settings = await AuthSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default" } }, { upsert: true, new: true });
   const data = settings.toJSON();
+  data.googleClientId = data.googleClientId || process.env.GOOGLE_WEB_CLIENT_ID || "";
   data.googleAndroidClientId = data.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "";
   data.googleAndroidPackageName = data.googleAndroidPackageName || "com.kritamcqs.androidapp";
   data.googleAndroidSha1 = data.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4";
@@ -4776,7 +4884,7 @@ router.post("/auth-settings", asyncHandler(async (req, res) => {
   const payload = {
     emailPasswordEnabled: Boolean(body.emailPasswordEnabled),
     googleEnabled: Boolean(body.googleEnabled),
-    googleClientId: String(body.googleClientId || "").trim(),
+    googleClientId: String(body.googleClientId || process.env.GOOGLE_WEB_CLIENT_ID || "").trim(),
     googleAndroidClientId: String(body.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "").trim(),
     googleAndroidPackageName: String(body.googleAndroidPackageName || "com.kritamcqs.androidapp").trim(),
     googleAndroidSha1: String(body.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4").trim().toUpperCase(),
