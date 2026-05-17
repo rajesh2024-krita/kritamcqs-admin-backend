@@ -44,6 +44,7 @@ export const modeBodySchema = z.object({
   key: z.string().trim().min(2).max(80),
   label: z.string().min(2).max(80),
   description: z.string().max(500).optional().or(z.literal("")),
+  sortOrder: z.coerce.number().int().min(0).optional().default(0),
 });
 
 export const learningLevelBodySchema = z.object({
@@ -57,6 +58,7 @@ export const learningLevelBodySchema = z.object({
 export const examTypeBodySchema = z.object({
   name: z.string().trim().min(2).max(80),
   description: z.string().max(500).optional().or(z.literal("")),
+  sortOrder: z.coerce.number().int().min(0).optional().default(0),
 });
 
 export const subjectBodySchema = z.object({

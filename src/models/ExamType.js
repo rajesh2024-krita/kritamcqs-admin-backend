@@ -5,6 +5,7 @@ const examTypeSchema = new Schema(
     key: { type: String, unique: true, sparse: true, index: true, trim: true },
     label: { type: String, trim: true },
     description: { type: String, trim: true },
+    sortOrder: { type: Number, default: 0 },
   },
   {
     ...baseJsonOptions,
@@ -13,6 +14,7 @@ const examTypeSchema = new Schema(
       transform: (_doc, ret) => {
         ret.name = ret.name || ret.key || ret.label;
         ret.id = ret._id?.toString();
+        ret.sortOrder = Number(ret.sortOrder || 0);
         delete ret._id;
         delete ret.__v;
         delete ret.key;

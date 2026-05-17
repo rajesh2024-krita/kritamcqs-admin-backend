@@ -895,6 +895,8 @@ const dailyTestSettingsSchema = z.object({
 const dailyTestResetSchema = z.object({
   userId: z.string().trim().optional(),
   user_id: z.string().trim().optional(),
+  email: z.string().trim().optional(),
+  email_id: z.string().trim().optional(),
   date: z.string().trim().optional(),
   resetAll: z.coerce.boolean().optional(),
   reset_all: z.coerce.boolean().optional(),
@@ -1557,8 +1559,15 @@ router.get("/daily-test/analytics", asyncHandler(async (_req, res) => {
 router.post("/daily-test/reset", asyncHandler(async (req, res) => {
   const payload = dailyTestResetSchema.parse(req.body || {});
   const resetAll = Boolean(payload.resetAll ?? payload.reset_all ?? false);
-  const userId = payload.userId || payload.user_id;
+  const email = String(payload.email || payload.email_id || "").trim().toLowerCase();
+  let userId = payload.userId || payload.user_id;
   const dateRange = resetAll ? null : resolveDateRange(payload.date);
+
+  if (email) {
+    const user = await User.findOne({ email: new RegExp(`^${email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") }).select("_id email").lean();
+    if (!user) throw new AppError("No user found for the provided email id", 404);
+    userId = String(user._id);
+  }
 
   const filter = {};
   if (userId) filter.userId = userId;
@@ -1573,6 +1582,7 @@ router.post("/daily-test/reset", asyncHandler(async (req, res) => {
       deleted_count: Number(result.deletedCount || 0),
       deletedCount: Number(result.deletedCount || 0),
       user_id: userId || null,
+      email: email || null,
       date: payload.date || null,
       reset_all: resetAll,
     },
@@ -1807,6 +1817,17 @@ async function buildMockTestPayload(payload, existing = null) {
 
   if (!title) throw new AppError("Title is required", 400);
   if (questionIds.length < 2) throw new AppError("Select at least two questions", 400);
+  const requiredPresetQuestions = patternPreset === "NEET_REAL"
+    ? AUTO_MOCK_PRESET_BY_EXAM.NEET.totalQuestions
+    : patternPreset === "JEE_REAL"
+      ? AUTO_MOCK_PRESET_BY_EXAM.JEE.totalQuestions
+      : 0;
+  if (requiredPresetQuestions && questionIds.length !== requiredPresetQuestions) {
+    throw new AppError(
+      `The mock test requires ${requiredPresetQuestions} questions based on the selected ${examType} pattern, but only ${questionIds.length} questions are currently selected.`,
+      400,
+    );
+  }
   if (!Number.isFinite(durationMinutes) || durationMinutes < 1) throw new AppError("Duration must be at least 1 minute", 400);
   if (!["all", "day_wise", "week_wise"].includes(availabilityMode)) throw new AppError("Availability mode is invalid", 400);
   if (availabilityMode === "day_wise" && !availableDaysOfMonth.length) throw new AppError("Select at least one day of month", 400);
@@ -1886,7 +1907,7 @@ async function serializeMockTests(items) {
     chapterIds.length ? Chapter.find({ _id: { $in: chapterIds } }).select("name") : [],
     questionIds.length
       ? Question.find({ _id: { $in: questionIds } })
-        .select("_id question subjectId chapterId difficulty difficultyId")
+        .select("_id question questionImageUrl optionA optionAImageUrl optionB optionBImageUrl optionC optionCImageUrl optionD optionDImageUrl subjectId chapterId difficulty difficultyId hasDiagram")
         .populate("subjectId", "name")
         .populate("chapterId", "name")
         .populate("difficultyId", "name")
@@ -1915,6 +1936,8 @@ async function serializeMockTests(items) {
         .map((question) => ({
           id: String(question._id),
           question: question.question || "[Image Question]",
+          questionImageUrl: question.questionImageUrl || "",
+          hasDiagram: Boolean(question.hasDiagram || question.questionImageUrl),
           subjectName: question.subjectId?.name || "-",
           chapterName: question.chapterId?.name || "-",
           difficulty: question.difficultyId?.name || question.difficulty || "-",
@@ -3781,7 +3804,9 @@ router.get(
       success: true,
       data: items.map((item) => ({
         id: String(item._id),
-        question: item.question,
+        question: item.question || "[Image Question]",
+        questionImageUrl: item.questionImageUrl || "",
+        hasDiagram: Boolean(item.hasDiagram || item.questionImageUrl),
         examMode: item.examMode,
         difficulty: item.difficulty,
         subjectName: item.subjectId?.name || "-",
@@ -3974,9 +3999,12 @@ router.post(
   validate(createSchemas.dailyPlan),
   asyncHandler(async (req, res) => {
     const payload = await buildDailyPlanPayload(req.validated.body);
-    const existingByMode = await DailyPlanConfig.findOne({ modeKey: payload.modeKey }).select("_id");
+    const existingByMode = await DailyPlanConfig.findOne({ modeKey: payload.modeKey });
     if (existingByMode) {
-      throw new AppError(`Daily plan for ${payload.modeKey} already exists. Edit it instead.`, 400);
+      Object.assign(existingByMode, payload);
+      await existingByMode.save();
+      res.status(200).json({ success: true, message: "Daily plan config updated", data: (await serializeDailyPlans([existingByMode]))[0] });
+      return;
     }
     const item = await DailyPlanConfig.create(payload);
     res.status(201).json({ success: true, message: "Daily plan config created", data: (await serializeDailyPlans([item]))[0] });
@@ -4015,6 +4043,11 @@ function createCrudRouter({ key, label, service }) {
   const controller = createCrudController(service, label);
 
   route.get("/", validate(listQuerySchema), asyncHandler(controller.list));
+  route.post("/reorder", asyncHandler(async (req, res) => {
+    if (!service.reorder) throw new AppError(`${label} sorting is not supported`, 400);
+    const result = await service.reorder(Array.isArray(req.body?.items) ? req.body.items : []);
+    sendResponse(res, { message: `${label} order updated`, data: result });
+  }));
   route.post("/bulk-delete", validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
   route.delete("/bulk", validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
   route.get("/:id", asyncHandler(controller.getById));
@@ -4092,7 +4125,7 @@ async function ensureExamTypeExists(value) {
 
 const modeService = createCrudService({
   model: Mode,
-  allowedSorts: ["createdAt", "updatedAt", "label", "key"],
+  allowedSorts: ["createdAt", "updatedAt", "sortOrder", "label", "key"],
   searchFields: ["key", "label", "description"],
 });
 
@@ -4117,15 +4150,17 @@ const learningLevelService = createCrudService({
 
 const examTypeService = createCrudService({
   model: ExamType,
-  allowedSorts: ["createdAt", "updatedAt", "name", "key", "label"],
+  allowedSorts: ["createdAt", "updatedAt", "sortOrder", "name", "key", "label"],
   searchFields: ["name", "key", "label", "description"],
   beforeCreate: async (payload) => ({
     name: normalizeExamType(payload.name),
     description: payload.description || undefined,
+    sortOrder: Number(payload.sortOrder || 0),
   }),
   beforeUpdate: async (_existing, payload) => ({
     ...(payload.name !== undefined ? { name: normalizeExamType(payload.name) } : {}),
     ...(payload.description !== undefined ? { description: payload.description || undefined } : {}),
+    ...(payload.sortOrder !== undefined ? { sortOrder: Number(payload.sortOrder || 0) } : {}),
   }),
   beforeDelete: async (examType) => {
     const examTypeName = String(examType.name || examType.key || examType.label || "").trim().toUpperCase();

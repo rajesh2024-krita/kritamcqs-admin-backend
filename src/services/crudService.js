@@ -93,5 +93,23 @@ export function createCrudService(config) {
         results,
       };
     },
+
+    async reorder(items = []) {
+      const normalizedItems = items
+        .map((item, index) => ({
+          id: String(item?.id || item?._id || "").trim(),
+          sortOrder: Number.isFinite(Number(item?.sortOrder)) ? Number(item.sortOrder) : (index + 1) * 10,
+        }))
+        .filter((item) => item.id);
+
+      if (!normalizedItems.length) throw new AppError("Provide records to reorder", 400);
+      normalizedItems.forEach((item) => assertObjectId(item.id));
+
+      await Promise.all(
+        normalizedItems.map((item) => model.findByIdAndUpdate(item.id, { sortOrder: item.sortOrder })),
+      );
+
+      return { updatedCount: normalizedItems.length };
+    },
   };
 }
