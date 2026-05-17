@@ -58,11 +58,14 @@ const KNOWN_QUESTION_TYPES = new Set(["MCQ", "TRUE_FALSE", "FILL_BLANKS", "MATCH
 const NUMERIC_LIKE_TYPES = new Set(["FILL_BLANKS", "MATCH_FOLLOWING", "DESCRIPTIVE", "NUMERICAL"]);
 
 function normalizeHeader(value) {
-  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
 }
 
 function normalizeText(value) {
-  return String(value || "").trim();
+  return String(value ?? "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\u00A0/g, " ")
+    .trim();
 }
 
 function normalizeKey(value) {
@@ -82,7 +85,7 @@ function normalizeExamType(value) {
 
 function normalizeQuestionType(value) {
   const normalized = normalizeHeader(value || "MCQ");
-  if (["mcq", "single_choice", "single_correct", "multiple_choice", "multiple_choice_question"].includes(normalized)) return "MCQ";
+  if (["mcq", "image_mcq", "mcq_image", "diagram_mcq", "image_based_mcq", "single_choice", "single_correct", "multiple_choice", "multiple_choice_question"].includes(normalized)) return "MCQ";
   if (["true_false", "true_or_false"].includes(normalized)) return "TRUE_FALSE";
   if (["fill_blank", "fill_blanks", "fill_in_the_blank", "fill_in_the_blanks"].includes(normalized)) return "FILL_BLANKS";
   if (["match", "match_following", "match_the_following"].includes(normalized)) return "MATCH_FOLLOWING";
@@ -210,25 +213,67 @@ function isValidUrl(url) {
 }
 
 function isDataUri(value) {
-  const trimmed = String(value || "").trim();
+  const trimmed = String(value ?? "").trim();
   return /^data:image\/[a-zA-Z0-9.+-]+;base64,/.test(trimmed);
+}
+
+function isImageValue(value) {
+  if (!value || typeof value !== "string") return false;
+  const lower = normalizeText(value).toLowerCase();
+  if (!lower) return false;
+  if (isDataUri(lower)) return true;
+  if (/\.(png|jpe?g|webp|gif|bmp|svg)(?:[?#].*)?$/.test(lower)) return true;
+  return lower.includes("/uploads/") || lower.includes("cloudinary") || lower.includes("firebase");
 }
 
 function extractImageUrl(value) {
   const normalized = normalizeText(value);
   if (!normalized) return "";
   
-  if (isDataUri(normalized)) return normalized;
-  
-  // Check if it's a URL
-  if (isValidUrl(normalized)) return normalized;
-  
-  // Check if it's a YouTube URL (not an image)
-  if (normalized.includes("youtube.com") || normalized.includes("youtu.be")) {
-    return "";
-  }
-  
+  if (normalized.includes("youtube.com") || normalized.includes("youtu.be")) return "";
+  if (!isImageValue(normalized)) return "";
   return normalized;
+}
+
+function splitTextImageValue(value) {
+  const text = normalizeText(value);
+  if (!text) return { text: "", image: "" };
+  if (isImageValue(text)) return { text: "", image: extractImageUrl(text) };
+  return { text, image: "" };
+}
+
+function mergeTextImagePair(textValue, imageValue) {
+  const textPart = splitTextImageValue(textValue);
+  const imagePart = splitTextImageValue(imageValue);
+  return {
+    text: textPart.text || imagePart.text,
+    image: imagePart.image || textPart.image,
+  };
+}
+
+function normalizeMixedMediaFields(parsed = {}) {
+  const question = mergeTextImagePair(parsed.question, parsed.questionImageUrl);
+  const optionA = mergeTextImagePair(parsed.optionA, parsed.optionAImageUrl);
+  const optionB = mergeTextImagePair(parsed.optionB, parsed.optionBImageUrl);
+  const optionC = mergeTextImagePair(parsed.optionC, parsed.optionCImageUrl);
+  const optionD = mergeTextImagePair(parsed.optionD, parsed.optionDImageUrl);
+  const explanation = mergeTextImagePair(parsed.explanation, parsed.explanationImageUrl);
+
+  return {
+    ...parsed,
+    question: question.text,
+    questionImageUrl: question.image,
+    optionA: optionA.text,
+    optionAImageUrl: optionA.image,
+    optionB: optionB.text,
+    optionBImageUrl: optionB.image,
+    optionC: optionC.text,
+    optionCImageUrl: optionC.image,
+    optionD: optionD.text,
+    optionDImageUrl: optionD.image,
+    explanation: explanation.text,
+    explanationImageUrl: explanation.image,
+  };
 }
 
 function getCellDisplayValue(cell) {
@@ -533,11 +578,7 @@ function mergeEmbeddedImages(parsed, { rowNumber, map, headerColumnIndexes, imag
     }
   }
 
-  if (parsed.optionAImageUrl && !normalizeText(parsed.optionA)) parsed.optionA = "[Image]";
-  if (parsed.optionBImageUrl && !normalizeText(parsed.optionB)) parsed.optionB = "[Image]";
-  if (parsed.optionCImageUrl && !normalizeText(parsed.optionC)) parsed.optionC = "[Image]";
-  if (parsed.optionDImageUrl && !normalizeText(parsed.optionD)) parsed.optionD = "[Image]";
-  parsed.hasDiagram = parsed.hasDiagram || IMAGE_FIELDS.some((field) => normalizeText(parsed[field]));
+  parsed.hasDiagram = Boolean(parsed.hasDiagram) || IMAGE_FIELDS.some((field) => normalizeText(parsed[field]));
   parsed.__imageErrors = errors;
   return parsed;
 }
@@ -582,17 +623,18 @@ async function parseSheet(sheetFile) {
     }
     const rows = Array.isArray(parsedJson) ? parsedJson : Array.isArray(parsedJson?.questions) ? parsedJson.questions : [];
     if (!rows.length) throw new AppError("JSON upload must contain a non-empty array or questions array", 400);
-    return rows.map((row) => ({
+    return rows.map((row) => normalizeMixedMediaFields({
+      __rowNumber: row.__rowNumber,
       question: row.question ?? row.question_text ?? "",
-      questionImageUrl: extractImageUrl(row.questionImageUrl ?? row.question_image ?? row.question_image_url ?? ""),
+      questionImageUrl: row.questionImageUrl ?? row.question_image ?? row.question_image_url ?? "",
       optionA: row.optionA ?? row.option_a ?? row.a ?? "",
-      optionAImageUrl: extractImageUrl(row.optionAImageUrl ?? row.option_a_image ?? row.option_a_image_url ?? ""),
+      optionAImageUrl: row.optionAImageUrl ?? row.option_a_image ?? row.option_a_image_url ?? "",
       optionB: row.optionB ?? row.option_b ?? row.b ?? "",
-      optionBImageUrl: extractImageUrl(row.optionBImageUrl ?? row.option_b_image ?? row.option_b_image_url ?? ""),
+      optionBImageUrl: row.optionBImageUrl ?? row.option_b_image ?? row.option_b_image_url ?? "",
       optionC: row.optionC ?? row.option_c ?? row.c ?? "",
-      optionCImageUrl: extractImageUrl(row.optionCImageUrl ?? row.option_c_image ?? row.option_c_image_url ?? ""),
+      optionCImageUrl: row.optionCImageUrl ?? row.option_c_image ?? row.option_c_image_url ?? "",
       optionD: row.optionD ?? row.option_d ?? row.d ?? "",
-      optionDImageUrl: extractImageUrl(row.optionDImageUrl ?? row.option_d_image ?? row.option_d_image_url ?? ""),
+      optionDImageUrl: row.optionDImageUrl ?? row.option_d_image ?? row.option_d_image_url ?? "",
       correctAnswer: row.correctAnswer ?? row.correct_answer ?? row.answer ?? "",
       numericAnswer: row.numericAnswer ?? row.numeric_answer ?? "",
       subject: row.subject ?? row.subject_name ?? "",
@@ -650,6 +692,7 @@ async function parseSheet(sheetFile) {
     .map((row) => {
       // Parse basic row data
       let parsed = {
+        __rowNumber: row.__excelRowNumber,
         question: row[map.question],
         questionImageUrl: map.question_image ? extractImageUrl(row[map.question_image]) : "",
         optionA: map.option_a ? row[map.option_a] : "",
@@ -693,6 +736,7 @@ async function parseSheet(sheetFile) {
       
       // Handle image-based rows
       parsed = detectAndHandleImageMCQRows(parsed, headers, map);
+      parsed = normalizeMixedMediaFields(parsed);
       
       // Handle shifted image rows (special case where image is in wrong column)
       const tailValues = ["__EMPTY", "__EMPTY_1", "__EMPTY_2", "__EMPTY_3", "__EMPTY_4"].map((key) => row[key]);
@@ -723,22 +767,8 @@ async function parseSheet(sheetFile) {
         parsed.videoUrl = parsed.videoUrl || tailValues[2] || "";
       }
       
-      // Handle image-only options (where option text might be empty but image exists)
-      if (parsed.optionAImageUrl && !normalizeText(parsed.optionA)) {
-        parsed.optionA = "[Image]";
-      }
-      if (parsed.optionBImageUrl && !normalizeText(parsed.optionB)) {
-        parsed.optionB = "[Image]";
-      }
-      if (parsed.optionCImageUrl && !normalizeText(parsed.optionC)) {
-        parsed.optionC = "[Image]";
-      }
-      if (parsed.optionDImageUrl && !normalizeText(parsed.optionD)) {
-        parsed.optionD = "[Image]";
-      }
-      
       // Set hasDiagram flag if there are any image URLs
-      parsed.hasDiagram = parsed.hasDiagram || 
+      parsed.hasDiagram = Boolean(parsed.hasDiagram) || 
                          !!parsed.questionImageUrl ||
                          !!parsed.optionAImageUrl ||
                          !!parsed.optionBImageUrl ||
@@ -832,11 +862,14 @@ function buildQuestionPayload(raw, matches) {
   const examType = normalizeExamType(raw.examType);
   
   // Handle image URLs - ensure they are valid
-  const hasAnyImage = raw.questionImageUrl || 
-                      raw.optionAImageUrl || 
-                      raw.optionBImageUrl || 
-                      raw.optionCImageUrl || 
-                      raw.optionDImageUrl;
+  const hasAnyImage = Boolean(
+    raw.questionImageUrl ||
+    raw.optionAImageUrl ||
+    raw.optionBImageUrl ||
+    raw.optionCImageUrl ||
+    raw.optionDImageUrl ||
+    raw.explanationImageUrl,
+  );
 
   return {
     examType,
@@ -1292,7 +1325,7 @@ export const questionBulkUploadService = {
     const catalog = await loadCatalog();
     await QuestionBulkUploadRow.insertMany(parsedRows.map((raw, index) => ({
         batchId: batch._id,
-        rowNumber: index + 2,
+        rowNumber: Number(raw.__rowNumber) || index + 2,
         raw,
         payload: {},
         question: normalizeText(raw.question).slice(0, 300),
