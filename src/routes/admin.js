@@ -4764,7 +4764,11 @@ router.post(
 
 router.get("/auth-settings", asyncHandler(async (_req, res) => {
   const settings = await AuthSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default" } }, { upsert: true, new: true });
-  sendResponse(res, { data: settings });
+  const data = settings.toJSON();
+  data.googleAndroidClientId = data.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "";
+  data.googleAndroidPackageName = data.googleAndroidPackageName || "com.kritamcqs.androidapp";
+  data.googleAndroidSha1 = data.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4";
+  sendResponse(res, { data });
 }));
 router.post("/auth-settings", asyncHandler(async (req, res) => {
   const current = await AuthSettings.findOne({ key: "default" });
@@ -4773,6 +4777,9 @@ router.post("/auth-settings", asyncHandler(async (req, res) => {
     emailPasswordEnabled: Boolean(body.emailPasswordEnabled),
     googleEnabled: Boolean(body.googleEnabled),
     googleClientId: String(body.googleClientId || "").trim(),
+    googleAndroidClientId: String(body.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "").trim(),
+    googleAndroidPackageName: String(body.googleAndroidPackageName || "com.kritamcqs.androidapp").trim(),
+    googleAndroidSha1: String(body.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4").trim().toUpperCase(),
     googleCallbackUrl: String(body.googleCallbackUrl || "").trim(),
     profileMobileRequired: Boolean(body.profileMobileRequired),
     googleRedirectUrls: Array.isArray(body.googleRedirectUrls)
