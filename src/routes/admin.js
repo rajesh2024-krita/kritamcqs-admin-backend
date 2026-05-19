@@ -4580,9 +4580,7 @@ const subscriptionPlanService = createCrudService({
       ? { features: Array.isArray(payload.features) ? payload.features.map((item) => String(item).trim()).filter(Boolean) : [] }
       : {}),
   }),
-  beforeDelete: async () => {
-    throw new AppError("Deleting subscription plans is disabled. Update the existing plan instead.", 400);
-  },
+  
 });
 
 router.use("/modes", createCrudRouter({ key: "mode", label: "Mode", service: modeService }));
