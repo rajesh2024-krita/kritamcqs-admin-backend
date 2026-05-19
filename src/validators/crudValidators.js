@@ -298,7 +298,7 @@ export const couponBodySchema = z.object({
 });
 
 export const subscriptionPlanBodySchema = z.object({
-  planId: z.string().min(2).max(80),
+  planId: z.string().min(1).max(80),
   name: z.string().min(2).max(120),
   price: z.coerce.number().min(0),
   durationMonths: z.coerce.number().int().min(1).max(60),
