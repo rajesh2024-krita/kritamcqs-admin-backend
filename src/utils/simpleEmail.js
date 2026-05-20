@@ -47,7 +47,7 @@ function attachmentPart(attachment, index) {
   return boundaryHeader.join("\r\n");
 }
 
-export async function sendEmail({ smtp, to, subject, text, attachments = [] }) {
+export async function sendEmail({ smtp, to, subject, text = "", html, attachments = [] }) {
   if (!smtp?.host || !smtp?.fromEmail || !to) {
     return { skipped: true, reason: "SMTP host, from email, or recipient email is missing" };
   }
@@ -73,8 +73,10 @@ export async function sendEmail({ smtp, to, subject, text, attachments = [] }) {
   }
 
   const fromLabel = smtp.fromName ? `"${escapeHeader(smtp.fromName)}" <${smtp.fromEmail}>` : smtp.fromEmail;
+  const hasHtml = String(html || "").trim().length > 0;
   const hasAttachments = Array.isArray(attachments) && attachments.length > 0;
   const boundary = `krita-boundary-${Date.now()}`;
+
   const message = hasAttachments
     ? [
         `From: ${fromLabel}`,
@@ -84,10 +86,10 @@ export async function sendEmail({ smtp, to, subject, text, attachments = [] }) {
         `Content-Type: multipart/mixed; boundary="${boundary}"`,
         "",
         `--${boundary}`,
-        "Content-Type: text/plain; charset=utf-8",
+        hasHtml ? "Content-Type: text/html; charset=utf-8" : "Content-Type: text/plain; charset=utf-8",
         "Content-Transfer-Encoding: 7bit",
         "",
-        text,
+        hasHtml ? html : text,
         ...attachments.flatMap((attachment, index) => ["", `--${boundary}`, attachmentPart(attachment, index)]),
         "",
         `--${boundary}--`,
@@ -97,9 +99,9 @@ export async function sendEmail({ smtp, to, subject, text, attachments = [] }) {
         `To: ${escapeHeader(to)}`,
         `Subject: ${escapeHeader(subject)}`,
         "MIME-Version: 1.0",
-        "Content-Type: text/plain; charset=utf-8",
+        hasHtml ? "Content-Type: text/html; charset=utf-8" : "Content-Type: text/plain; charset=utf-8",
         "",
-        text,
+        hasHtml ? html : text,
       ].join("\r\n");
 
   await command(socket, `MAIL FROM:<${smtp.fromEmail}>`, [250]);

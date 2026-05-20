@@ -284,6 +284,15 @@ function normalizeVariables(variables = {}) {
  * Send templated email with logging and proper template rendering
  * Works like the API server's sendTemplatedEmail but for admin backend
  */
+function buildHtmlBody(textContent) {
+  const text = String(textContent || "").trim();
+  const safeText = text
+    ? text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r?\n/g, "<br/>")
+    : "This email contains no HTML content.";
+
+  return `<html><body><div style="font-family:Arial,Helvetica,sans-serif;color:#111;font-size:14px;line-height:1.5;">${safeText}</div></body></html>`;
+}
+
 export async function sendTemplatedEmail(templateKey, to, variables = {}, attachments = [], { smtp, logger, emailLogModel } = {}) {
   try {
     const payload = normalizeVariables(variables);
@@ -300,6 +309,7 @@ export async function sendTemplatedEmail(templateKey, to, variables = {}, attach
     const subject = renderTemplate(template.subject, payload);
     const html = renderTemplate(template.html, payload);
     const text = renderTemplate(template.text, payload);
+    const htmlBody = html.trim() || buildHtmlBody(text);
 
     // Log email send attempt
     logger?.info(
@@ -308,8 +318,7 @@ export async function sendTemplatedEmail(templateKey, to, variables = {}, attach
         to,
         subject,
         variables: Object.keys(payload).join(", "),
-        htmlLength: html.length,
-        textLength: text.length,
+        htmlLength: htmlBody.length,
         hasAttachments: attachments.length > 0,
       },
       `Sending templated email: ${templateKey}`
@@ -320,8 +329,7 @@ export async function sendTemplatedEmail(templateKey, to, variables = {}, attach
       smtp,
       to,
       subject,
-      text,
-      html,
+      html: htmlBody,
       attachments,
     });
 

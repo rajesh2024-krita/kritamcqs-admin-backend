@@ -126,6 +126,14 @@ function sampleEmailVariables(overrides = {}) {
   };
 }
 
+function buildDefaultHtmlBody(textContent) {
+  const text = String(textContent || "").trim();
+  const safeText = text
+    ? text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\r?\n/g, "<br/>")
+    : "This email contains no HTML content.";
+  return `<html><body><div style="font-family:Arial,Helvetica,sans-serif;color:#111;font-size:14px;line-height:1.5;">${safeText}</div></body></html>`;
+}
+
 async function sendTemplatedEmail(templateKey, to, variables, attachments = []) {
   const template = await EmailTemplate.findOne({ key: templateKey });
   const settings = await InvoiceSettings.findOne({ key: "default" });
@@ -168,9 +176,10 @@ async function sendTemplatedEmail(templateKey, to, variables, attachments = []) 
   const subject = renderTemplate(template.subject, mergedData);
   const textContent = renderTemplate(template.textContent, mergedData);
   const htmlContent = renderTemplate(template.htmlContent, mergedData);
+  const htmlBody = htmlContent.trim() || buildDefaultHtmlBody(textContent);
 
   console.log(
-    `[EMAIL] Sending template: ${templateKey} | To: ${to} | Subject: ${subject} | Variables: ${Object.keys(variables || {}).join(", ")}`
+    `[EMAIL] Sending template: ${templateKey} | To: ${to} | Subject: ${subject} | Variables: ${Object.keys(variables || {}).join(", ")} | htmlLength=${htmlBody.length}`
   );
 
   const log = await EmailLog.create({
@@ -189,8 +198,7 @@ async function sendTemplatedEmail(templateKey, to, variables, attachments = []) 
       smtp: settings?.smtp,
       to,
       subject,
-      text: textContent,
-      html: htmlContent,
+      html: htmlBody,
       attachments,
     });
 
