@@ -982,11 +982,56 @@ const supportReplySchema = z.object({
 const notificationBroadcastSchema = z.object({
   title: z.string().trim().min(2).max(160),
   body: z.string().trim().min(1).max(3000),
-  type: z.enum(["text", "image", "offer", "announcement", "update"]).default("text"),
+  type: z.enum(["text", "image", "offer", "announcement", "update", "reminder"]).default("text"),
   targetGroup: z.enum(["all", "premium", "non_premium", "highest_premium", "middle_premium", "lowest_premium"]).default("all"),
-  deliveryMode: z.enum(["notification", "email", "both"]).default("notification"),
+  deliveryMode: z.enum(["notification", "email", "both", "push", "email_push"]).default("notification"),
+  templateKey: z.string().trim().optional().default(""),
+  variables: z.string().trim().optional().default("{}"),
   linkUrl: z.string().trim().optional().default(""),
 });
+
+function notificationTemplateKeyForType(type, explicitTemplateKey = "") {
+  const requested = String(explicitTemplateKey || "").trim();
+  if (requested) return requested;
+
+  const normalized = String(type || "").trim().toLowerCase();
+  if (normalized === "announcement") return EMAIL_TEMPLATE_KEYS.NOTIFICATION_ANNOUNCEMENT;
+  if (normalized === "update") return EMAIL_TEMPLATE_KEYS.NOTIFICATION_UPDATE;
+  if (normalized === "offer") return EMAIL_TEMPLATE_KEYS.NOTIFICATION_OFFER;
+  if (normalized === "reminder") return EMAIL_TEMPLATE_KEYS.NOTIFICATION_REMINDER;
+  return EMAIL_TEMPLATE_KEYS.NOTIFICATION_GENERAL;
+}
+
+function parseNotificationVariables(rawValue) {
+  if (!rawValue) return {};
+  try {
+    const parsed = JSON.parse(String(rawValue));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    throw new AppError("Email Variables must be valid JSON", 400);
+  }
+}
+
+function buildNotificationEmailVariables({ user, payload, settings, extraVariables }) {
+  const supportEmail = settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com";
+  return {
+    ...extraVariables,
+    user_name: user.name || user.mobile || "Learner",
+    email: user.email || "",
+    notification_title: payload.title,
+    notification_message: payload.body,
+    broadcast_title: payload.title,
+    broadcast_body: payload.body,
+    announcement_title: payload.title,
+    announcement_message: payload.body,
+    update_title: payload.title,
+    update_message: payload.body,
+    offer_title: payload.title,
+    offer_code: extraVariables.offer_code || extraVariables.coupon_code || "",
+    offer_discount: extraVariables.offer_discount || extraVariables.discount || "",
+    support_email: supportEmail,
+  };
+}
 
 function notificationLinkForType(type) {
   const normalized = String(type || "").toLowerCase();
@@ -3452,8 +3497,11 @@ router.post(
 
     const settings = await InvoiceSettings.findOne({ key: "default" });
     const attachment = await saveNotificationAttachment(req.file);
-    const shouldNotify = payload.deliveryMode === "notification" || payload.deliveryMode === "both";
-    const shouldEmail = payload.deliveryMode === "email" || payload.deliveryMode === "both";
+    const shouldNotify = ["notification", "both", "push", "email_push"].includes(payload.deliveryMode);
+    const shouldEmail = ["email", "both", "email_push"].includes(payload.deliveryMode);
+    const templateKey = notificationTemplateKeyForType(payload.type, payload.templateKey);
+    const extraVariables = parseNotificationVariables(payload.variables);
+    console.info(`[NOTIFICATION] Email template selected | type=${payload.type} | explicit=${payload.templateKey || "auto"} | resolved=${templateKey}`);
     const broadcastId = `broadcast-${Date.now()}-${crypto.randomBytes(4).toString("hex")}`;
     const docs = [];
     let emailSent = 0;
@@ -3470,12 +3518,12 @@ router.post(
           emailSkipped += 1;
         } else {
           try {
-            await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.NOTIFICATION_GENERAL, user.email, {
-              user_name: user.name || user.mobile || "Learner",
-              broadcast_title: payload.title,
-              broadcast_body: payload.body,
-              support_email: settings.companyEmail || settings.smtp?.fromEmail || "support@krita.com",
-            }, req.file
+            await sendTemplatedEmail(templateKey, user.email, buildNotificationEmailVariables({
+              user,
+              payload,
+              settings,
+              extraVariables,
+            }), req.file
               ? [{ filename: req.file.originalname, contentType: req.file.mimetype, content: req.file.buffer }]
               : []);
 
@@ -3507,6 +3555,7 @@ router.post(
         senderName: req.admin?.name || req.admin?.email || "Admin",
         emailStatus,
         emailError,
+        templateKey: shouldEmail ? templateKey : "",
         sentAt: new Date(),
       });
     }

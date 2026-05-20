@@ -19,6 +19,7 @@ const userNotificationSchema = new Schema(
     senderName: { type: String, default: "" },
     emailStatus: { type: String, default: "" },
     emailError: { type: String, default: "" },
+    templateKey: { type: String, default: "" },
     sentAt: Date,
     readAt: Date,
   },
