@@ -889,6 +889,8 @@ const revisionConfigSchema = z.object({
 const revisionGenerateSchema = z.object({
   userId: z.string().trim().optional(),
   user_id: z.string().trim().optional(),
+  email: z.string().trim().optional(),
+  email_id: z.string().trim().optional(),
   examMode: z.enum(["NEET", "JEE", "BOTH"]).optional(),
   exam_mode: z.enum(["NEET", "JEE", "BOTH"]).optional(),
 });
@@ -1442,9 +1444,12 @@ router.post("/revision/generate", asyncHandler(async (req, res) => {
   }
 
   const selectedUserId = payload.userId || payload.user_id;
+  const selectedEmail = String(payload.email || payload.email_id || "").trim().toLowerCase();
   const selectedUser = selectedUserId
     ? await User.findById(selectedUserId)
-    : await User.findOne({ isAdmin: { $ne: true } }).sort({ updatedAt: -1 });
+    : selectedEmail
+      ? await User.findOne({ email: new RegExp(`^${selectedEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"), isAdmin: { $ne: true } })
+      : await User.findOne({ isAdmin: { $ne: true } }).sort({ updatedAt: -1 });
 
   if (!selectedUser) {
     throw new AppError("No valid learner found to generate revision pool", 404);
@@ -3844,6 +3849,12 @@ router.get(
 
     if (req.query.examType) filters.examType = normalizeExamType(req.query.examType);
     if (req.query.isActive === "true" || req.query.isActive === "false") filters.isActive = req.query.isActive === "true";
+    if (req.query.createdDate) {
+      const start = new Date(`${String(req.query.createdDate).slice(0, 10)}T00:00:00.000Z`);
+      const end = new Date(start);
+      end.setUTCDate(end.getUTCDate() + 1);
+      if (!Number.isNaN(start.getTime())) filters.createdAt = { $gte: start, $lt: end };
+    }
     if (search) {
       filters.$or = [
         { title: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
@@ -4217,6 +4228,24 @@ async function ensureExamTypeExists(value) {
   return name;
 }
 
+function buildQuestionDuplicateQuery(payload = {}) {
+  return {
+    question: String(payload.question || "").trim(),
+    subjectId: payload.subjectId,
+    chapterId: payload.chapterId,
+    topicId: payload.topicId,
+    exam: payload.exam,
+  };
+}
+
+async function assertUniqueQuestion(payload = {}, existingId = null) {
+  const query = buildQuestionDuplicateQuery(payload);
+  if (!query.question || !query.subjectId || !query.chapterId || !query.topicId || !query.exam) return;
+  if (existingId) query._id = { $ne: existingId };
+  const exists = await Question.exists(query);
+  if (exists) throw new AppError("Question already exists", 400);
+}
+
 const modeService = createCrudService({
   model: Mode,
   allowedSorts: ["createdAt", "updatedAt", "sortOrder", "label", "key"],
@@ -4486,6 +4515,7 @@ const questionService = createCrudService({
     if (!isQuestionModeCompatible(normalizedPayload.examMode, normalizedPayload.exam)) {
       throw new AppError("Question exam mode must match the selected exam", 400);
     }
+    await assertUniqueQuestion(normalizedPayload);
     return normalizedPayload;
   },
   beforeUpdate: async (existing, payload) => {
@@ -4542,6 +4572,13 @@ const questionService = createCrudService({
     if (topicIdWasProvided && !normalizedPayload.topicId) {
       normalizedPayload.topicId = undefined;
     }
+    await assertUniqueQuestion({
+      question: normalizedPayload.question ?? existing.question,
+      subjectId: nextSubjectId,
+      chapterId: nextChapterId,
+      topicId: nextTopicId,
+      exam: nextExam,
+    }, existing._id);
     return normalizedPayload;
   },
 });
@@ -4558,10 +4595,15 @@ const userService = createCrudService({
     premiumExpiresAt: payload.premiumExpiresAt || undefined,
   }),
   beforeUpdate: async (_existing, payload) => ({
-    ...payload,
-    passwordHash: payload.password ? hashPassword(payload.password) : undefined,
-    authTypes: payload.password ? [...new Set([...(Array.isArray(_existing.authTypes) ? _existing.authTypes : []), "email"])] : _existing.authTypes,
-    premiumExpiresAt: payload.premiumExpiresAt || undefined,
+    ...Object.fromEntries(
+      Object.entries(payload).filter(([key]) => !["password", "isPremium", "premiumExpiresAt"].includes(key)),
+    ),
+    ...(payload.password
+      ? {
+          passwordHash: hashPassword(payload.password),
+          authTypes: [...new Set([...(Array.isArray(_existing.authTypes) ? _existing.authTypes : []), "email"])],
+        }
+      : {}),
   }),
   beforeDelete: async (user) => {
     if (user.isAdmin) {
@@ -4616,9 +4658,8 @@ const subscriptionPlanService = createCrudService({
   searchFields: ["planId", "name", "savings", "features"],
   exactFilters: ["active"],
   beforeCreate: async (payload) => {
-    const existingCount = await SubscriptionPlan.countDocuments();
-    if (existingCount > 0) {
-      throw new AppError("Only one subscription plan is supported right now. Update the existing plan instead.", 400);
+    if (payload.active !== false) {
+      await SubscriptionPlan.updateMany({ active: true }, { $set: { active: false } });
     }
     return {
       ...payload,
@@ -4628,15 +4669,20 @@ const subscriptionPlanService = createCrudService({
       features: Array.isArray(payload.features) ? payload.features.map((item) => String(item).trim()).filter(Boolean) : [],
     };
   },
-  beforeUpdate: async (_existing, payload) => ({
-    ...payload,
-    planId: _existing.planId,
-    ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
-    ...(payload.savings !== undefined ? { savings: payload.savings || undefined } : {}),
-    ...(payload.features !== undefined
-      ? { features: Array.isArray(payload.features) ? payload.features.map((item) => String(item).trim()).filter(Boolean) : [] }
-      : {}),
-  }),
+  beforeUpdate: async (_existing, payload) => {
+    if (payload.active === true) {
+      await SubscriptionPlan.updateMany({ _id: { $ne: _existing._id }, active: true }, { $set: { active: false } });
+    }
+    return {
+      ...payload,
+      planId: _existing.planId,
+      ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
+      ...(payload.savings !== undefined ? { savings: payload.savings || undefined } : {}),
+      ...(payload.features !== undefined
+        ? { features: Array.isArray(payload.features) ? payload.features.map((item) => String(item).trim()).filter(Boolean) : [] }
+        : {}),
+    };
+  },
   
 });
 
