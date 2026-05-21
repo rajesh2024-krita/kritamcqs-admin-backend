@@ -61,7 +61,12 @@ import {
   buildDefaultTemplate,
 } from "../utils/templatedEmail.js";
 import fs from "fs/promises";
+import { accessSync } from "fs";
+import os from "os";
 import path from "path";
+import { pathToFileURL } from "url";
+import { execFile } from "child_process";
+import { promisify } from "util";
 import crypto from "crypto";
 import { env } from "../config/env.js";
 import {
@@ -73,6 +78,7 @@ import { ownQuestionAssetUrl } from "../utils/questionAssetOwner.js";
 
 const router = Router();
 router.use(requireAdmin);
+const execFileAsync = promisify(execFile);
 
 function renderTemplate(template, values) {
   return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
@@ -270,6 +276,14 @@ function replaceTokens(template, data) {
   return String(template || "").replace(/\{\{(\w+)\}\}/g, (_match, key) => String(data[key] ?? ""));
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 function escPdf(value) {
   return String(value ?? "").replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
@@ -412,24 +426,53 @@ function imageOp(name, x, y, width, height) {
   return `q ${width} 0 0 ${height} ${x} ${842 - y - height} cm /${name} Do Q`;
 }
 
-function settingsWithInvoiceTemplate(settings, invoice = {}) {
-  const source = typeof settings?.toJSON === "function" ? settings.toJSON() : { ...(settings || {}) };
-  const templates = Array.isArray(source.reusableBlocks)
-    ? source.reusableBlocks.filter((item) => item?.type === "fabric-template")
+function invoiceTemplates(settings) {
+  return Array.isArray(settings?.reusableBlocks)
+    ? settings.reusableBlocks.filter((item) => item?.type === "fabric-template")
     : [];
+}
+
+function connectedInvoiceTemplate(settings) {
+  const templates = invoiceTemplates(settings);
+  return templates.find((item) => String(item.id) === String(settings?.connectedTemplateId || "") && item.connected)
+    || templates.find((item) => item.connected)
+    || null;
+}
+
+function requireConnectedInvoiceTemplate(settings) {
+  const template = connectedInvoiceTemplate(settings);
+  if (!template || !String(template.htmlCode || "").trim() || !String(template.cssCode || "").trim()) {
+    throw new AppError("No invoice template is connected to email. Connect an Invoice Editor template before sending invoice emails.", 400);
+  }
+  return template;
+}
+
+function settingsWithInvoiceTemplate(settings, invoice = {}, options = {}) {
+  const source = typeof settings?.toJSON === "function" ? settings.toJSON() : { ...(settings || {}) };
+  const templates = invoiceTemplates(source);
+  const emailTemplate = options.requireConnectedTemplate ? requireConnectedInvoiceTemplate(source) : connectedInvoiceTemplate(source);
   const invoiceTemplate = invoice?.templateId
     ? templates.find((item) => String(item.id) === String(invoice.templateId))
     : null;
-  const active = invoiceTemplate || templates.find((item) => item.active) || templates.find((item) => String(item.id) === String(source.activeTemplateId)) || templates[0];
+  const activeTemplate = templates.find((item) => item.active) || templates.find((item) => String(item.id) === String(source.activeTemplateId));
+  const active = emailTemplate || invoiceTemplate || activeTemplate || templates[0];
   if (Array.isArray(active?.fields) && active.fields.length) {
     return {
       ...source,
       fields: active.fields,
       activeTemplateId: active.id || source.activeTemplateId,
       activeTemplateName: active.name || source.activeTemplateName,
+      activeTemplateHtmlCode: active.htmlCode || "",
+      activeTemplateCssCode: active.cssCode || "",
     };
   }
-  return source;
+  return {
+    ...source,
+    activeTemplateId: active?.id || source.activeTemplateId,
+    activeTemplateName: active?.name || source.activeTemplateName,
+    activeTemplateHtmlCode: active?.htmlCode || "",
+    activeTemplateCssCode: active?.cssCode || "",
+  };
 }
 
 function fieldGeometry(field, metrics) {
@@ -618,12 +661,19 @@ function invoiceData(input = {}) {
       : Number(derivedChargeGstPercent.toFixed(2));
   return {
     invoiceNumber: input.invoiceNumber || "",
+    invoice_number: input.invoiceNumber || "",
     invoiceDate: input.invoiceDate ? new Date(input.invoiceDate).toLocaleDateString("en-IN") : new Date().toLocaleDateString("en-IN"),
+    invoice_date: input.invoiceDate ? new Date(input.invoiceDate).toLocaleDateString("en-IN") : new Date().toLocaleDateString("en-IN"),
     dueDate: input.dueDate ? new Date(input.dueDate).toLocaleDateString("en-IN") : "",
+    due_date: input.dueDate ? new Date(input.dueDate).toLocaleDateString("en-IN") : "",
     userName: input.userName || input.customerCompany?.name || "Customer",
+    customer_name: input.customerCompany?.name || input.userName || "Customer",
     userEmail: input.userEmail || input.customerCompany?.email || "",
+    customer_email: input.customerCompany?.email || input.userEmail || "",
     userMobile: input.userMobile || input.customerCompany?.phone || "",
+    customer_phone: input.customerCompany?.phone || input.userMobile || "",
     customerAddress: input.customerCompany?.address || "",
+    customer_address: input.customerCompany?.address || "",
     customerGstin: input.customerCompany?.gstin || "",
     planName: input.planName || input.planId || firstItem.product || "Premium Subscription",
     productDescription: firstItem.description || "Premium subscription purchase",
@@ -631,8 +681,11 @@ function invoiceData(input = {}) {
     planAmount: formatCurrency(input.subtotal ?? firstItem.price ?? input.amount),
     baseAmount: formatCurrency(input.subtotal ?? firstItem.price ?? input.amount),
     discountAmount: formatCurrency(input.discountTotal || 0),
+    discount: formatCurrency(input.discountTotal || 0),
     taxPercent: Number(input.taxDetails?.taxPercent ?? firstItem.tax ?? 0),
+    tax_rate: `${Number(input.taxDetails?.taxPercent ?? firstItem.tax ?? 0)}%`,
     taxAmount: formatCurrency(input.taxTotal || 0),
+    tax_amount: formatCurrency(input.taxTotal || 0),
     convenienceCharge: formatCurrency(convenienceCharge),
     convenienceChargeGstPercent: displayChargeGstPercent,
     convenienceChargeGst: formatCurrency(convenienceChargeGst),
@@ -640,23 +693,171 @@ function invoiceData(input = {}) {
     finalAmount: formatCurrency(input.grandTotal || input.amount),
     amount: formatCurrency(input.amount || input.grandTotal),
     totalAmount: formatCurrency(input.grandTotal || input.amount),
+    total_amount: formatCurrency(input.grandTotal || input.amount),
+    subtotal: formatCurrency(input.subtotal ?? firstItem.price ?? input.amount),
+    currency: input.currency || "INR",
     paymentStatus: String(input.status || "paid").toUpperCase(),
     transactionId: input.transactionId || "",
+    transaction_id: input.transactionId || "",
     paidStampText: input.paidStampText || "PAID",
+    company_name: input.billingCompany?.name || input.companyName || "Krita NEET JEE",
+    company_address: input.billingCompany?.address || input.companyAddress || "",
+    company_email: input.billingCompany?.email || input.companyEmail || "",
+    company_phone: input.billingCompany?.phone || input.companyPhone || "",
+    payment_terms: input.terms || "Net 15 Days",
+    notes: input.notes || "Thank you for your business!",
   };
 }
 
 function getActiveInvoiceTemplate(settings) {
-  const templates = Array.isArray(settings?.reusableBlocks)
-    ? settings.reusableBlocks.filter((item) => item?.type === "fabric-template")
-    : [];
+  const templates = invoiceTemplates(settings);
   return templates.find((item) => item.active) || templates[0] || null;
 }
 
-async function renderInvoicePdf(invoice, settings, extras = {}) {
+function localUploadUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw.startsWith("/uploads/")) return raw;
+  return pathToFileURL(path.join(uploadsRoot, raw.replace(/^\/uploads\/?/, ""))).href;
+}
+
+function chromeExecutable() {
+  const candidates = [
+    process.env.CHROME_PATH,
+    process.env.CHROME_BIN,
+    "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+    "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+  ].filter(Boolean);
+  return candidates.find((candidate) => {
+    try {
+      accessSync(candidate);
+      return true;
+    } catch {
+      return false;
+    }
+  }) || "";
+}
+
+async function printHtmlToPdf(html, invoiceNumber) {
+  const executable = chromeExecutable();
+  if (!executable) {
+    throw new AppError("Chrome/Edge is required on the admin backend to render Invoice Editor HTML/CSS PDFs. Set CHROME_PATH or install Chrome.", 500);
+  }
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "admin-invoice-render-"));
+  const htmlPath = path.join(tempDir, "invoice.html");
+  const pdfPath = path.join(tempDir, `${String(invoiceNumber || "invoice").replace(/[^a-z0-9_-]/gi, "-")}.pdf`);
+  try {
+    await fs.writeFile(htmlPath, html, "utf8");
+    await execFileAsync(executable, [
+      "--headless=new",
+      "--disable-gpu",
+      "--disable-dev-shm-usage",
+      "--no-sandbox",
+      "--allow-file-access-from-files",
+      "--run-all-compositor-stages-before-draw",
+      "--virtual-time-budget=1000",
+      `--print-to-pdf=${pdfPath}`,
+      "--no-pdf-header-footer",
+      pathToFileURL(htmlPath).href,
+    ], { timeout: 30000, windowsHide: true });
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      try {
+        const stat = await fs.stat(pdfPath);
+        if (stat.size > 0) break;
+      } catch {
+        // Chrome can flush after returning on Windows.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return await fs.readFile(pdfPath);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+function invoiceEditorData(source, effectiveSettings, data) {
+  const currency = source.currency || "INR";
+  const itemRows = (Array.isArray(source.items) ? source.items : []).map((item) => {
+    const quantity = Number(item.quantity || 0);
+    const price = Number(item.price || 0);
+    const discount = Number(item.discount || 0);
+    const taxable = Math.max(0, quantity * price - discount);
+    const total = Number(item.total ?? taxable + (taxable * Number(item.tax || 0)) / 100);
+    return {
+      item_name: item.product || item.description || "Item",
+      item_description: item.description || "",
+      item_quantity: quantity || 0,
+      item_price: `${currency} ${price.toFixed(2)}`,
+      item_tax: `${Number(item.tax || 0)}%`,
+      item_discount: `${currency} ${discount.toFixed(2)}`,
+      item_total: `${currency} ${total.toFixed(2)}`,
+    };
+  });
+  const itemsHtml = itemRows.map((item) =>
+    `<tr><td>${escapeHtml(item.item_name)}</td><td>${escapeHtml(item.item_quantity)}</td><td>${escapeHtml(item.item_price)}</td><td>${escapeHtml(item.item_total)}</td></tr>`
+  ).join("");
+  return {
+    ...data,
+    invoice_number: data.invoice_number || source.invoiceNumber || "INV-DRAFT",
+    customer_name: source.customerCompany?.name || source.userName || data.customer_name || "",
+    customer_email: source.customerCompany?.email || source.userEmail || data.customer_email || "",
+    customer_phone: source.customerCompany?.phone || source.userMobile || data.customer_phone || "",
+    customer_address: source.customerCompany?.address || data.customer_address || "",
+    invoice_date: data.invoice_date || data.invoiceDate || "",
+    due_date: data.due_date || data.dueDate || "",
+    company_name: source.billingCompany?.name || effectiveSettings.companyName || data.company_name || "Krita NEET JEE",
+    company_address: source.billingCompany?.address || effectiveSettings.companyAddress || data.company_address || "",
+    company_email: source.billingCompany?.email || effectiveSettings.companyEmail || data.company_email || "",
+    company_phone: source.billingCompany?.phone || effectiveSettings.companyPhone || data.company_phone || "",
+    company_logo: localUploadUrl(source.logoUrl || effectiveSettings.logoUrl || ""),
+    items: itemsHtml,
+    items_table: itemsHtml,
+    subtotal: data.subtotal || data.baseAmount || `${currency} 0.00`,
+    tax_rate: data.tax_rate || `${Number(source.taxDetails?.taxPercent ?? source.items?.[0]?.tax ?? 0)}%`,
+    tax_amount: data.tax_amount || data.taxAmount || `${currency} 0.00`,
+    discount: data.discount || data.discountAmount || `${currency} 0.00`,
+    total_amount: data.total_amount || data.totalAmount || `${currency} 0.00`,
+    currency,
+    payment_terms: source.terms || data.payment_terms || "Net 15 Days",
+    notes: source.notes || data.notes || "Thank you for your business!",
+    itemRows,
+  };
+}
+
+function renderInvoiceEditorDocument(htmlCode, cssCode, source, effectiveSettings, data) {
+  const previewData = invoiceEditorData(source, effectiveSettings, data);
+  let processedHtml = String(htmlCode || "");
+  let processedCss = String(cssCode || "");
+  processedHtml = processedHtml.replace(/\{\{#items\}\}([\s\S]*?)\{\{\/items\}\}/g, (_match, inner) =>
+    previewData.itemRows.map((item) => inner.replace(/\{\{\s*([\w_]+)\s*\}\}/g, (__match, key) => escapeHtml(item[key] ?? ""))).join("")
+  );
+  processedHtml = processedHtml.replace(/\{\{\s*([\w_]+)\s*\}\}/g, (_match, key) => (key === "items_table" ? previewData.items_table : previewData[key]) ?? "");
+  processedCss = processedCss.replace(/\{\{\s*([\w_]+)\s*\}\}/g, (_match, key) => String(previewData[key] ?? ""));
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><style>*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}@page{size:A4;margin:0}body{font-family:'Inter','Segoe UI',system-ui,-apple-system,sans-serif;-webkit-font-smoothing:antialiased;print-color-adjust:exact;-webkit-print-color-adjust:exact}${processedCss}</style></head><body>${processedHtml}</body></html>`;
+}
+
+async function renderInvoicePdf(invoice, settings, extras = {}, options = {}) {
   const source = { ...(typeof invoice?.toJSON === "function" ? invoice.toJSON() : invoice), ...extras };
-  const effectiveSettings = settingsWithInvoiceTemplate(settings, source);
+  const effectiveSettings = settingsWithInvoiceTemplate(settings, source, options);
   const data = invoiceData({ ...source, paidStampText: effectiveSettings.paidStampText });
+  if (String(effectiveSettings.activeTemplateHtmlCode || effectiveSettings.activeTemplateCssCode || "").trim()) {
+    const html = renderInvoiceEditorDocument(
+      effectiveSettings.activeTemplateHtmlCode,
+      effectiveSettings.activeTemplateCssCode,
+      source,
+      effectiveSettings,
+      data,
+    );
+    return printHtmlToPdf(html, source.invoiceNumber || "invoice");
+  }
+  if (options.requireConnectedTemplate) {
+    requireConnectedInvoiceTemplate(settings);
+  }
   const mappedFields = Array.isArray(effectiveSettings.fields)
     ? effectiveSettings.fields.filter((field) => field?.enabled !== false && (field?.raw || String(field?.label || field?.content || "").trim()))
     : [];
@@ -742,9 +943,9 @@ async function saveInvoicePdf(buffer, invoiceNumber) {
   return `/uploads/invoices/${fileName}`;
 }
 
-async function regenerateInvoicePdf(invoice, settings = null, extras = {}) {
+async function regenerateInvoicePdf(invoice, settings = null, extras = {}, options = {}) {
   const resolvedSettings = settings || await getInvoiceSettingsDoc();
-  const pdf = await renderInvoicePdf(invoice, resolvedSettings, extras);
+  const pdf = await renderInvoicePdf(invoice, resolvedSettings, extras, options);
   invoice.pdfPath = await saveInvoicePdf(pdf, invoice.invoiceNumber);
   return pdf;
 }
@@ -2939,6 +3140,15 @@ router.post(
       const active = getActiveInvoiceTemplate(settings);
       settings.activeTemplateId = active?.id || "";
       settings.activeTemplateName = active?.name || "";
+      const requestedConnectedId = String(body.connectedTemplateId ?? settings.connectedTemplateId ?? "");
+      const connected = requestedConnectedId
+        ? blocks.find((block) => block.type === "fabric-template" && String(block.id) === requestedConnectedId)
+        : null;
+      settings.connectedTemplateId = connected?.id || "";
+      settings.connectedTemplateName = connected?.name || "";
+      settings.connectedTemplateAt = connected ? (settings.connectedTemplateAt || new Date()) : undefined;
+      settings.connectionStatus = connected ? "connected" : "not_connected";
+      settings.reusableBlocks = settings.reusableBlocks.map((block) => block.type === "fabric-template" ? { ...block, connected: connected ? String(block.id) === String(connected.id) : false } : block);
       if (Array.isArray(active?.fields) && active.fields.length) settings.fields = normalizeFields(active.fields);
     }
     settings.defaultTemplate = body.defaultTemplate === undefined ? settings.defaultTemplate : Boolean(body.defaultTemplate);
@@ -2990,9 +3200,36 @@ router.post(
 );
 
 router.post(
+  "/invoice-settings/connect-template",
+  asyncHandler(async (req, res) => {
+    const settings = await getInvoiceSettingsDoc();
+    const templateId = String(req.body?.templateId || "").trim();
+    if (!templateId) throw new AppError("Select an invoice template to connect", 400);
+    const blocks = Array.isArray(settings.reusableBlocks) ? settings.reusableBlocks : [];
+    const template = blocks.find((block) => block?.type === "fabric-template" && String(block.id) === templateId);
+    if (!template) throw new AppError("Invoice template not found", 404);
+    if (!String(template.htmlCode || "").trim() || !String(template.cssCode || "").trim()) {
+      throw new AppError("Only Invoice Editor HTML/CSS templates can be connected to email", 400);
+    }
+    settings.reusableBlocks = blocks.map((block) => block?.type === "fabric-template"
+      ? { ...block, active: String(block.id) === templateId, connected: String(block.id) === templateId, connectedAt: String(block.id) === templateId ? new Date().toISOString() : undefined }
+      : block);
+    settings.activeTemplateId = template.id || "";
+    settings.activeTemplateName = template.name || "Invoice Template";
+    settings.connectedTemplateId = template.id || "";
+    settings.connectedTemplateName = template.name || "Invoice Template";
+    settings.connectedTemplateAt = new Date();
+    settings.connectionStatus = "connected";
+    await settings.save();
+    res.json({ success: true, message: "Invoice template successfully connected to email", data: settings.toJSON() });
+  }),
+);
+
+router.post(
   "/invoice-settings/test-invoice",
   asyncHandler(async (req, res) => {
     const settings = await getInvoiceSettingsDoc();
+    requireConnectedInvoiceTemplate(settings);
     const to = String(req.body?.to || settings.companyEmail || settings.smtp?.fromEmail || "").trim();
     if (!to) throw new AppError("Test recipient email is required", 400);
     const now = new Date();
@@ -3031,7 +3268,7 @@ router.post(
       terms: "No payment is required for this test invoice.",
       items: [{ product: "Premium Subscription", description: "Template test item", quantity: 1, price: testSubtotal, discount: testDiscount, tax: testTaxPercent, total: testAmountBeforeCharges }],
     };
-    const pdf = await renderInvoicePdf(sampleInvoice, settings, { planName: "Premium Plan" });
+    const pdf = await renderInvoicePdf(sampleInvoice, settings, { planName: "Premium Plan" }, { requireConnectedTemplate: true });
     const result = await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.INVOICE_TEST, to, {
       user_name: sampleInvoice.userName,
       customer_name: sampleInvoice.userName,
@@ -3165,11 +3402,11 @@ router.post(
   "/invoices",
   asyncHandler(async (req, res) => {
     const settings = await getInvoiceSettingsDoc();
-    const active = getActiveInvoiceTemplate(settings);
+    const connected = requireConnectedInvoiceTemplate(settings);
     const payload = normalizeInvoicePayload({
       ...(req.body || {}),
-      templateId: req.body?.templateId || active?.id || settings.activeTemplateId || "",
-      templateName: req.body?.templateName || active?.name || settings.activeTemplateName || "",
+      templateId: connected.id || "",
+      templateName: connected.name || settings.connectedTemplateName || "",
     });
     const invoice = await Invoice.create({
       ...payload,
@@ -3177,7 +3414,7 @@ router.post(
       issuedAt: payload.invoiceDate || new Date(),
       activityLogs: [{ action: "created", message: "Manual invoice created", at: new Date() }],
     });
-    await regenerateInvoicePdf(invoice, settings);
+    await regenerateInvoicePdf(invoice, settings, {}, { requireConnectedTemplate: true });
     await invoice.save();
     res.status(201).json({ success: true, message: "Invoice created", data: invoice.toJSON() });
   }),
@@ -3191,7 +3428,7 @@ router.put(
     if (!invoice) throw new AppError("Invoice not found", 404);
     Object.assign(invoice, normalizeInvoicePayload(req.body || {}, invoice.toJSON()));
     invoice.activityLogs = [...(invoice.activityLogs || []), { action: "updated", message: "Invoice edited", at: new Date() }];
-    await regenerateInvoicePdf(invoice);
+    await regenerateInvoicePdf(invoice, null, {}, { requireConnectedTemplate: true });
     await invoice.save();
     res.json({ success: true, message: "Invoice updated", data: invoice.toJSON() });
   }),
@@ -3214,7 +3451,7 @@ router.post(
       shareToken: crypto.randomBytes(12).toString("hex"),
       activityLogs: [{ action: "duplicated", message: `Duplicated from ${invoice.invoiceNumber}`, at: new Date() }],
     });
-    await regenerateInvoicePdf(copy);
+    await regenerateInvoicePdf(copy, null, {}, { requireConnectedTemplate: true });
     await copy.save();
     res.status(201).json({ success: true, message: "Invoice duplicated", data: copy.toJSON() });
   }),
@@ -3227,8 +3464,11 @@ router.post(
     const invoice = await Invoice.findById(req.params.id);
     if (!invoice) throw new AppError("Invoice not found", 404);
     const settings = await getInvoiceSettingsDoc();
+    const connected = requireConnectedInvoiceTemplate(settings);
     if (!invoice.userEmail) throw new AppError("Invoice customer email is missing", 400);
-    const pdf = await regenerateInvoicePdf(invoice, settings);
+    invoice.templateId = connected.id || invoice.templateId;
+    invoice.templateName = connected.name || invoice.templateName;
+    const pdf = await regenerateInvoicePdf(invoice, settings, {}, { requireConnectedTemplate: true });
     const result = await sendTemplatedEmail(EMAIL_TEMPLATE_KEYS.INVOICE_GENERATED, invoice.userEmail, {
       user_name: invoice.userName || "Customer",
       customer_name: invoice.userName || "Customer",
@@ -3261,7 +3501,7 @@ router.get(
     if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid invoice id", 400);
     const invoice = await Invoice.findById(req.params.id);
     if (!invoice) throw new AppError("Invoice not found", 404);
-    const pdf = await regenerateInvoicePdf(invoice);
+    const pdf = await regenerateInvoicePdf(invoice, null, {}, { requireConnectedTemplate: true });
     await invoice.save();
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="${invoice.invoiceNumber}.pdf"`);
@@ -3293,7 +3533,7 @@ router.post(
       User.findById(subscription.userId),
       SubscriptionPlan.findOne({ planId: subscription.planId }),
     ]);
-    const active = getActiveInvoiceTemplate(settings);
+    const connected = requireConnectedInvoiceTemplate(settings);
     const invoiceNumber = `INV-${new Date().toISOString().slice(0, 10).replace(/-/g, "")}-${String(Date.now()).slice(-6)}`;
     const invoice = await Invoice.create({
       invoiceNumber,
@@ -3321,8 +3561,8 @@ router.post(
         convenienceChargePercent: Number(subscription.convenienceChargePercent ?? settings.defaultConvenienceChargePercent ?? 0),
         convenienceChargeGstPercent: Number(subscription.convenienceChargeGstPercent ?? settings.defaultConvenienceChargeGstPercent ?? 0),
       },
-      templateId: active?.id || settings.activeTemplateId || "",
-      templateName: active?.name || settings.activeTemplateName || "",
+      templateId: connected?.id || settings.connectedTemplateId || "",
+      templateName: connected?.name || settings.connectedTemplateName || "",
       transactionId: subscription.razorpayPaymentId || subscription.razorpayOrderId || "",
       invoiceDate: new Date(),
       dueDate: subscription.endDate,
@@ -3350,7 +3590,7 @@ router.post(
       }],
       activityLogs: [{ action: "created", message: "Invoice generated from subscription", at: new Date() }],
     });
-    const pdf = await regenerateInvoicePdf(invoice, settings, { planName: plan?.name || subscription.planId });
+    const pdf = await regenerateInvoicePdf(invoice, settings, { planName: plan?.name || subscription.planId }, { requireConnectedTemplate: true });
     await invoice.save();
     if (settings.enabled && settings.emailEnabled && invoice.userEmail) {
       const data = invoiceData({ ...invoice.toJSON(), planName: plan?.name || subscription.planId });
@@ -3359,14 +3599,14 @@ router.post(
         customer_name: invoice.userName || "Learner",
         email: invoice.userEmail,
         invoice_number: invoice.invoiceNumber,
-        invoice_amount: `${data.currency} ${Number(data.totalAmount || 0).toFixed(2)}`,
-        payment_amount: `${data.currency} ${Number(data.totalAmount || 0).toFixed(2)}`,
+        invoice_amount: `${invoice.currency || "INR"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
+        payment_amount: `${invoice.currency || "INR"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
         invoice_date: new Date(invoice.invoiceDate || invoice.createdAt).toLocaleDateString("en-IN"),
         due_date: invoice.dueDate ? new Date(invoice.dueDate).toLocaleDateString("en-IN") : "",
-        tax_amount: `${data.currency} ${Number(data.taxAmount || 0).toFixed(2)}`,
-        convenience_fee: `${data.currency} ${Number(data.convenienceCharge || 0).toFixed(2)}`,
-        convenience_fee_gst: `${data.currency} ${Number(data.convenienceChargeGst || 0).toFixed(2)}`,
-        total_amount: `${data.currency} ${Number(data.totalAmount || 0).toFixed(2)}`,
+        tax_amount: `${invoice.currency || "INR"} ${Number(invoice.taxTotal || 0).toFixed(2)}`,
+        convenience_fee: `${invoice.currency || "INR"} ${Number(invoice.convenienceCharge || 0).toFixed(2)}`,
+        convenience_fee_gst: `${invoice.currency || "INR"} ${Number(invoice.convenienceChargeGst || 0).toFixed(2)}`,
+        total_amount: `${invoice.currency || "INR"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
         payment_status: data.paymentStatus,
         transaction_id: data.transactionId || "-",
         company_name: settings.companyName || "Krita",
