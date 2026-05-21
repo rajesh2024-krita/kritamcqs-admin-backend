@@ -732,6 +732,10 @@ function chromeExecutable() {
     "/usr/bin/google-chrome-stable",
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
+    // Puppeteer bundled Chromium paths
+    path.join(process.cwd(), "node_modules", "puppeteer", ".local-chromium", "win64-1290181", "chrome-win", "chrome.exe"),
+    path.join(process.cwd(), "node_modules", "puppeteer", ".local-chromium", "mac-1290181", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
+    path.join(process.cwd(), "node_modules", "puppeteer", ".local-chromium", "linux-1290181", "chrome-linux", "chrome"),
   ].filter(Boolean);
   return candidates.find((candidate) => {
     try {
