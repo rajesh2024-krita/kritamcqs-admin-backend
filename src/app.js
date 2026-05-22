@@ -10,7 +10,7 @@ import { uploadsRoot } from "./utils/uploadStorage.js";
 export const app = express();
 
 app.set("trust proxy", 1);
-
+app.options("*", cors());
 const configuredOrigins = env.clientOrigin
   .split(",")
   .map((origin) => origin.trim().replace(/\/+$/, ""))
@@ -42,14 +42,42 @@ function isAllowedOrigin(origin = "") {
 app.use(
   cors({
     origin(origin, callback) {
-      if (isAllowedOrigin(origin)) return callback(null, true);
-      console.warn(`[CORS] Blocked origin: ${origin}`);
-      return callback(null, false);
+      // Allow requests without origin (mobile apps, curl, postman)
+      if (!origin) {
+        return callback(null, true);
+      }
+
+      if (isAllowedOrigin(origin)) {
+        return callback(null, true);
+      }
+
+      console.error(`[CORS ERROR] Blocked Origin: ${origin}`);
+
+      return callback(new Error("Not allowed by CORS"));
     },
+
     credentials: true,
-    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-    optionsSuccessStatus: 204,
+
+    methods: [
+      "GET",
+      "POST",
+      "PUT",
+      "PATCH",
+      "DELETE",
+      "OPTIONS",
+    ],
+
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "Origin",
+    ],
+
+    exposedHeaders: ["Content-Length"],
+
+    optionsSuccessStatus: 200,
   }),
 );
 app.use(express.json({ limit: "50mb" }));
