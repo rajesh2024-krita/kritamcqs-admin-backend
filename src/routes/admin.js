@@ -65,8 +65,6 @@ import { accessSync, readdirSync } from "fs";
 import os from "os";
 import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { execFile } from "child_process";
-import { promisify } from "util";
 import crypto from "crypto";
 import puppeteer from "puppeteer";
 import { env } from "../config/env.js";
@@ -79,9 +77,11 @@ import { ownQuestionAssetUrl } from "../utils/questionAssetOwner.js";
 
 const router = Router();
 router.use(requireAdmin);
-const execFileAsync = promisify(execFile);
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
-const chromeLinuxDepsCommand = "sudo apt-get update && sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 libnss3 libxss1 libgtk-3-0";
+const chromeLinuxDepsCommand = "npm run setup:chrome-deps";
+const invoiceRenderViewportWidth = Math.max(600, Math.min(1800, Number(process.env.INVOICE_RENDER_WIDTH || 840)));
+const invoiceRenderScale = Math.max(1, Math.min(3, Number(process.env.INVOICE_RENDER_SCALE || 2)));
+const invoiceRenderTimeoutMs = Math.max(10000, Math.min(120000, Number(process.env.INVOICE_RENDER_TIMEOUT_MS || 45000)));
 
 function renderTemplate(template, values) {
   return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
@@ -801,57 +801,132 @@ function chromeExecutable() {
   return candidates.map(existingFile).find(Boolean) || "";
 }
 
+function chromeLaunchArgs() {
+  return [
+    "--headless=new",
+    "--disable-gpu",
+    "--disable-dev-shm-usage",
+    "--disable-setuid-sandbox",
+    "--no-sandbox",
+    "--no-zygote",
+    "--font-render-hinting=medium",
+    "--allow-file-access-from-files",
+  ];
+}
+
 function chromeLaunchError(error) {
   const message = error instanceof Error ? error.message : String(error || "");
   const stderr = typeof error?.stderr === "string" ? error.stderr : "";
   const output = `${message}\n${stderr}`;
-  if (/error while loading shared libraries|cannot open shared object file|libatk-1\.0\.so\.0|libnss3\.so|libgbm\.so|libxss\.so/i.test(output)) {
+  if (/error while loading shared libraries|cannot open shared object file|libatk-1\.0\.so\.0|libnss3\.so|libgbm\.so|libxss\.so|libgtk-3\.so/i.test(output)) {
     return new AppError(
-      `Chrome was found but cannot start because Linux system libraries are missing. Run: ${chromeLinuxDepsCommand}`,
+      `Chrome was found but cannot start because Linux system libraries are missing. Run ${chromeLinuxDepsCommand} on the backend server, then restart the backend.`,
       500,
     );
   }
   return new AppError(`Chrome failed while rendering the invoice PDF: ${message}`, 500);
 }
 
-async function printHtmlToPdf(html, invoiceNumber) {
+async function waitForInvoiceAssets(page) {
+  await page.evaluate(async () => {
+    if (document.fonts?.ready) {
+      await document.fonts.ready;
+    }
+    const images = Array.from(document.images || []);
+    await Promise.all(images.map((image) => {
+      if (image.complete && image.naturalWidth > 0) return Promise.resolve();
+      return new Promise((resolve) => {
+        image.addEventListener("load", resolve, { once: true });
+        image.addEventListener("error", resolve, { once: true });
+      });
+    }));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 150));
+}
+
+async function captureInvoiceImage(page) {
+  const metrics = await page.evaluate(() => {
+    const body = document.body;
+    const element = document.documentElement;
+    const width = Math.ceil(Math.max(body.scrollWidth, body.offsetWidth, element.clientWidth, element.scrollWidth, element.offsetWidth));
+    const height = Math.ceil(Math.max(body.scrollHeight, body.offsetHeight, element.clientHeight, element.scrollHeight, element.offsetHeight));
+    return { width, height };
+  });
+  const width = Math.max(1, Math.min(2400, metrics.width || invoiceRenderViewportWidth));
+  const height = Math.max(1, Math.min(12000, metrics.height || 1200));
+  await page.setViewport({ width, height: Math.min(height, 4096), deviceScaleFactor: invoiceRenderScale });
+  await waitForInvoiceAssets(page);
+  const image = await page.screenshot({
+    type: "png",
+    fullPage: true,
+    omitBackground: false,
+  });
+  return { image, width, height };
+}
+
+async function imageToPdf(page, image, width, height) {
+  const dataUrl = `data:image/png;base64,${Buffer.from(image).toString("base64")}`;
+  await page.setContent(
+    `<!DOCTYPE html><html><head><meta charset="UTF-8" /><style>@page{margin:0;size:${width}px ${height}px;}html,body{margin:0;padding:0;width:${width}px;height:${height}px;background:#fff;}img{display:block;width:${width}px;height:${height}px;}</style></head><body><img src="${dataUrl}" alt="Invoice" /></body></html>`,
+    { waitUntil: "load", timeout: invoiceRenderTimeoutMs },
+  );
+  return page.pdf({
+    width: `${width}px`,
+    height: `${height}px`,
+    printBackground: true,
+    preferCSSPageSize: true,
+    margin: { top: 0, right: 0, bottom: 0, left: 0 },
+    timeout: invoiceRenderTimeoutMs,
+  });
+}
+
+async function renderHtmlImageToPdf(html, invoiceNumber) {
   const executable = chromeExecutable();
   if (!executable) {
     throw new AppError("Chrome/Edge is required on the admin backend to render Invoice Editor HTML/CSS PDFs. Set CHROME_PATH or install Chrome.", 500);
   }
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "admin-invoice-render-"));
-  const htmlPath = path.join(tempDir, "invoice.html");
-  const pdfPath = path.join(tempDir, `${String(invoiceNumber || "invoice").replace(/[^a-z0-9_-]/gi, "-")}.pdf`);
+  let browser;
   try {
-    await fs.writeFile(htmlPath, html, "utf8");
-    try {
-      await execFileAsync(executable, [
-        "--headless=new",
-        "--disable-gpu",
-        "--disable-dev-shm-usage",
-        "--no-sandbox",
-        "--allow-file-access-from-files",
-        "--run-all-compositor-stages-before-draw",
-        "--virtual-time-budget=1000",
-        `--print-to-pdf=${pdfPath}`,
-        "--no-pdf-header-footer",
-        pathToFileURL(htmlPath).href,
-      ], { timeout: 30000, windowsHide: true });
-    } catch (error) {
-      throw chromeLaunchError(error);
+    console.info(`[INVOICE_PDF] Rendering invoice ${invoiceNumber || "invoice"} via Puppeteer image-to-PDF. executable=${executable}`);
+    browser = await puppeteer.launch({
+      executablePath: executable,
+      headless: "new",
+      args: chromeLaunchArgs(),
+      timeout: invoiceRenderTimeoutMs,
+      protocolTimeout: invoiceRenderTimeoutMs,
+    });
+    const page = await browser.newPage();
+    const failedAssets = [];
+    page.on("requestfailed", (request) => {
+      failedAssets.push({ url: request.url(), error: request.failure()?.errorText || "request failed" });
+    });
+    page.on("pageerror", (pageError) => {
+      console.warn(`[INVOICE_PDF] Page script error for invoice ${invoiceNumber || "invoice"}: ${pageError.message}`);
+    });
+    page.setDefaultTimeout(invoiceRenderTimeoutMs);
+    page.setDefaultNavigationTimeout(invoiceRenderTimeoutMs);
+    await page.setCacheEnabled(false);
+    await page.setViewport({ width: invoiceRenderViewportWidth, height: 1200, deviceScaleFactor: invoiceRenderScale });
+    await page.emulateMediaType("screen");
+    await page.setContent(html, { waitUntil: ["domcontentloaded", "load", "networkidle0"], timeout: invoiceRenderTimeoutMs });
+    await waitForInvoiceAssets(page);
+    if (failedAssets.length) {
+      console.warn(`[INVOICE_PDF] Invoice ${invoiceNumber || "invoice"} had ${failedAssets.length} failed asset request(s).`, failedAssets.slice(0, 5));
     }
-    for (let attempt = 0; attempt < 50; attempt += 1) {
-      try {
-        const stat = await fs.stat(pdfPath);
-        if (stat.size > 0) break;
-      } catch {
-        // Chrome can flush after returning on Windows.
-      }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    return await fs.readFile(pdfPath);
+    const { image, width, height } = await captureInvoiceImage(page);
+    const pdf = Buffer.from(await imageToPdf(page, image, width, height));
+    console.info(`[INVOICE_PDF] Rendered invoice ${invoiceNumber || "invoice"} image=${width}x${height} pdfBytes=${pdf.length}`);
+    return pdf;
+  } catch (error) {
+    const appError = chromeLaunchError(error);
+    console.error(`[INVOICE_PDF] Failed invoice ${invoiceNumber || "invoice"}: ${appError.message}`, {
+      originalError: error instanceof Error ? error.message : String(error),
+    });
+    throw appError;
   } finally {
-    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    if (browser) {
+      await browser.close().catch(() => undefined);
+    }
   }
 }
 
@@ -928,7 +1003,7 @@ async function renderInvoicePdf(invoice, settings, extras = {}, options = {}) {
       effectiveSettings,
       data,
     );
-    return printHtmlToPdf(html, source.invoiceNumber || "invoice");
+    return renderHtmlImageToPdf(html, source.invoiceNumber || "invoice");
   }
   if (options.requireConnectedTemplate) {
     requireConnectedInvoiceTemplate(settings);
