@@ -9,48 +9,30 @@ import { uploadsRoot } from "./utils/uploadStorage.js";
 
 export const app = express();
 
-app.set("trust proxy", 1);
-
-const configuredOrigins = env.clientOrigin
+// app.use(
+//   cors({
+//     origin: env.clientOrigin === "*" ? true : env.clientOrigin,
+//     credentials: true,
+//   }),
+// );
+const allowedOrigins = env.clientOrigin
   .split(",")
-  .map((origin) => origin.trim().replace(/\/+$/, ""))
-  .filter(Boolean);
-
-const allowAnyOrigin = configuredOrigins.includes("*");
-
-function isAllowedOrigin(origin = "") {
-  if (!origin) return true;
-  if (allowAnyOrigin) return true;
-
-  let url;
-  try {
-    url = new URL(origin);
-  } catch {
-    return false;
-  }
-
-  const normalized = `${url.protocol}//${url.host}`.replace(/\/+$/, "");
-  if (configuredOrigins.includes(normalized)) return true;
-
-  const hostname = url.hostname.toLowerCase();
-  if (["localhost", "127.0.0.1", "::1"].includes(hostname)) return true;
-  if (hostname === "admin.kritamcqs.com" || hostname === "www.admin.kritamcqs.com") return true;
-
-  return false;
-}
+  .map(origin => origin.trim());
 
 app.use(
   cors({
-    origin(origin, callback) {
-      if (isAllowedOrigin(origin)) return callback(null, true);
-      console.warn(`[CORS] Blocked origin: ${origin}`);
-      return callback(null, false);
+    origin: function (origin, callback) {
+      // allow requests with no origin (mobile apps/postman)
+      if (!origin) return callback(null, true);
+
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
     },
     credentials: true,
-    methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
-    optionsSuccessStatus: 204,
-  }),
+  })
 );
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
