@@ -723,6 +723,30 @@ function localUploadUrl(value) {
   return pathToFileURL(path.join(uploadsRoot, raw.replace(/^\/uploads\/?/, ""))).href;
 }
 
+function absoluteRequestUrl(req, publicPath) {
+  const forwardedProto = String(req.get("x-forwarded-proto") || "").split(",")[0].trim();
+  const forwardedHost = String(req.get("x-forwarded-host") || "").split(",")[0].trim();
+  const protocol = forwardedProto || req.protocol;
+  const host = forwardedHost || req.get("host");
+  const base = String(process.env.PUBLIC_API_BASE_URL || `${protocol}://${host}`).replace(/\/+$/, "");
+  return `${base}${publicPath.startsWith("/") ? publicPath : `/${publicPath}`}`;
+}
+
+function invoiceAssetFileName(file) {
+  const mimeExt = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/svg+xml": ".svg",
+  };
+  const baseName = sanitizeFileName(file?.originalname || "invoice-image.png");
+  const dotIndex = baseName.lastIndexOf(".");
+  const ext = mimeExt[file?.mimetype] || (dotIndex > 0 ? baseName.slice(dotIndex) : ".png");
+  const name = dotIndex > 0 ? baseName.slice(0, dotIndex) : baseName;
+  return `${name || "invoice-image"}-${Date.now()}-${crypto.randomBytes(4).toString("hex")}${ext}`;
+}
+
 function existingFile(candidate) {
   if (!candidate) return "";
   try {
@@ -3233,6 +3257,33 @@ router.post(
     settings.logoUrl = logoUrl;
     await settings.save();
     res.status(201).json({ success: true, message: "Invoice logo uploaded", data: { logoUrl } });
+  }),
+);
+
+router.post(
+  "/invoice-settings/assets",
+  upload.single("image"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw new AppError("Image file is required", 400);
+    const allowed = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"]);
+    if (!allowed.has(req.file.mimetype)) {
+      throw new AppError("Only image files are allowed (jpg, png, gif, webp, svg)", 400);
+    }
+    const invoiceUploadsRoot = path.join(uploadsRoot, "invoice-assets");
+    ensureDir(invoiceUploadsRoot);
+    const fileName = invoiceAssetFileName(req.file);
+    await fs.writeFile(path.join(invoiceUploadsRoot, fileName), req.file.buffer);
+    const url = `/uploads/invoice-assets/${fileName}`;
+    res.status(201).json({
+      success: true,
+      message: "Invoice image uploaded",
+      data: {
+        fileName,
+        url,
+        publicUrl: absoluteRequestUrl(req, url),
+        html: `<img src="${absoluteRequestUrl(req, url)}" alt="${escapeHtml(req.file.originalname || "Invoice image")}" />`,
+      },
+    });
   }),
 );
 
