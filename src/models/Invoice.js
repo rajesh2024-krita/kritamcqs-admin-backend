@@ -10,7 +10,7 @@ const invoiceSchema = new Schema(
     userEmail: String,
     userMobile: String,
     amount: { type: Number, required: true },
-    currency: { type: String, default: "₹" },
+    currency: { type: String, default: "INR" },
     status: { type: String, enum: ["draft", "sent", "paid", "pending", "overdue", "cancelled", "void", "failed"], default: "draft", index: true },
     transactionId: String,
     invoiceDate: Date,

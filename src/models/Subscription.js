@@ -23,7 +23,7 @@ const subscriptionSchema = new Schema(
     convenienceChargeGstPercent: Number,
     convenienceChargeGst: Number,
     finalAmount: Number,
-    currency: { type: String, default: "₹" },
+    currency: { type: String, default: "INR" },
     paymentStatus: { type: String, enum: ["PENDING", "PAID", "FAILED"], default: "PENDING", index: true },
     transactionDate: Date,
     amount: { type: Number, required: true },
