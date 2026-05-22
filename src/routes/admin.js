@@ -81,7 +81,8 @@ const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "
 const chromeLinuxDepsCommand = "npm run setup:chrome-deps";
 const invoiceRenderViewportWidth = Math.max(600, Math.min(1800, Number(process.env.INVOICE_RENDER_WIDTH || 840)));
 const invoiceRenderScale = Math.max(1, Math.min(3, Number(process.env.INVOICE_RENDER_SCALE || 2)));
-const invoiceRenderTimeoutMs = Math.max(10000, Math.min(120000, Number(process.env.INVOICE_RENDER_TIMEOUT_MS || 45000)));
+const invoiceRenderTimeoutMs = Math.max(30000, Math.min(180000, Number(process.env.INVOICE_RENDER_TIMEOUT_MS || 90000)));
+const invoiceAssetTimeoutMs = Math.max(3000, Math.min(30000, Number(process.env.INVOICE_ASSET_TIMEOUT_MS || 10000)));
 
 function renderTemplate(template, values) {
   return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
@@ -864,21 +865,57 @@ function chromeLaunchError(error) {
   return new AppError(`Chrome failed while rendering the invoice PDF: ${message}`, 500);
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withTimeout(promise, ms, fallback) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(fallback), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function waitForInvoiceAssets(page) {
-  await page.evaluate(async () => {
-    if (document.fonts?.ready) {
-      await document.fonts.ready;
-    }
-    const images = Array.from(document.images || []);
-    await Promise.all(images.map((image) => {
-      if (image.complete && image.naturalWidth > 0) return Promise.resolve();
-      return new Promise((resolve) => {
-        image.addEventListener("load", resolve, { once: true });
-        image.addEventListener("error", resolve, { once: true });
-      });
-    }));
-  });
-  await new Promise((resolve) => setTimeout(resolve, 150));
+  const result = await withTimeout(
+    page.evaluate(async (assetTimeout) => {
+      const timed = (promise, timeout) => Promise.race([
+        promise,
+        new Promise((resolve) => setTimeout(() => resolve("timeout"), timeout)),
+      ]);
+      const fontStatus = document.fonts?.ready
+        ? await timed(document.fonts.ready.then(() => "loaded").catch(() => "error"), assetTimeout)
+        : "unsupported";
+      const images = Array.from(document.images || []);
+      const imageResults = await Promise.all(images.map((image) => {
+        if (image.complete) return Promise.resolve(image.naturalWidth > 0 ? "loaded" : "error");
+        return timed(new Promise((resolve) => {
+          image.addEventListener("load", () => resolve("loaded"), { once: true });
+          image.addEventListener("error", () => resolve("error"), { once: true });
+        }), assetTimeout);
+      }));
+      return {
+        fonts: fontStatus,
+        images: {
+          total: images.length,
+          loaded: imageResults.filter((item) => item === "loaded").length,
+          timedOut: imageResults.filter((item) => item === "timeout").length,
+          failed: imageResults.filter((item) => item === "error").length,
+        },
+      };
+    }, invoiceAssetTimeoutMs),
+    invoiceAssetTimeoutMs + 1000,
+    { fonts: "timeout", images: { total: 0, loaded: 0, timedOut: 0, failed: 0 } },
+  );
+  await wait(150);
+  return result;
 }
 
 async function captureInvoiceImage(page) {
@@ -892,29 +929,51 @@ async function captureInvoiceImage(page) {
   const width = Math.max(1, Math.min(2400, metrics.width || invoiceRenderViewportWidth));
   const height = Math.max(1, Math.min(12000, metrics.height || 1200));
   await page.setViewport({ width, height: Math.min(height, 4096), deviceScaleFactor: invoiceRenderScale });
-  await waitForInvoiceAssets(page);
   const image = await page.screenshot({
-    type: "png",
+    type: "jpeg",
+    quality: 94,
     fullPage: true,
     omitBackground: false,
   });
   return { image, width, height };
 }
 
-async function imageToPdf(page, image, width, height) {
-  const dataUrl = `data:image/png;base64,${Buffer.from(image).toString("base64")}`;
-  await page.setContent(
-    `<!DOCTYPE html><html><head><meta charset="UTF-8" /><style>@page{margin:0;size:${width}px ${height}px;}html,body{margin:0;padding:0;width:${width}px;height:${height}px;background:#fff;}img{display:block;width:${width}px;height:${height}px;}</style></head><body><img src="${dataUrl}" alt="Invoice" /></body></html>`,
-    { waitUntil: "load", timeout: invoiceRenderTimeoutMs },
-  );
-  return page.pdf({
-    width: `${width}px`,
-    height: `${height}px`,
-    printBackground: true,
-    preferCSSPageSize: true,
-    margin: { top: 0, right: 0, bottom: 0, left: 0 },
-    timeout: invoiceRenderTimeoutMs,
+function buildImagePdf(image, width, height) {
+  const imageBuffer = Buffer.from(image);
+  const imageSize = imageSizeFromJpeg(imageBuffer) || { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+  const pageWidth = Math.max(1, Math.round(width));
+  const pageHeight = Math.max(1, Math.round(height));
+  const objects = [];
+  const add = (value) => {
+    objects.push(value);
+    return objects.length;
+  };
+  const addStream = (dict, stream) => add({ dict: `<< ${dict} /Length ${stream.length} >>`, stream });
+  const imageId = addStream(`/Type /XObject /Subtype /Image /Width ${imageSize.width} /Height ${imageSize.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode`, imageBuffer);
+  const content = Buffer.from(`q ${pageWidth} 0 0 ${pageHeight} 0 0 cm /Im1 Do Q`, "utf8");
+  const contentId = addStream("", content);
+  const pageId = objects.length + 1;
+  const pagesId = pageId + 1;
+  add(`<< /Type /Page /Parent ${pagesId} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /XObject << /Im1 ${imageId} 0 R >> >> /Contents ${contentId} 0 R >>`);
+  add(`<< /Type /Pages /Kids [${pageId} 0 R] /Count 1 >>`);
+  const catalogId = add("<< /Type /Catalog /Pages " + pagesId + " 0 R >>");
+  const chunks = [Buffer.from("%PDF-1.4\n", "utf8")];
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.concat(chunks).length);
+    chunks.push(Buffer.from(`${index + 1} 0 obj\n`, "utf8"));
+    if (typeof object === "string") {
+      chunks.push(Buffer.from(`${object}\n`, "utf8"));
+    } else {
+      chunks.push(Buffer.from(`${object.dict}\nstream\n`, "utf8"), object.stream, Buffer.from("\nendstream\n", "utf8"));
+    }
+    chunks.push(Buffer.from("endobj\n", "utf8"));
   });
+  const xref = Buffer.concat(chunks).length;
+  chunks.push(Buffer.from(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`, "utf8"));
+  offsets.slice(1).forEach((offset) => chunks.push(Buffer.from(`${String(offset).padStart(10, "0")} 00000 n \n`, "utf8")));
+  chunks.push(Buffer.from(`trailer\n<< /Size ${objects.length + 1} /Root ${catalogId} 0 R >>\nstartxref\n${xref}\n%%EOF`, "utf8"));
+  return Buffer.concat(chunks);
 }
 
 async function renderHtmlImageToPdf(html, invoiceNumber) {
@@ -945,14 +1004,21 @@ async function renderHtmlImageToPdf(html, invoiceNumber) {
     await page.setCacheEnabled(false);
     await page.setViewport({ width: invoiceRenderViewportWidth, height: 1200, deviceScaleFactor: invoiceRenderScale });
     await page.emulateMediaType("screen");
-    await page.setContent(html, { waitUntil: ["domcontentloaded", "load", "networkidle0"], timeout: invoiceRenderTimeoutMs });
-    await waitForInvoiceAssets(page);
+    try {
+      await page.setContent(html, { waitUntil: ["domcontentloaded", "load"], timeout: invoiceRenderTimeoutMs });
+    } catch (error) {
+      console.warn(`[INVOICE_PDF] Initial page load wait failed for invoice ${invoiceNumber || "invoice"}; continuing with current DOM.`, error instanceof Error ? error.message : String(error));
+    }
+    const assetStatus = await waitForInvoiceAssets(page);
+    if (assetStatus.fonts === "timeout" || assetStatus.images.timedOut || assetStatus.images.failed) {
+      console.warn(`[INVOICE_PDF] Invoice ${invoiceNumber || "invoice"} asset wait completed with warnings.`, assetStatus);
+    }
     if (failedAssets.length) {
       console.warn(`[INVOICE_PDF] Invoice ${invoiceNumber || "invoice"} had ${failedAssets.length} failed asset request(s).`, failedAssets.slice(0, 5));
     }
     const { image, width, height } = await captureInvoiceImage(page);
-    const pdf = Buffer.from(await imageToPdf(page, image, width, height));
-    console.info(`[INVOICE_PDF] Rendered invoice ${invoiceNumber || "invoice"} image=${width}x${height} pdfBytes=${pdf.length}`);
+    const pdf = buildImagePdf(image, width, height);
+    console.info(`[INVOICE_PDF] Rendered invoice ${invoiceNumber || "invoice"} image=${width}x${height} imageBytes=${image.length} pdfBytes=${pdf.length}`);
     return pdf;
   } catch (error) {
     const appError = chromeLaunchError(error);
