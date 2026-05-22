@@ -81,6 +81,7 @@ const router = Router();
 router.use(requireAdmin);
 const execFileAsync = promisify(execFile);
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const chromeLinuxDepsCommand = "sudo apt-get update && sudo apt-get install -y libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libpango-1.0-0 libcairo2 libnss3 libxss1 libgtk-3-0";
 
 function renderTemplate(template, values) {
   return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
@@ -800,6 +801,19 @@ function chromeExecutable() {
   return candidates.map(existingFile).find(Boolean) || "";
 }
 
+function chromeLaunchError(error) {
+  const message = error instanceof Error ? error.message : String(error || "");
+  const stderr = typeof error?.stderr === "string" ? error.stderr : "";
+  const output = `${message}\n${stderr}`;
+  if (/error while loading shared libraries|cannot open shared object file|libatk-1\.0\.so\.0|libnss3\.so|libgbm\.so|libxss\.so/i.test(output)) {
+    return new AppError(
+      `Chrome was found but cannot start because Linux system libraries are missing. Run: ${chromeLinuxDepsCommand}`,
+      500,
+    );
+  }
+  return new AppError(`Chrome failed while rendering the invoice PDF: ${message}`, 500);
+}
+
 async function printHtmlToPdf(html, invoiceNumber) {
   const executable = chromeExecutable();
   if (!executable) {
@@ -810,18 +824,22 @@ async function printHtmlToPdf(html, invoiceNumber) {
   const pdfPath = path.join(tempDir, `${String(invoiceNumber || "invoice").replace(/[^a-z0-9_-]/gi, "-")}.pdf`);
   try {
     await fs.writeFile(htmlPath, html, "utf8");
-    await execFileAsync(executable, [
-      "--headless=new",
-      "--disable-gpu",
-      "--disable-dev-shm-usage",
-      "--no-sandbox",
-      "--allow-file-access-from-files",
-      "--run-all-compositor-stages-before-draw",
-      "--virtual-time-budget=1000",
-      `--print-to-pdf=${pdfPath}`,
-      "--no-pdf-header-footer",
-      pathToFileURL(htmlPath).href,
-    ], { timeout: 30000, windowsHide: true });
+    try {
+      await execFileAsync(executable, [
+        "--headless=new",
+        "--disable-gpu",
+        "--disable-dev-shm-usage",
+        "--no-sandbox",
+        "--allow-file-access-from-files",
+        "--run-all-compositor-stages-before-draw",
+        "--virtual-time-budget=1000",
+        `--print-to-pdf=${pdfPath}`,
+        "--no-pdf-header-footer",
+        pathToFileURL(htmlPath).href,
+      ], { timeout: 30000, windowsHide: true });
+    } catch (error) {
+      throw chromeLaunchError(error);
+    }
     for (let attempt = 0; attempt < 50; attempt += 1) {
       try {
         const stat = await fs.stat(pdfPath);

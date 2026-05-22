@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "setup:chrome-deps": "bash scripts/install-chrome-deps.sh"
   },
   "dependencies": {
     "cors": "^2.8.5",
