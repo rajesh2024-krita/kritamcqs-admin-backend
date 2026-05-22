@@ -10,6 +10,7 @@ const dailyTestSettingsSchema = new Schema(
     moderatePercentage: { type: Number, default: 40, min: 0, max: 100 },
     hardPercentage: { type: Number, default: 30, min: 0, max: 100 },
     enabled: { type: Boolean, default: true },
+    examType: { type: String, enum: ["NEET", "JEE", "BOTH"], default: "BOTH", index: true },
     adaptiveModeEnabled: { type: Boolean, default: true },
     repeatLookbackSessions: { type: Number, default: 5, min: 1, max: 30 },
     maxRepeatedQuestions: { type: Number, default: 2, min: 0, max: 200 },

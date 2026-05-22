@@ -1363,6 +1363,8 @@ const revisionGenerateSchema = z.object({
 });
 
 const dailyTestSettingsSchema = z.object({
+  examType: z.enum(["NEET", "JEE", "BOTH"]).optional(),
+  exam_type: z.enum(["NEET", "JEE", "BOTH"]).optional(),
   totalQuestions: z.coerce.number().int().min(1).max(200).optional(),
   newQuestions: z.coerce.number().int().min(0).max(200).optional(),
   weakQuestions: z.coerce.number().int().min(0).max(200).optional(),
@@ -1414,6 +1416,8 @@ const dailyTestResetSchema = z.object({
   date: z.string().trim().optional(),
   resetAll: z.coerce.boolean().optional(),
   reset_all: z.coerce.boolean().optional(),
+  examMode: z.enum(["NEET", "JEE", "BOTH"]).optional(),
+  exam_mode: z.enum(["NEET", "JEE", "BOTH"]).optional(),
 });
 
 const chapterBulkFreeAccessSchema = z.object({
@@ -1731,6 +1735,7 @@ async function getOrCreateDailyTestSettings() {
       moderatePercentage: 40,
       hardPercentage: 30,
       enabled: true,
+      examType: "BOTH",
       adaptiveModeEnabled: true,
       repeatLookbackSessions: 5,
       maxRepeatedQuestions: 2,
@@ -1757,6 +1762,7 @@ function mapDailyTestSettings(doc) {
     moderatePercentage: Number(doc.moderatePercentage || 40),
     hardPercentage: Number(doc.hardPercentage || 30),
     enabled: Boolean(doc.enabled),
+    examType: doc.examType || "BOTH",
     adaptiveModeEnabled: doc.adaptiveModeEnabled !== false,
     repeatLookbackSessions: Number(doc.repeatLookbackSessions || 5),
     maxRepeatedQuestions: Number(doc.maxRepeatedQuestions || 2),
@@ -1787,6 +1793,7 @@ function mapDailyTestSettings(doc) {
     easy_percentage: Number(doc.easyPercentage || 30),
     moderate_percentage: Number(doc.moderatePercentage || 40),
     hard_percentage: Number(doc.hardPercentage || 30),
+    exam_type: doc.examType || "BOTH",
     adaptive_mode_enabled: doc.adaptiveModeEnabled !== false,
     repeat_lookback_sessions: Number(doc.repeatLookbackSessions || 5),
     max_repeated_questions: Number(doc.maxRepeatedQuestions || 2),
@@ -2003,6 +2010,7 @@ router.get("/daily-test/settings", asyncHandler(async (_req, res) => {
 router.post("/daily-test/settings", asyncHandler(async (req, res) => {
   const payload = dailyTestSettingsSchema.parse(req.body || {});
   const nextValues = {
+    examType: payload.examType ?? payload.exam_type ?? "BOTH",
     totalQuestions: payload.totalQuestions ?? payload.total_questions ?? 20,
     newQuestions: payload.newQuestions ?? payload.new_questions ?? 10,
     weakQuestions: payload.weakQuestions ?? payload.weak_questions ?? 5,
@@ -2134,6 +2142,8 @@ router.post("/daily-test/reset", asyncHandler(async (req, res) => {
   const filter = {};
   if (userId) filter.userId = userId;
   if (dateRange) filter.testDate = { $gte: dateRange.start, $lte: dateRange.end };
+  const examMode = payload.examMode || payload.exam_mode;
+  if (examMode) filter.examMode = examMode;
 
   const result = await DailyTest.deleteMany(filter);
 
@@ -2146,6 +2156,8 @@ router.post("/daily-test/reset", asyncHandler(async (req, res) => {
       user_id: userId || null,
       email: email || null,
       date: payload.date || null,
+      examMode: examMode || null,
+      exam_mode: examMode || null,
       reset_all: resetAll,
     },
   });
