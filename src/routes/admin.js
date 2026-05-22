@@ -649,7 +649,7 @@ function buildPdf(lines, images = []) {
 
 function invoiceData(input = {}) {
   const firstItem = Array.isArray(input.items) ? input.items[0] || {} : {};
-  const formatCurrency = (value) => `${input.currency || "INR"} ${Number(value || 0).toFixed(2)}`;
+  const formatCurrency = (value) => `${input.currency || "₹"} ${Number(value || 0).toFixed(2)}`;
   const convenienceCharge = Number(input.convenienceCharge || 0);
   const convenienceChargeGst = Number(input.convenienceChargeGst || 0);
   const totalCharges = convenienceCharge + convenienceChargeGst;
@@ -711,7 +711,7 @@ function invoiceData(input = {}) {
     total_amount: formatCurrency(input.grandTotal || input.amount),
     total: formatCurrency(input.grandTotal || input.amount),
     subtotal: formatCurrency(input.subtotal ?? firstItem.price ?? input.amount),
-    currency: input.currency || "INR",
+    currency: input.currency || "₹",
     paymentStatus: String(input.status || "paid").toUpperCase(),
     transactionId: input.transactionId || "",
     transaction_id: input.transactionId || "",
@@ -968,7 +968,7 @@ async function renderHtmlImageToPdf(html, invoiceNumber) {
 }
 
 function invoiceEditorData(source, effectiveSettings, data) {
-  const currency = source.currency || "INR";
+  const currency = source.currency || "₹";
   const itemRows = (Array.isArray(source.items) ? source.items : []).map((item) => {
     const quantity = Number(item.quantity || 0);
     const price = Number(item.price || 0);
@@ -1120,9 +1120,9 @@ async function renderInvoicePdf(invoice, settings, extras = {}, options = {}) {
       lineOp(42, y - 13, 553, y - 13),
       textOp(String(item.product || item.description || data.planName || "Item").slice(0, 45), 54, y, 9),
       textOp(String(item.quantity || 1), 304, y, 9),
-      textOp(`${source.currency || "INR"} ${Number(item.price || 0).toFixed(2)}`, 350, y, 9),
-      textOp(`${source.currency || "INR"} ${Number(item.discount || 0).toFixed(2)}`, 418, y, 9),
-      textOp(`${source.currency || "INR"} ${amount.toFixed(2)}`, 500, y, 9),
+      textOp(`${source.currency || "₹"} ${Number(item.price || 0).toFixed(2)}`, 350, y, 9),
+      textOp(`${source.currency || "₹"} ${Number(item.discount || 0).toFixed(2)}`, 418, y, 9),
+      textOp(`${source.currency || "₹"} ${amount.toFixed(2)}`, 500, y, 9),
     );
   });
   content.push(
@@ -3479,7 +3479,7 @@ router.post(
       customerCompany: { name: "Test Customer", email: to, phone: "8000000001", address: "Sample billing address" },
       planId: "test-plan",
       planName: "Premium Plan",
-      currency: "INR",
+      currency: "₹",
       status: "paid",
       invoiceDate: now,
       dueDate: now,
@@ -3549,7 +3549,7 @@ function normalizeInvoicePayload(body = {}, existing = {}) {
     userEmail: String(body.userEmail || body.customerCompany?.email || existing.userEmail || ""),
     userMobile: String(body.userMobile || body.customerCompany?.phone || existing.userMobile || ""),
     amount: Number(totals.grandTotal || body.amount || existing.amount || 0),
-    currency: String(body.currency || existing.currency || "INR"),
+    currency: String(body.currency || existing.currency || "₹"),
     status: allowedStatuses.has(status) ? status : "draft",
     transactionId: String(body.transactionId || existing.transactionId || ""),
     invoiceDate: body.invoiceDate ? new Date(String(body.invoiceDate)) : existing.invoiceDate || now,
@@ -3778,7 +3778,7 @@ router.post(
       convenienceCharge: Number(subscription.convenienceCharge || 0),
       convenienceChargeGst: Number(subscription.convenienceChargeGst || 0),
       grandTotal: Number(subscription.finalAmount || subscription.amount || 0),
-      currency: subscription.currency || "INR",
+      currency: subscription.currency || "₹",
       status: subscription.status === "active" ? "paid" : "pending",
       taxDetails: {
         type: "GST",
@@ -3826,14 +3826,14 @@ router.post(
         customer_name: invoice.userName || "Learner",
         email: invoice.userEmail,
         invoice_number: invoice.invoiceNumber,
-        invoice_amount: `${invoice.currency || "INR"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
-        payment_amount: `${invoice.currency || "INR"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
+        invoice_amount: `${invoice.currency || "₹"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
+        payment_amount: `${invoice.currency || "₹"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
         invoice_date: new Date(invoice.invoiceDate || invoice.createdAt).toLocaleDateString("en-IN"),
         due_date: invoice.dueDate ? new Date(invoice.dueDate).toLocaleDateString("en-IN") : "",
-        tax_amount: `${invoice.currency || "INR"} ${Number(invoice.taxTotal || 0).toFixed(2)}`,
-        convenience_fee: `${invoice.currency || "INR"} ${Number(invoice.convenienceCharge || 0).toFixed(2)}`,
-        convenience_fee_gst: `${invoice.currency || "INR"} ${Number(invoice.convenienceChargeGst || 0).toFixed(2)}`,
-        total_amount: `${invoice.currency || "INR"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
+        tax_amount: `${invoice.currency || "₹"} ${Number(invoice.taxTotal || 0).toFixed(2)}`,
+        convenience_fee: `${invoice.currency || "₹"} ${Number(invoice.convenienceCharge || 0).toFixed(2)}`,
+        convenience_fee_gst: `${invoice.currency || "₹"} ${Number(invoice.convenienceChargeGst || 0).toFixed(2)}`,
+        total_amount: `${invoice.currency || "₹"} ${Number(invoice.grandTotal || invoice.amount || 0).toFixed(2)}`,
         payment_status: data.paymentStatus,
         transaction_id: data.transactionId || "-",
         company_name: settings.companyName || "Krita",
