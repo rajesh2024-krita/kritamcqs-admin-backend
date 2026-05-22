@@ -61,13 +61,14 @@ import {
   buildDefaultTemplate,
 } from "../utils/templatedEmail.js";
 import fs from "fs/promises";
-import { accessSync } from "fs";
+import { accessSync, readdirSync } from "fs";
 import os from "os";
 import path from "path";
-import { pathToFileURL } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { execFile } from "child_process";
 import { promisify } from "util";
 import crypto from "crypto";
+import puppeteer from "puppeteer";
 import { env } from "../config/env.js";
 import {
   deriveExamType,
@@ -79,6 +80,7 @@ import { ownQuestionAssetUrl } from "../utils/questionAssetOwner.js";
 const router = Router();
 router.use(requireAdmin);
 const execFileAsync = promisify(execFile);
+const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 
 function renderTemplate(template, values) {
   return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
@@ -720,31 +722,82 @@ function localUploadUrl(value) {
   return pathToFileURL(path.join(uploadsRoot, raw.replace(/^\/uploads\/?/, ""))).href;
 }
 
+function existingFile(candidate) {
+  if (!candidate) return "";
+  try {
+    accessSync(candidate);
+    return candidate;
+  } catch {
+    return "";
+  }
+}
+
+function puppeteerExecutablePath() {
+  try {
+    return puppeteer.executablePath();
+  } catch {
+    return "";
+  }
+}
+
+function puppeteerCacheExecutables() {
+  const roots = [
+    process.env.PUPPETEER_CACHE_DIR,
+    path.join(os.homedir(), ".cache", "puppeteer"),
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "puppeteer") : "",
+  ].filter(Boolean);
+  const executables = [];
+  for (const root of roots) {
+    const chromeRoot = path.join(root, "chrome");
+    let versions = [];
+    try {
+      versions = readdirSync(chromeRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+        .sort()
+        .reverse();
+    } catch {
+      continue;
+    }
+    for (const version of versions) {
+      executables.push(
+        path.join(chromeRoot, version, "chrome-win64", "chrome.exe"),
+        path.join(chromeRoot, version, "chrome-win", "chrome.exe"),
+        path.join(chromeRoot, version, "chrome-linux64", "chrome"),
+        path.join(chromeRoot, version, "chrome-linux", "chrome"),
+        path.join(chromeRoot, version, "chrome-mac-arm64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
+        path.join(chromeRoot, version, "chrome-mac-x64", "Google Chrome for Testing.app", "Contents", "MacOS", "Google Chrome for Testing"),
+        path.join(chromeRoot, version, "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
+      );
+    }
+  }
+  return executables;
+}
+
 function chromeExecutable() {
   const candidates = [
     process.env.CHROME_PATH,
     process.env.CHROME_BIN,
+    puppeteerExecutablePath(),
     "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
     "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe") : "",
     "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
     "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "Microsoft", "Edge", "Application", "msedge.exe") : "",
     "/usr/bin/google-chrome",
     "/usr/bin/google-chrome-stable",
     "/usr/bin/chromium",
     "/usr/bin/chromium-browser",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
     // Puppeteer bundled Chromium paths
-    path.join(process.cwd(), "node_modules", "puppeteer", ".local-chromium", "win64-1290181", "chrome-win", "chrome.exe"),
-    path.join(process.cwd(), "node_modules", "puppeteer", ".local-chromium", "mac-1290181", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
-    path.join(process.cwd(), "node_modules", "puppeteer", ".local-chromium", "linux-1290181", "chrome-linux", "chrome"),
+    path.join(backendRoot, "node_modules", "puppeteer", ".local-chromium", "win64-1290181", "chrome-win", "chrome.exe"),
+    path.join(backendRoot, "node_modules", "puppeteer", ".local-chromium", "mac-1290181", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
+    path.join(backendRoot, "node_modules", "puppeteer", ".local-chromium", "linux-1290181", "chrome-linux", "chrome"),
+    ...puppeteerCacheExecutables(),
   ].filter(Boolean);
-  return candidates.find((candidate) => {
-    try {
-      accessSync(candidate);
-      return true;
-    } catch {
-      return false;
-    }
-  }) || "";
+  return candidates.map(existingFile).find(Boolean) || "";
 }
 
 async function printHtmlToPdf(html, invoiceNumber) {
