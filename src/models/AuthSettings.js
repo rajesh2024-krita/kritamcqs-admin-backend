@@ -7,6 +7,7 @@ const authSettingsSchema = new Schema(
     googleEnabled: { type: Boolean, default: false },
     googleClientId: { type: String, default: "" },
     googleAndroidClientId: { type: String, default: "" },
+    googleIosClientId: { type: String, default: "" },
     googleAndroidPackageName: { type: String, default: "com.kritamcqs.androidapp" },
     googleAndroidSha1: { type: String, default: "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4" },
     googleClientSecret: { type: String, default: "" },
