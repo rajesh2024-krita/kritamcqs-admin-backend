@@ -6,6 +6,7 @@ import { requireAdmin } from "../middlewares/auth.js";
 import { validate } from "../middlewares/validate.js";
 import {
   Chapter,
+  ChapterPerformance,
   AuthSettings,
   Topic,
   Coupon,
@@ -5558,6 +5559,241 @@ router.post("/auth-settings", asyncHandler(async (req, res) => {
   );
   sendResponse(res, { message: "Authentication settings saved", data: settings });
 }));
+
+router.get("/weak-areas/analytics", asyncHandler(async (_req, res) => {
+  const [weakAreas, subjects, chapters, users, categories] = await Promise.all([
+    ChapterPerformance.find({}).sort({ updatedAt: -1 }).limit(1000),
+    Subject.find({}).select("_id name examType examMode"),
+    Chapter.find({}).select("_id name"),
+    User.find({}).select("_id name email mobile isPremium"),
+    mongoose.connection.collection("weak_area_categories").find({}).sort({ name: 1 }).toArray(),
+  ]);
+
+  const subjectMap = new Map(subjects.map((item) => [String(item._id), item]));
+  const chapterMap = new Map(chapters.map((item) => [String(item._id), item]));
+  const userMap = new Map(users.map((item) => [String(item._id), item]));
+  const activeWeakAreas = weakAreas.filter((item) => item.isWeak || item.strength === "weak");
+  const commonTopics = new Map();
+
+  activeWeakAreas.forEach((item) => {
+    const chapter = chapterMap.get(String(item.chapterId));
+    const subject = subjectMap.get(String(item.subjectId));
+    const key = String(item.chapterId || "unknown");
+    if (!commonTopics.has(key)) {
+      commonTopics.set(key, {
+        chapterId: String(item.chapterId || ""),
+        chapterName: chapter?.name || "Unknown",
+        subjectName: subject?.name || "Unknown",
+        affectedUsers: 0,
+        wrongCount: 0,
+        averageAccuracy: 0,
+      });
+    }
+    const row = commonTopics.get(key);
+    row.affectedUsers += 1;
+    row.wrongCount += Number(item.wrongCount || 0);
+    row.averageAccuracy += Number(item.accuracy || 0) * 100;
+  });
+
+  const commonWeakTopics = Array.from(commonTopics.values())
+    .map((item) => ({
+      ...item,
+      averageAccuracy: item.affectedUsers > 0 ? Math.round((item.averageAccuracy / item.affectedUsers) * 100) / 100 : 0,
+    }))
+    .sort((a, b) => b.affectedUsers - a.affectedUsers || b.wrongCount - a.wrongCount)
+    .slice(0, 20);
+
+  const improvementTrends = weakAreas
+    .filter((item) => Number(item.totalAttempts || 0) > 0)
+    .sort((a, b) => Number(b.improvementPercentage || 0) - Number(a.improvementPercentage || 0))
+    .slice(0, 20)
+    .map((item) => {
+      const user = userMap.get(String(item.userId));
+      const subject = subjectMap.get(String(item.subjectId));
+      const chapter = chapterMap.get(String(item.chapterId));
+      return {
+        id: item.id,
+        userId: item.userId,
+        userName: user?.name || user?.email || user?.mobile || "Learner",
+        subjectName: subject?.name || "Unknown",
+        chapterName: chapter?.name || "Unknown",
+        attempts: item.totalAttempts,
+        accuracy: Math.round(Number(item.accuracy || 0) * 10000) / 100,
+        improvementPercentage: Math.round(Number(item.improvementPercentage || 0) * 100) / 100,
+        strength: item.strength,
+        isMastered: item.isMastered,
+      };
+    });
+
+  res.json({
+    summary: {
+      totalWeakAreas: activeWeakAreas.length,
+      trackedAreas: weakAreas.length,
+      masteredAreas: weakAreas.filter((item) => item.isMastered).length,
+      usersAffected: new Set(activeWeakAreas.map((item) => String(item.userId))).size,
+    },
+    commonWeakTopics,
+    improvementTrends,
+    userAnalytics: activeWeakAreas.slice(0, 100).map((item) => {
+      const user = userMap.get(String(item.userId));
+      const subject = subjectMap.get(String(item.subjectId));
+      const chapter = chapterMap.get(String(item.chapterId));
+      return {
+        id: item.id,
+        userName: user?.name || user?.email || user?.mobile || "Learner",
+        isPremium: Boolean(user?.isPremium),
+        subjectName: subject?.name || "Unknown",
+        chapterName: chapter?.name || "Unknown",
+        attempts: item.totalAttempts,
+        wrongCount: item.wrongCount,
+        accuracy: Math.round(Number(item.accuracy || 0) * 10000) / 100,
+        incorrectQuestionIds: item.incorrectQuestionIds || [],
+        topicIds: item.topicIds || [],
+        updatedAt: item.updatedAt,
+      };
+    }),
+    categories: categories.map((item) => ({ ...item, id: String(item._id), _id: undefined })),
+  });
+}));
+
+router.post("/weak-areas/categories", asyncHandler(async (req, res) => {
+  const now = new Date();
+  const payload = {
+    name: String(req.body?.name || "").trim(),
+    description: String(req.body?.description || "").trim(),
+    isActive: req.body?.isActive !== false,
+    updatedAt: now,
+    createdAt: now,
+  };
+  if (!payload.name) throw new AppError("Category name is required", 400);
+  const result = await mongoose.connection.collection("weak_area_categories").insertOne(payload);
+  res.status(201).json({ ...payload, id: String(result.insertedId) });
+}));
+
+router.put("/weak-areas/categories/:id", asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid category id", 400);
+  const update = {
+    name: String(req.body?.name || "").trim(),
+    description: String(req.body?.description || "").trim(),
+    isActive: req.body?.isActive !== false,
+    updatedAt: new Date(),
+  };
+  if (!update.name) throw new AppError("Category name is required", 400);
+  await mongoose.connection.collection("weak_area_categories").updateOne(
+    { _id: new mongoose.Types.ObjectId(req.params.id) },
+    { $set: update },
+  );
+  res.json({ ...update, id: req.params.id });
+}));
+
+router.delete("/weak-areas/categories/:id", asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid category id", 400);
+  await mongoose.connection.collection("weak_area_categories").deleteOne({ _id: new mongoose.Types.ObjectId(req.params.id) });
+  res.json({ success: true });
+}));
+
+router.get("/mistakes/analytics", asyncHandler(async (_req, res) => {
+  const [mistakes, attempts, subjects, chapters, questions, users] = await Promise.all([
+    Mistake.find({}).sort({ updatedAt: -1 }).limit(1000),
+    QuestionAttempt.find({ skipped: { $ne: true } }).sort({ createdAt: -1 }).limit(5000),
+    Subject.find({}).select("_id name"),
+    Chapter.find({}).select("_id name"),
+    Question.find({}).select("_id question subjectId chapterId difficulty difficultyId"),
+    User.find({}).select("_id name email mobile isPremium"),
+  ]);
+  const subjectMap = new Map(subjects.map((item) => [String(item._id), item]));
+  const chapterMap = new Map(chapters.map((item) => [String(item._id), item]));
+  const questionMap = new Map(questions.map((item) => [String(item._id), item]));
+  const userMap = new Map(users.map((item) => [String(item._id), item]));
+  const questionStats = new Map();
+
+  attempts.forEach((attempt) => {
+    const questionId = String(attempt.questionId);
+    const question = questionMap.get(questionId);
+    if (!questionStats.has(questionId)) {
+      questionStats.set(questionId, {
+        questionId,
+        question: question?.question || "Question unavailable",
+        subjectName: subjectMap.get(String(question?.subjectId || attempt.subjectId))?.name || "Unknown",
+        chapterName: chapterMap.get(String(question?.chapterId || attempt.chapterId))?.name || "Unknown",
+        difficulty: String(question?.difficulty || question?.difficultyId || "Unassigned"),
+        attempts: 0,
+        wrong: 0,
+      });
+    }
+    const row = questionStats.get(questionId);
+    row.attempts += 1;
+    if (!attempt.isCorrect) row.wrong += 1;
+  });
+
+  const frequentIncorrectQuestions = Array.from(questionStats.values())
+    .map((item) => ({ ...item, wrongRate: item.attempts > 0 ? Math.round((item.wrong / item.attempts) * 10000) / 100 : 0 }))
+    .sort((a, b) => b.wrong - a.wrong || b.wrongRate - a.wrongRate)
+    .slice(0, 25);
+
+  const topicReports = new Map();
+  attempts.forEach((attempt) => {
+    const key = String(attempt.chapterId || "unknown");
+    if (!topicReports.has(key)) {
+      topicReports.set(key, {
+        chapterId: key,
+        subjectName: subjectMap.get(String(attempt.subjectId))?.name || "Unknown",
+        chapterName: chapterMap.get(String(attempt.chapterId))?.name || "Unknown",
+        attempts: 0,
+        wrong: 0,
+      });
+    }
+    const row = topicReports.get(key);
+    row.attempts += 1;
+    if (!attempt.isCorrect) row.wrong += 1;
+  });
+
+  const difficultyReports = new Map();
+  frequentIncorrectQuestions.forEach((item) => {
+    const key = item.difficulty || "Unassigned";
+    if (!difficultyReports.has(key)) difficultyReports.set(key, { difficulty: key, questions: 0, wrong: 0, attempts: 0 });
+    const row = difficultyReports.get(key);
+    row.questions += 1;
+    row.wrong += item.wrong;
+    row.attempts += item.attempts;
+  });
+
+  res.json({
+    summary: {
+      activeMistakes: mistakes.filter((item) => item.completionStatus !== "completed").length,
+      repeatedMistakes: mistakes.filter((item) => Number(item.attempts || 0) >= 2).length,
+      weakMistakes: mistakes.filter((item) => item.status === "weak").length,
+      trackedQuestions: questionStats.size,
+    },
+    frequentIncorrectQuestions,
+    userMistakeAnalytics: mistakes.slice(0, 100).map((item) => {
+      const user = userMap.get(String(item.userId));
+      const question = questionMap.get(String(item.questionId));
+      return {
+        id: item.id,
+        userName: user?.name || user?.email || user?.mobile || "Learner",
+        isPremium: Boolean(user?.isPremium),
+        question: question?.question || "Question unavailable",
+        subjectName: subjectMap.get(String(item.subjectId || question?.subjectId))?.name || "Unknown",
+        chapterName: chapterMap.get(String(item.chapterId || question?.chapterId))?.name || "Unknown",
+        attempts: item.attempts,
+        accuracy: item.accuracy,
+        status: item.status,
+        completionStatus: item.completionStatus,
+        lastAttemptDate: item.lastAttemptDate,
+      };
+    }),
+    topicReports: Array.from(topicReports.values())
+      .map((item) => ({ ...item, wrongRate: item.attempts > 0 ? Math.round((item.wrong / item.attempts) * 10000) / 100 : 0 }))
+      .sort((a, b) => b.wrong - a.wrong)
+      .slice(0, 25),
+    difficultyReports: Array.from(difficultyReports.values())
+      .map((item) => ({ ...item, wrongRate: item.attempts > 0 ? Math.round((item.wrong / item.attempts) * 10000) / 100 : 0 }))
+      .sort((a, b) => b.wrongRate - a.wrongRate),
+    repeatedMistakes: mistakes.filter((item) => Number(item.attempts || 0) >= 2).slice(0, 50),
+  });
+}));
+
 router.use("/users", createCrudRouter({ key: "user", label: "User", service: userService }));
 router.use("/coupons", createCrudRouter({ key: "coupon", label: "Coupon", service: couponService }));
 router.use(
