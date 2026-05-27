@@ -2535,6 +2535,10 @@ async function buildMockTestPayload(payload, existing = null) {
     generationConfig: existing?.generationConfig || undefined,
     generationHistory: Array.isArray(existing?.generationHistory) ? existing.generationHistory : [],
     randomizeQuestionOrder: payload.randomizeQuestionOrder !== undefined ? Boolean(payload.randomizeQuestionOrder) : existing ? Boolean(existing.randomizeQuestionOrder ?? true) : true,
+    freeAccessDurationValue: Math.max(1, Number(payload.freeAccessDurationValue ?? existing?.freeAccessDurationValue ?? 1)),
+    freeAccessDurationUnit: ["days", "weeks", "months"].includes(String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days"))
+      ? String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days")
+      : "days",
     isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : Boolean(existing?.isPremiumOnly),
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
   };
@@ -2606,6 +2610,8 @@ async function serializeMockTests(items) {
       generationConfig: raw.generationConfig || null,
       generationHistory: Array.isArray(raw.generationHistory) ? raw.generationHistory : [],
       randomizeQuestionOrder: raw.randomizeQuestionOrder !== false,
+      freeAccessDurationValue: Number(raw.freeAccessDurationValue || 1),
+      freeAccessDurationUnit: raw.freeAccessDurationUnit || "days",
       isPremiumOnly: Boolean(raw.isPremiumOnly),
       isActive: Boolean(raw.isActive),
       createdAt: raw.createdAt,
@@ -2889,6 +2895,10 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     },
     generationHistory: nextHistory,
     randomizeQuestionOrder,
+    freeAccessDurationValue: Math.max(1, Number(payload.freeAccessDurationValue ?? existing?.freeAccessDurationValue ?? 1)),
+    freeAccessDurationUnit: ["days", "weeks", "months"].includes(String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days"))
+      ? String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days")
+      : "days",
     isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : existing ? Boolean(existing.isPremiumOnly) : false,
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
   };
@@ -4540,12 +4550,15 @@ router.post(
   "/mock-tests/auto-generate",
   asyncHandler(async (req, res) => {
     const payload = await buildAutoMockTestPayload(req.body || {}, req.userId);
-    const item = await MockTest.create(payload);
     const shortageCount = Array.isArray(payload?.generationConfig?.shortages) ? payload.generationConfig.shortages.length : 0;
-    res.status(201).json({
+    const preview = (await serializeMockTests([{ ...payload, _id: "" }]))[0];
+    res.json({
       success: true,
-      message: shortageCount > 0 ? `Mock test auto-generated with ${shortageCount} section shortage(s)` : "Mock test auto-generated",
-      data: (await serializeMockTests([item]))[0],
+      message: shortageCount > 0 ? `Mock test generated with ${shortageCount} section shortage(s). Review and save to publish.` : "Mock test generated. Review and save to publish.",
+      data: {
+        ...preview,
+        previewOnly: true,
+      },
     });
   }),
 );

@@ -31,6 +31,8 @@ const mockTestSchema = new Schema(
     generationConfig: { type: Schema.Types.Mixed },
     generationHistory: { type: [Schema.Types.Mixed], default: [] },
     randomizeQuestionOrder: { type: Boolean, default: true },
+    freeAccessDurationValue: { type: Number, default: 1, min: 1 },
+    freeAccessDurationUnit: { type: String, enum: ["days", "weeks", "months"], default: "days" },
     isPremiumOnly: { type: Boolean, default: false, index: true },
     isActive: { type: Boolean, default: true, index: true },
   },
