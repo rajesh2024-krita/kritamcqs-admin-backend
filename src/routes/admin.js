@@ -2539,6 +2539,12 @@ async function buildMockTestPayload(payload, existing = null) {
     freeAccessDurationUnit: ["days", "weeks", "months"].includes(String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days"))
       ? String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days")
       : "days",
+    premiumDurationType: ["daily", "weekly", "monthly"].includes(String(payload.premiumDurationType || existing?.premiumDurationType || "daily"))
+      ? String(payload.premiumDurationType || existing?.premiumDurationType || "daily")
+      : "daily",
+    premiumValidityDays: Math.max(1, Number(payload.premiumValidityDays ?? existing?.premiumValidityDays ?? 1)),
+    autoDailyQuestionRearrangement: payload.autoDailyQuestionRearrangement !== undefined ? Boolean(payload.autoDailyQuestionRearrangement) : Boolean(existing?.autoDailyQuestionRearrangement),
+    autoDailyQuestionGeneration: payload.autoDailyQuestionGeneration !== undefined ? Boolean(payload.autoDailyQuestionGeneration) : Boolean(existing?.autoDailyQuestionGeneration),
     isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : Boolean(existing?.isPremiumOnly),
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
   };
@@ -2612,6 +2618,10 @@ async function serializeMockTests(items) {
       randomizeQuestionOrder: raw.randomizeQuestionOrder !== false,
       freeAccessDurationValue: Number(raw.freeAccessDurationValue || 1),
       freeAccessDurationUnit: raw.freeAccessDurationUnit || "days",
+      premiumDurationType: raw.premiumDurationType || "daily",
+      premiumValidityDays: Number(raw.premiumValidityDays || 1),
+      autoDailyQuestionRearrangement: Boolean(raw.autoDailyQuestionRearrangement),
+      autoDailyQuestionGeneration: Boolean(raw.autoDailyQuestionGeneration),
       isPremiumOnly: Boolean(raw.isPremiumOnly),
       isActive: Boolean(raw.isActive),
       createdAt: raw.createdAt,
@@ -2899,6 +2909,12 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     freeAccessDurationUnit: ["days", "weeks", "months"].includes(String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days"))
       ? String(payload.freeAccessDurationUnit || existing?.freeAccessDurationUnit || "days")
       : "days",
+    premiumDurationType: ["daily", "weekly", "monthly"].includes(String(payload.premiumDurationType || existing?.premiumDurationType || "daily"))
+      ? String(payload.premiumDurationType || existing?.premiumDurationType || "daily")
+      : "daily",
+    premiumValidityDays: Math.max(1, Number(payload.premiumValidityDays ?? existing?.premiumValidityDays ?? 1)),
+    autoDailyQuestionRearrangement: payload.autoDailyQuestionRearrangement !== undefined ? Boolean(payload.autoDailyQuestionRearrangement) : Boolean(existing?.autoDailyQuestionRearrangement),
+    autoDailyQuestionGeneration: payload.autoDailyQuestionGeneration !== undefined ? Boolean(payload.autoDailyQuestionGeneration) : Boolean(existing?.autoDailyQuestionGeneration),
     isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : existing ? Boolean(existing.isPremiumOnly) : false,
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
   };
@@ -4472,6 +4488,7 @@ router.get(
 
     if (req.query.examType) filters.examType = normalizeExamType(req.query.examType);
     if (req.query.isActive === "true" || req.query.isActive === "false") filters.isActive = req.query.isActive === "true";
+    if (req.query.isPremiumOnly === "true" || req.query.isPremiumOnly === "false") filters.isPremiumOnly = req.query.isPremiumOnly === "true";
     if (req.query.createdDate) {
       const start = new Date(`${String(req.query.createdDate).slice(0, 10)}T00:00:00.000Z`);
       const end = new Date(start);
