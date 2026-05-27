@@ -2554,7 +2554,8 @@ async function serializeMockTests(items) {
   const subjectIds = [...new Set(items.flatMap((item) => item.subjectIds || []).map(String).filter(Boolean))];
   const chapterIds = [...new Set(items.flatMap((item) => item.chapterIds || []).map(String).filter(Boolean))];
   const questionIds = [...new Set(items.flatMap((item) => item.questionIds || []).map(String).filter(Boolean))];
-  const [subjects, chapters, questions] = await Promise.all([
+  const mockTestIds = [...new Set(items.map((item) => String(item.id ?? item._id)).filter(Boolean))];
+  const [subjects, chapters, questions, attemptStats] = await Promise.all([
     subjectIds.length ? Subject.find({ _id: { $in: subjectIds } }).select("name") : [],
     chapterIds.length ? Chapter.find({ _id: { $in: chapterIds } }).select("name") : [],
     questionIds.length
@@ -2564,13 +2565,36 @@ async function serializeMockTests(items) {
         .populate("chapterId", "name")
         .populate("difficultyId", "name")
       : [],
+    mockTestIds.length
+      ? SessionAttempt.aggregate([
+          { $match: { sourceSessionId: { $in: mockTestIds }, completedAt: { $ne: null } } },
+          {
+            $group: {
+              _id: "$sourceSessionId",
+              completedAttemptCount: { $sum: 1 },
+              completedUserIds: { $addToSet: "$userId" },
+              lastCompletedAt: { $max: "$completedAt" },
+            },
+          },
+        ])
+      : [],
   ]);
   const subjectMap = new Map(subjects.map((item) => [String(item._id), item.name]));
   const chapterMap = new Map(chapters.map((item) => [String(item._id), item.name]));
   const questionMap = new Map(questions.map((item) => [String(item._id), item]));
+  const statsByMockId = new Map(attemptStats.map((item) => [String(item._id), item]));
+  const completedUserIds = [...new Set(attemptStats.flatMap((item) => item.completedUserIds || []).map(String).filter(Boolean))];
+  const completedUsers = completedUserIds.length
+    ? await User.find({ _id: { $in: completedUserIds.filter((id) => mongoose.isValidObjectId(id)) } }).select("_id isPremium")
+    : [];
+  const premiumUserIds = new Set(completedUsers.filter((user) => Boolean(user.isPremium)).map((user) => String(user._id)));
 
   return items.map((item) => {
     const raw = typeof item?.toJSON === "function" ? item.toJSON() : item;
+    const mockStats = statsByMockId.get(String(raw.id ?? raw._id)) || {};
+    const mockCompletedUserIds = (mockStats.completedUserIds || []).map(String).filter(Boolean);
+    const currentPremiumLearnerCount = mockCompletedUserIds.filter((id) => premiumUserIds.has(id)).length;
+    const completedLearnerCount = mockCompletedUserIds.length;
     return {
       id: String(raw.id ?? raw._id),
       title: raw.title,
@@ -2622,6 +2646,12 @@ async function serializeMockTests(items) {
       premiumValidityDays: Number(raw.premiumValidityDays || 1),
       autoDailyQuestionRearrangement: Boolean(raw.autoDailyQuestionRearrangement),
       autoDailyQuestionGeneration: Boolean(raw.autoDailyQuestionGeneration),
+      accessRule: "free_once_then_premium_per_user",
+      completedLearnerCount,
+      completedAttemptCount: Number(mockStats.completedAttemptCount || 0),
+      currentPremiumLearnerCount,
+      freeConvertedLearnerCount: Math.max(0, completedLearnerCount - currentPremiumLearnerCount),
+      lastCompletedAt: mockStats.lastCompletedAt || null,
       isPremiumOnly: Boolean(raw.isPremiumOnly),
       isActive: Boolean(raw.isActive),
       createdAt: raw.createdAt,
@@ -4566,7 +4596,7 @@ router.get(
 router.post(
   "/mock-tests/auto-generate",
   asyncHandler(async (req, res) => {
-    const payload = await buildAutoMockTestPayload(req.body || {}, req.userId);
+    const payload = await buildAutoMockTestPayload({ ...(req.body || {}), isPremiumOnly: false }, req.userId);
     const shortageCount = Array.isArray(payload?.generationConfig?.shortages) ? payload.generationConfig.shortages.length : 0;
     const preview = (await serializeMockTests([{ ...payload, _id: "" }]))[0];
     res.json({
