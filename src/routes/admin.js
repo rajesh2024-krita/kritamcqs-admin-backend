@@ -10,6 +10,7 @@ import {
   AuthSettings,
   Topic,
   Coupon,
+  DailyAssignment,
   DailyTest,
   DailyTestAnalytics,
   DailyTestSettings,
@@ -38,6 +39,7 @@ import {
   Subscription,
   SubscriptionPlan,
   SupportTicket,
+  Test,
   User,
   UserNotification,
   Year,
@@ -236,6 +238,64 @@ async function sendTemplatedEmail(templateKey, to, variables, attachments = []) 
     console.error(`[EMAIL] Email send failed for ${templateKey}: ${log.error}`);
     throw error;
   }
+}
+
+async function truncateUserData(userId) {
+  if (!mongoose.isValidObjectId(userId)) {
+    throw new AppError("Invalid user id", 400);
+  }
+
+  const user = await User.findById(userId);
+  if (!user) throw new AppError("User not found", 404);
+
+  const objectId = new mongoose.Types.ObjectId(userId);
+  const userDataFilter = { userId: { $in: [String(userId), objectId] } };
+  const deletionTasks = [
+    ["Chapter Performance", ChapterPerformance.collection.deleteMany(userDataFilter)],
+    ["Daily Assignments", DailyAssignment.collection.deleteMany(userDataFilter)],
+    ["Daily Tests", DailyTest.collection.deleteMany(userDataFilter)],
+    ["Invoices", Invoice.collection.deleteMany(userDataFilter)],
+    ["Learning Sessions", LearningSession.collection.deleteMany(userDataFilter)],
+    ["Mistakes", Mistake.collection.deleteMany(userDataFilter)],
+    ["Question Attempts", QuestionAttempt.collection.deleteMany(userDataFilter)],
+    ["Session Attempts", SessionAttempt.collection.deleteMany(userDataFilter)],
+    ["Subscriptions", Subscription.collection.deleteMany(userDataFilter)],
+    ["Support Tickets", SupportTicket.collection.deleteMany(userDataFilter)],
+    ["Tests", Test.collection.deleteMany(userDataFilter)],
+    ["Notifications", UserNotification.collection.deleteMany(userDataFilter)],
+  ];
+
+  const results = await Promise.all(deletionTasks.map(async ([label, task]) => {
+    const result = await task;
+    return { label, deletedCount: Number(result.deletedCount || 0) };
+  }));
+
+  const analyticsResult = await DailyTestAnalytics.updateMany(
+    { "topPerformingUsers.userId": String(userId) },
+    { $pull: { topPerformingUsers: { userId: String(userId) } } },
+  );
+
+  await User.findByIdAndUpdate(userId, {
+    $set: {
+      onboardingComplete: false,
+      requiresProfileCompletion: false,
+      isPremium: false,
+    },
+    $unset: {
+      examMode: "",
+      level: "",
+      premiumExpiresAt: "",
+      lastPurchase: "",
+      lastLoginAt: "",
+    },
+  });
+
+  return {
+    userId: String(userId),
+    deleted: results,
+    analyticsUpdatedCount: Number(analyticsResult.modifiedCount || 0),
+    totalDeletedCount: results.reduce((total, item) => total + item.deletedCount, 0),
+  };
 }
 
 const defaultInvoiceFields = [
@@ -1325,6 +1385,13 @@ router.get("/dashboard", asyncHandler(dashboardController.dashboard));
 router.get("/catalog", asyncHandler(dashboardController.catalog));
 router.get("/daily-test-analytics", asyncHandler(dashboardController.dailyTestAnalytics));
 router.get("/users/:id/overview", asyncHandler(userInsightsController.overview));
+router.post("/users/:id/truncate", asyncHandler(async (req, res) => {
+  const result = await truncateUserData(req.params.id);
+  sendResponse(res, {
+    message: "User data truncated successfully",
+    data: result,
+  });
+}));
 router.post("/users/migration/preview", upload.single("file"), asyncHandler(async (req, res) => {
   sendResponse(res, {
     data: await oldUserMigrationService.preview(req.file),
