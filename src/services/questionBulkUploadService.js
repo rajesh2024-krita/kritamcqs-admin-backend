@@ -56,6 +56,7 @@ const HEADER_ALIASES = {
 
 const KNOWN_QUESTION_TYPES = new Set(["MCQ", "TRUE_FALSE", "FILL_BLANKS", "MATCH_FOLLOWING", "DESCRIPTIVE", "NUMERICAL"]);
 const NUMERIC_LIKE_TYPES = new Set(["FILL_BLANKS", "MATCH_FOLLOWING", "DESCRIPTIVE", "NUMERICAL"]);
+const OBJECTIVE_RESPONSE_TYPES = new Set(["single", "multiple"]);
 
 function normalizeHeader(value) {
   return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -92,6 +93,22 @@ function normalizeQuestionType(value) {
   if (["descriptive", "description"].includes(normalized)) return "DESCRIPTIVE";
   if (["numeric", "numerical", "integer", "integer_type"].includes(normalized)) return "NUMERICAL";
   return normalized ? normalized.toUpperCase() : "";
+}
+
+function getEffectiveQuestionType(raw = {}) {
+  const questionType = normalizeQuestionType(raw.questionType);
+  if (!questionType || KNOWN_QUESTION_TYPES.has(questionType)) return questionType;
+
+  const responseType = normalizeResponseType(raw.responseType);
+  const hasObjectiveOptions = ["optionA", "optionB", "optionC", "optionD", "optionAImageUrl", "optionBImageUrl", "optionCImageUrl", "optionDImageUrl"]
+    .some((field) => normalizeText(raw[field]));
+
+  // Sheets often use question_type for labels such as Conceptual, NCERT Direct,
+  // or Statement Based. If the response type/options show an objective question,
+  // store it under the configured MCQ type instead of requiring every label to
+  // exist as a separate Question Type.
+  if (OBJECTIVE_RESPONSE_TYPES.has(responseType) || hasObjectiveOptions) return "MCQ";
+  return questionType;
 }
 
 function normalizeResponseType(value) {
@@ -223,6 +240,7 @@ function isImageValue(value) {
   if (!lower) return false;
   if (isDataUri(lower)) return true;
   if (/\.(png|jpe?g|webp|gif|bmp|svg)(?:[?#].*)?$/.test(lower)) return true;
+  if (/^(https?:)?\/\//.test(lower) || /^www\./.test(lower)) return true;
   return lower.includes("/uploads/") || lower.includes("cloudinary") || lower.includes("firebase");
 }
 
@@ -840,7 +858,7 @@ function findYear(catalog, value, examType) {
 }
 
 function buildQuestionPayload(raw, matches) {
-  const questionType = normalizeQuestionType(raw.questionType);
+  const questionType = getEffectiveQuestionType(raw);
   const responseType = normalizeResponseType(raw.responseType);
   const isNumericLike = responseType === "numeric" || NUMERIC_LIKE_TYPES.has(questionType);
   const isMultiple = responseType === "multiple";
@@ -907,7 +925,7 @@ function buildQuestionPayload(raw, matches) {
 
 function validateRawRow(raw, catalog) {
   const errors = [];
-  const questionType = normalizeQuestionType(raw.questionType);
+  const questionType = getEffectiveQuestionType(raw);
   const examType = normalizeExamType(raw.examType);
 
   if (!normalizeText(raw.question) && !normalizeText(raw.questionImageUrl)) errors.push("Missing Question");
@@ -1138,7 +1156,7 @@ async function createYearIfMissing(catalog, raw, examType) {
 }
 
 async function createQuestionTypeIfMissing(catalog, raw, examType) {
-  const questionType = normalizeQuestionType(raw.questionType);
+  const questionType = getEffectiveQuestionType(raw);
   if (!questionType || findQuestionType(catalog, questionType, examType, raw.questionType)) return;
 
   const label = getQuestionTypeLabel(questionType, raw.questionType);
