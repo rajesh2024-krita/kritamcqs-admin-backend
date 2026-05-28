@@ -8,6 +8,7 @@ const questionBulkUploadBatchSchema = new Schema(
     totalRows: { type: Number, default: 0 },
     validCount: { type: Number, default: 0 },
     invalidCount: { type: Number, default: 0 },
+    warningCount: { type: Number, default: 0 },
     missingCategoriesCount: { type: Number, default: 0 },
     duplicateCount: { type: Number, default: 0 },
     imageCount: { type: Number, default: 0 },

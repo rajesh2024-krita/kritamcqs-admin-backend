@@ -4384,8 +4384,9 @@ router.post(
   asyncHandler(async (req, res) => {
     const data = await questionBulkUploadService.approve({
       batchId: req.params.batchId,
+      uploadAnyway: req.body?.uploadAnyway === true,
     });
-    res.status(202).json({ success: true, message: "Bulk upload approved and processing started", data });
+    res.status(202).json({ success: true, message: req.body?.uploadAnyway === true ? "Bulk upload approved with incomplete rows" : "Bulk upload approved and processing started", data });
   }),
 );
 
@@ -4723,7 +4724,11 @@ router.get(
     const page = Math.max(Number(req.query.page || 1), 1);
     const limit = Math.min(Math.max(Number(req.query.limit || 10), 1), 10);
     const search = String(req.query.search || "").trim();
-    const filters = {};
+    const filters = {
+      isVisibleToUsers: { $ne: false },
+      questionStatus: { $ne: "incomplete" },
+      reviewStatus: { $ne: "needs_review" },
+    };
 
     if (req.query.modeKey && String(req.query.modeKey).toUpperCase() !== "BOTH") {
       const modeKey = normalizeModeKey(req.query.modeKey);
@@ -5156,7 +5161,7 @@ const questionService = createCrudService({
   populate: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId"],
   allowedSorts: ["createdAt", "updatedAt", "difficulty", "examMode", "exam"],
   searchFields: ["question", "passage", "conceptTags"],
-  exactFilters: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId", "examMode", "difficulty", "responseType"],
+  exactFilters: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId", "examMode", "difficulty", "responseType", "questionStatus", "reviewStatus", "isVisibleToUsers"],
   beforeCreate: async (payload) => {
     const normalizedPayload = normalizeQuestionExamFields(payload);
     Object.assign(normalizedPayload, await resolveDifficultyPayload(normalizedPayload));
@@ -5188,7 +5193,9 @@ const questionService = createCrudService({
     if (!isQuestionModeCompatible(normalizedPayload.examMode, normalizedPayload.exam)) {
       throw new AppError("Question exam mode must match the selected exam", 400);
     }
-    await assertUniqueQuestion(normalizedPayload);
+    if (normalizedPayload.questionStatus !== "incomplete") {
+      await assertUniqueQuestion(normalizedPayload);
+    }
     return normalizedPayload;
   },
   beforeUpdate: async (existing, payload) => {
@@ -5245,13 +5252,16 @@ const questionService = createCrudService({
     if (topicIdWasProvided && !normalizedPayload.topicId) {
       normalizedPayload.topicId = undefined;
     }
-    await assertUniqueQuestion({
-      question: normalizedPayload.question ?? existing.question,
-      subjectId: nextSubjectId,
-      chapterId: nextChapterId,
-      topicId: nextTopicId,
-      exam: nextExam,
-    }, existing._id);
+    const nextQuestionStatus = normalizedPayload.questionStatus || existing.questionStatus;
+    if (nextQuestionStatus !== "incomplete") {
+      await assertUniqueQuestion({
+        question: normalizedPayload.question ?? existing.question,
+        subjectId: nextSubjectId,
+        chapterId: nextChapterId,
+        topicId: nextTopicId,
+        exam: nextExam,
+      }, existing._id);
+    }
     return normalizedPayload;
   },
 });

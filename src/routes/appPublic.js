@@ -52,6 +52,15 @@ function objectId(value) {
   return new mongoose.Types.ObjectId(String(value));
 }
 
+function publicQuestionFilter(extra = {}) {
+  return {
+    isVisibleToUsers: { $ne: false },
+    questionStatus: { $ne: "incomplete" },
+    reviewStatus: { $ne: "needs_review" },
+    ...extra,
+  };
+}
+
 function isAnswerCorrect(question, answer) {
   if (answer?.skipped) return false;
   if (question.responseType === "numeric") {
@@ -79,7 +88,7 @@ router.get("/subjects", asyncHandler(async (req, res) => {
 
   const [chapterRows, questionRows] = await Promise.all([
     subjectIds.length ? Chapter.aggregate([{ $match: { subjectId: { $in: subjectIds } } }, { $group: { _id: "$subjectId", count: { $sum: 1 } } }]) : [],
-    subjectIds.length ? Question.aggregate([{ $match: { subjectId: { $in: subjectIds } } }, { $group: { _id: "$subjectId", count: { $sum: 1 } } }]) : [],
+    subjectIds.length ? Question.aggregate([{ $match: publicQuestionFilter({ subjectId: { $in: subjectIds } }) }, { $group: { _id: "$subjectId", count: { $sum: 1 } } }]) : [],
   ]);
 
   const chapterCountMap = new Map(chapterRows.map((item) => [String(item._id), Number(item.count || 0)]));
@@ -109,7 +118,7 @@ router.get("/subjects/:subjectId/chapters", asyncHandler(async (req, res) => {
   const [questionRows, topicRows] = await Promise.all([
     chapterIds.length
       ? Question.aggregate([
-          { $match: { chapterId: { $in: chapterIds } } },
+          { $match: publicQuestionFilter({ chapterId: { $in: chapterIds } }) },
           { $group: { _id: { chapterId: "$chapterId", difficulty: "$difficulty" }, count: { $sum: 1 } } },
         ])
       : [],
@@ -153,7 +162,7 @@ router.get("/chapters/:chapterId/topics", asyncHandler(async (req, res) => {
 
   const [topics, questionRows] = await Promise.all([
     Topic.find({ chapterId }).sort({ name: 1 }).lean(),
-    Question.aggregate([{ $match: { chapterId: objectId(chapterId) } }, { $group: { _id: "$topicId", count: { $sum: 1 } } }]),
+    Question.aggregate([{ $match: publicQuestionFilter({ chapterId: objectId(chapterId) }) }, { $group: { _id: "$topicId", count: { $sum: 1 } } }]),
   ]);
 
   const questionCountMap = new Map(questionRows.map((item) => [String(item._id), Number(item.count || 0)]));
@@ -177,7 +186,7 @@ router.post("/tests/generate", asyncHandler(async (req, res) => {
   const requestedTopicIds = (payload.topicIds || []).filter((item) => mongoose.isValidObjectId(item));
   const mode = String(payload.mode || "").trim().toLowerCase();
 
-  const match = {};
+  const match = publicQuestionFilter();
   let chapter = null;
   let topicIds = [];
   let origin = selectionMode === "manual" ? "practice_filter_manual" : "practice_filter_auto";
@@ -303,7 +312,7 @@ router.post("/tests/:sessionId/submit", asyncHandler(async (req, res) => {
     throw new AppError("No valid answers submitted", 400);
   }
 
-  const questions = await Question.find({ _id: { $in: questionIds.map((item) => objectId(item)) } })
+  const questions = await Question.find(publicQuestionFilter({ _id: { $in: questionIds.map((item) => objectId(item)) } }))
     .select("_id subjectId chapterId topicId correctOption correctOptions numericAnswer responseType")
     .populate("subjectId", "name")
     .populate("chapterId", "name")

@@ -25,6 +25,9 @@ export const listQuerySchema = z.object({
     examCategory: z.string().optional(),
     difficulty: z.string().optional(),
     responseType: z.string().optional(),
+    questionStatus: z.string().optional(),
+    reviewStatus: z.string().optional(),
+    isVisibleToUsers: z.string().optional(),
     displayVariant: z.string().optional(),
     isPremium: z.string().optional(),
     isAdmin: z.string().optional(),
@@ -170,7 +173,12 @@ export const questionBodySchema = z.object({
   passage: z.string().optional().or(z.literal("")),
   hasDiagram: z.boolean().optional().default(false),
   isNumerical: z.boolean().optional().default(false),
+  questionStatus: z.enum(["complete", "incomplete"]).optional().default("complete"),
+  reviewStatus: z.enum(["ready", "needs_review"]).optional().default("ready"),
+  isVisibleToUsers: z.boolean().optional().default(true),
+  uploadWarnings: z.array(z.string()).optional().default([]),
 }).superRefine((value, ctx) => {
+  const allowIncomplete = value.questionStatus === "incomplete" || value.reviewStatus === "needs_review" || value.isVisibleToUsers === false;
   const isNumeric = value.responseType === "numeric" || value.isNumerical === true;
   if (value.examType === "NEET" && isNumeric) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["responseType"], message: "NEET supports MCQ questions only." });
@@ -178,7 +186,7 @@ export const questionBodySchema = z.object({
   if (!value.difficultyId && !value.difficulty) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["difficultyId"], message: "Difficulty is required." });
   }
-  if (!value.question) {
+  if (!allowIncomplete && !value.question) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["question"], message: "Question text is required." });
   }
   if (value.responseType === "numeric" && !value.numericAnswer) {
@@ -187,10 +195,10 @@ export const questionBodySchema = z.object({
   if (value.responseType === "numeric" && value.numericAnswer && !/^-?\d+(\.\d+)?$/.test(String(value.numericAnswer).trim())) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer must be a valid integer or decimal." });
   }
-  if (value.responseType !== "numeric" && !value.correctOption) {
+  if (!allowIncomplete && value.responseType !== "numeric" && !value.correctOption) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["correctOption"], message: "Correct option is required." });
   }
-  if (value.responseType !== "numeric") {
+  if (!allowIncomplete && value.responseType !== "numeric") {
     ["A", "B", "C", "D"].forEach((optionKey) => {
       const textValue = value[`option${optionKey}`];
       if (!textValue) {
@@ -235,12 +243,17 @@ export const questionUpdateBodySchema = z.object({
   passage: z.string().optional().or(z.literal("")),
   hasDiagram: z.boolean().optional(),
   isNumerical: z.boolean().optional(),
+  questionStatus: z.enum(["complete", "incomplete"]).optional(),
+  reviewStatus: z.enum(["ready", "needs_review"]).optional(),
+  isVisibleToUsers: z.boolean().optional(),
+  uploadWarnings: z.array(z.string()).optional(),
 }).superRefine((value, ctx) => {
+  const allowIncomplete = value.questionStatus === "incomplete" || value.reviewStatus === "needs_review" || value.isVisibleToUsers === false;
   const isNumeric = value.responseType === "numeric" || value.isNumerical === true;
   if (value.examType === "NEET" && isNumeric) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["responseType"], message: "NEET supports MCQ questions only." });
   }
-  if (value.question !== undefined && value.question.trim() === "") {
+  if (!allowIncomplete && value.question !== undefined && value.question.trim() === "") {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["question"], message: "Question text is required." });
   }
   if (value.responseType === "numeric" && value.numericAnswer === "") {
@@ -249,10 +262,10 @@ export const questionUpdateBodySchema = z.object({
   if (value.responseType === "numeric" && value.numericAnswer && !/^-?\d+(\.\d+)?$/.test(String(value.numericAnswer).trim())) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["numericAnswer"], message: "Numeric answer must be a valid integer or decimal." });
   }
-  if (value.responseType && value.responseType !== "numeric" && !value.correctOption) {
+  if (!allowIncomplete && value.responseType && value.responseType !== "numeric" && !value.correctOption) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["correctOption"], message: "Correct option is required when response type is objective." });
   }
-  if (value.responseType && value.responseType !== "numeric") {
+  if (!allowIncomplete && value.responseType && value.responseType !== "numeric") {
     ["A", "B", "C", "D"].forEach((optionKey) => {
       const textValue = value[`option${optionKey}`];
       if (textValue !== undefined && String(textValue).trim() === "") {

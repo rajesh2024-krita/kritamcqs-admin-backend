@@ -7,7 +7,7 @@ const questionBulkUploadRowSchema = new Schema(
     raw: { type: Schema.Types.Mixed, default: {} },
     payload: { type: Schema.Types.Mixed, default: {} },
     question: { type: String, trim: true },
-    status: { type: String, enum: ["valid", "invalid", "processing", "approved", "failed", "duplicate", "skipped"], required: true, index: true },
+    status: { type: String, enum: ["valid", "warning", "invalid", "processing", "approved", "failed", "duplicate", "skipped"], required: true, index: true },
     errorMessage: { type: String, trim: true, default: "" },
     duplicateKey: { type: String, trim: true, default: "" },
     imageCount: { type: Number, default: 0 },

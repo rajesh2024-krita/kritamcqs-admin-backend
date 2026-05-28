@@ -57,6 +57,15 @@ const HEADER_ALIASES = {
 const KNOWN_QUESTION_TYPES = new Set(["MCQ", "TRUE_FALSE", "FILL_BLANKS", "MATCH_FOLLOWING", "DESCRIPTIVE", "NUMERICAL"]);
 const NUMERIC_LIKE_TYPES = new Set(["FILL_BLANKS", "MATCH_FOLLOWING", "DESCRIPTIVE", "NUMERICAL"]);
 const OBJECTIVE_RESPONSE_TYPES = new Set(["single", "multiple"]);
+const INCOMPLETE_UPLOAD_WARNINGS = new Set([
+  "Missing Question",
+  "Missing Correct Answer",
+  "Missing Option A (text or image)",
+  "Missing Option B (text or image)",
+  "Missing Option C (text or image)",
+  "Missing Option D (text or image)",
+  "Invalid Correct Answer",
+]);
 
 function normalizeHeader(value) {
   return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -117,8 +126,51 @@ function normalizeResponseType(value) {
   if (["multiple", "multi", "multiple_correct", "multi_correct"].includes(normalized)) return "multiple";
   if (["text", "blank", "fill_blank", "fill_in_the_blank"].includes(normalized)) return "numeric";
   if (["boolean", "true_false", "true_or_false"].includes(normalized)) return "single";
-  if (["single", "single_select", "single_correct", "mcq", "objective"].includes(normalized)) return "single";
+  if (["single", "single_select", "single_correct", "single_correc", "mcq", "objective"].includes(normalized)) return "single";
   return "";
+}
+
+function isIncompleteUploadWarning(message) {
+  return INCOMPLETE_UPLOAD_WARNINGS.has(message);
+}
+
+function getCompletenessWarnings(raw = {}) {
+  const warnings = [];
+  const questionType = getEffectiveQuestionType(raw);
+  const responseType = normalizeResponseType(raw.responseType);
+  const isNumericLike = responseType === "numeric" || NUMERIC_LIKE_TYPES.has(questionType);
+  if (isNumericLike) {
+    if (!normalizeText(raw.question) && !normalizeText(raw.questionImageUrl)) warnings.push("Missing Question");
+    return warnings;
+  }
+
+  if (!normalizeText(raw.question) && !normalizeText(raw.questionImageUrl)) warnings.push("Missing Question");
+  if (!normalizeText(raw.correctAnswer)) warnings.push("Missing Correct Answer");
+  const optionPresence = {
+    A: Boolean(normalizeText(raw.optionA) || raw.optionAImageUrl),
+    B: Boolean(normalizeText(raw.optionB) || raw.optionBImageUrl),
+    C: Boolean(normalizeText(raw.optionC) || raw.optionCImageUrl),
+    D: Boolean(normalizeText(raw.optionD) || raw.optionDImageUrl),
+  };
+  if (!optionPresence.A) warnings.push("Missing Option A (text or image)");
+  if (!optionPresence.B) warnings.push("Missing Option B (text or image)");
+  if (questionType !== "TRUE_FALSE") {
+    if (!optionPresence.C) warnings.push("Missing Option C (text or image)");
+    if (!optionPresence.D) warnings.push("Missing Option D (text or image)");
+  }
+  const options = {
+    A: raw.optionA || (optionPresence.A ? "[Image]" : ""),
+    B: raw.optionB || (optionPresence.B ? "[Image]" : ""),
+    C: raw.optionC || (optionPresence.C ? "[Image]" : ""),
+    D: raw.optionD || (optionPresence.D ? "[Image]" : ""),
+  };
+  if (normalizeText(raw.correctAnswer)) {
+    const isValid = responseType === "multiple"
+      ? normalizeCorrectOptions(raw.correctAnswer, options).length > 0
+      : ["A", "B", "C", "D"].includes(normalizeCorrectAnswer(raw.correctAnswer, options));
+    if (!isValid) warnings.push("Invalid Correct Answer");
+  }
+  return [...new Set(warnings)];
 }
 
 function normalizeBoolean(value) {
@@ -878,6 +930,9 @@ function buildQuestionPayload(raw, matches) {
     : [];
   const answerText = normalizeText(raw.numericAnswer) || normalizeText(raw.correctAnswer);
   const examType = normalizeExamType(raw.examType);
+  const uploadWarnings = getCompletenessWarnings(raw);
+  const isIncomplete = uploadWarnings.length > 0;
+  const safeCorrectOption = !isNumericLike && !isMultiple && ["A", "B", "C", "D"].includes(correctOption) ? correctOption : undefined;
   
   // Handle image URLs - ensure they are valid
   const hasAnyImage = Boolean(
@@ -898,7 +953,7 @@ function buildQuestionPayload(raw, matches) {
     difficultyId: String(matches.difficulty._id),
     difficulty: normalizeKey(matches.difficulty.key || matches.difficulty.name),
     questionTypeId: String(matches.questionType._id),
-    question: normalizeText(raw.question) || "[Image Question]",
+    question: normalizeText(raw.question) || (raw.questionImageUrl ? "[Image Question]" : "[Incomplete Question]"),
     questionImageUrl: raw.questionImageUrl || "",
     optionA: isNumericLike ? "" : normalizeText(raw.optionA),
     optionAImageUrl: raw.optionAImageUrl || "",
@@ -908,7 +963,7 @@ function buildQuestionPayload(raw, matches) {
     optionCImageUrl: raw.optionCImageUrl || "",
     optionD: isNumericLike ? "" : normalizeText(raw.optionD),
     optionDImageUrl: raw.optionDImageUrl || "",
-    correctOption: isNumericLike ? undefined : (isMultiple ? correctOptions[0] : correctOption),
+    correctOption: isNumericLike ? undefined : (isMultiple ? correctOptions[0] : safeCorrectOption),
     correctOptions,
     numericAnswer: isNumericLike ? answerText : "",
     explanation: [normalizeText(raw.explanation), normalizeText(raw.videoUrl) ? `Media: ${normalizeText(raw.videoUrl)}` : ""].filter(Boolean).join("\n\n"),
@@ -920,15 +975,20 @@ function buildQuestionPayload(raw, matches) {
     passage: normalizeText(raw.passage),
     hasDiagram: hasAnyImage || normalizeBoolean(raw.hasDiagram),
     isNumerical: isNumericLike || normalizeBoolean(raw.isNumerical),
+    questionStatus: isIncomplete ? "incomplete" : "complete",
+    reviewStatus: isIncomplete ? "needs_review" : "ready",
+    isVisibleToUsers: !isIncomplete,
+    uploadWarnings,
   };
 }
 
 function validateRawRow(raw, catalog) {
   const errors = [];
+  const warnings = [];
   const questionType = getEffectiveQuestionType(raw);
   const examType = normalizeExamType(raw.examType);
 
-  if (!normalizeText(raw.question) && !normalizeText(raw.questionImageUrl)) errors.push("Missing Question");
+  if (!normalizeText(raw.question) && !normalizeText(raw.questionImageUrl)) warnings.push("Missing Question");
   if (!normalizeText(raw.subject)) errors.push("Missing Subject");
   if (!normalizeText(raw.chapter)) errors.push("Missing Chapter");
   if (!normalizeText(raw.topic)) errors.push("Missing Topic");
@@ -940,7 +1000,7 @@ function validateRawRow(raw, catalog) {
   const needsOptions = responseType !== "numeric" && !NUMERIC_LIKE_TYPES.has(questionType);
   
   if (needsOptions) {
-    if (!normalizeText(raw.correctAnswer)) errors.push("Missing Correct Answer");
+    if (!normalizeText(raw.correctAnswer)) warnings.push("Missing Correct Answer");
     
     // Check if options have either text OR image
     const hasOptionAText = normalizeText(raw.optionA);
@@ -952,11 +1012,11 @@ function validateRawRow(raw, catalog) {
     const hasOptionDText = normalizeText(raw.optionD);
     const hasOptionDImage = raw.optionDImageUrl;
     
-    if (!hasOptionAText && !hasOptionAImage) errors.push("Missing Option A (text or image)");
-    if (!hasOptionBText && !hasOptionBImage) errors.push("Missing Option B (text or image)");
+    if (!hasOptionAText && !hasOptionAImage) warnings.push("Missing Option A (text or image)");
+    if (!hasOptionBText && !hasOptionBImage) warnings.push("Missing Option B (text or image)");
     if (questionType !== "TRUE_FALSE") {
-      if (!hasOptionCText && !hasOptionCImage) errors.push("Missing Option C (text or image)");
-      if (!hasOptionDText && !hasOptionDImage) errors.push("Missing Option D (text or image)");
+      if (!hasOptionCText && !hasOptionCImage) warnings.push("Missing Option C (text or image)");
+      if (!hasOptionDText && !hasOptionDImage) warnings.push("Missing Option D (text or image)");
     }
     
     const options = { 
@@ -967,9 +1027,9 @@ function validateRawRow(raw, catalog) {
     };
     
     if (responseType === "multiple") {
-      if (!normalizeCorrectOptions(raw.correctAnswer, options).length) errors.push("Invalid Correct Answer");
+      if (normalizeText(raw.correctAnswer) && !normalizeCorrectOptions(raw.correctAnswer, options).length) warnings.push("Invalid Correct Answer");
     } else if (!["A", "B", "C", "D"].includes(normalizeCorrectAnswer(raw.correctAnswer, options))) {
-      errors.push("Invalid Correct Answer");
+      if (normalizeText(raw.correctAnswer)) warnings.push("Invalid Correct Answer");
     }
   }
 
@@ -991,10 +1051,16 @@ function validateRawRow(raw, catalog) {
   let payload = null;
   if (!errors.length) {
     payload = buildQuestionPayload(raw, matches);
+    payload.uploadWarnings = [...new Set([...(payload.uploadWarnings || []), ...warnings.filter(isIncompleteUploadWarning)])];
+    if (payload.uploadWarnings.length) {
+      payload.questionStatus = "incomplete";
+      payload.reviewStatus = "needs_review";
+      payload.isVisibleToUsers = false;
+    }
     if (!isQuestionModeCompatible(payload.examMode, payload.exam)) errors.push("Question exam mode must match selected exam");
   }
 
-  return { errors: [...new Set(errors)], payload, matches, questionType, examType };
+  return { errors: [...new Set(errors)], warnings: [...new Set(warnings)], payload, matches, questionType, examType };
 }
 
 function summarizeMissing(rows) {
@@ -1035,7 +1101,7 @@ function rowDto(row) {
     id: String(row._id),
     row: row.rowNumber,
     question: row.question || "",
-    status: row.status === "valid" ? "Valid" : row.status,
+    status: row.status === "valid" ? "Valid" : row.status === "warning" ? "Incomplete Question" : row.status,
     error: row.errorMessage || "",
     imageCount: row.imageCount || 0,
   };
@@ -1048,6 +1114,7 @@ async function buildPreview(batchId) {
   ]);
   const totalRows = rows.length;
   const validRows = rows.filter((row) => row.status === "valid");
+  const warningRows = rows.filter((row) => row.status === "warning");
   const invalidRows = rows.filter((row) => row.status === "invalid" || row.status === "failed");
   const missingCategories = summarizeMissing(rows);
   const duplicateCount = rows.filter((row) => row.status === "duplicate" || row.errorMessage?.includes("Duplicate")).length;
@@ -1056,18 +1123,22 @@ async function buildPreview(batchId) {
   await QuestionBulkUploadBatch.findByIdAndUpdate(batchId, {
     ...(batch?.status === "pending" || batch?.status === "validating" ? { status: "validated" } : {}),
     totalRows,
-    validCount: validRows.length,
+    validCount: validRows.length + warningRows.length,
+    warningCount: warningRows.length,
     invalidCount: invalidRows.length,
     missingCategoriesCount: missingCategories.length,
     duplicateCount,
     imageCount,
-    validPercent: percent(validRows.length, totalRows),
+    validPercent: percent(validRows.length + warningRows.length, totalRows),
   });
 
   return {
     batchId: String(batchId),
     totalRows,
-    validCount: validRows.length,
+    validCount: validRows.length + warningRows.length,
+    completeCount: validRows.length,
+    warningCount: warningRows.length,
+    uploadedWithWarningCount: warningRows.length,
     invalidCount: invalidRows.length,
     missingCategoriesCount: missingCategories.length,
     missingFieldsCount: missingCategories.length,
@@ -1076,10 +1147,10 @@ async function buildPreview(batchId) {
     imageCount,
     imageProcessingCount: imageCount,
     batchSize: APPROVAL_CHUNK_SIZE,
-    totalBatches: Math.ceil(validRows.length / APPROVAL_CHUNK_SIZE),
+    totalBatches: Math.ceil((validRows.length + warningRows.length) / APPROVAL_CHUNK_SIZE),
     createdSummary: batch?.createdSummary || {},
     imageSummary: batch?.imageSummary || { detected: imageCount, uploaded: 0, failed: 0 },
-    validPercent: percent(validRows.length, totalRows),
+    validPercent: percent(validRows.length + warningRows.length, totalRows),
     missingCategories,
     rows: rows.slice(0, 500).map(rowDto),
   };
@@ -1092,9 +1163,10 @@ async function validateRowsForBatch(batchId, catalog) {
     const validation = validateRawRow(row.raw, catalog);
     const duplicateKey = buildDuplicateKeyFromRaw(row.raw);
     const errors = [...validation.errors];
-    const warnings = Array.isArray(row.raw?.__imageErrors)
+    const imageWarnings = Array.isArray(row.raw?.__imageErrors)
       ? row.raw.__imageErrors.map((message) => `Image warning: ${message}`)
       : [];
+    const warnings = [...validation.warnings, ...imageWarnings];
     if (seenKeys.has(duplicateKey)) errors.push("Duplicate Question in upload file");
     else seenKeys.add(duplicateKey);
     if (!errors.length && validation.payload) {
@@ -1102,9 +1174,9 @@ async function validateRowsForBatch(batchId, catalog) {
       if (exists) errors.push("Duplicate Question");
     }
     row.payload = validation.payload || {};
-    row.status = errors.some((error) => error.includes("Duplicate")) ? "duplicate" : (errors.length ? "invalid" : "valid");
+    row.status = errors.some((error) => error.includes("Duplicate")) ? "duplicate" : (errors.length ? "invalid" : (warnings.length ? "warning" : "valid"));
     row.errorMessage = [...errors, ...warnings].join(", ");
-    row.question = (normalizeText(row.raw.question) || "[Image Question]").slice(0, 300);
+    row.question = (normalizeText(row.raw.question) || (row.raw.questionImageUrl ? "[Image Question]" : "[Incomplete Question]")).slice(0, 300);
     row.duplicateKey = duplicateKey;
     row.imageCount = countRawImages(row.raw);
     await row.save();
@@ -1253,7 +1325,7 @@ async function processApprovalJob(batchId) {
   batch.batchSize = APPROVAL_CHUNK_SIZE;
   await batch.save();
 
-  const rows = await QuestionBulkUploadRow.find({ batchId, status: "valid" }).sort({ rowNumber: 1 });
+  const rows = await QuestionBulkUploadRow.find({ batchId, status: { $in: ["valid", "warning"] } }).sort({ rowNumber: 1 });
   let inserted = await QuestionBulkUploadRow.countDocuments({ batchId, status: "approved" });
   let failed = 0;
   let skipped = await QuestionBulkUploadRow.countDocuments({ batchId, status: { $in: ["duplicate", "skipped"] } });
@@ -1313,6 +1385,7 @@ async function processApprovalJob(batchId) {
   const failedRows = await QuestionBulkUploadRow.countDocuments({ batchId, status: "failed" });
   const approvedRows = await QuestionBulkUploadRow.countDocuments({ batchId, status: "approved" });
   const duplicateRows = await QuestionBulkUploadRow.countDocuments({ batchId, status: "duplicate" });
+  const warningRows = await QuestionBulkUploadRow.countDocuments({ batchId, "payload.questionStatus": "incomplete", status: "approved" });
   latestBatch.status = failedRows > 0 && approvedRows === 0 ? "failed" : "approved";
   latestBatch.insertedCount = approvedRows;
   latestBatch.skippedCount = duplicateRows;
@@ -1325,6 +1398,7 @@ async function processApprovalJob(batchId) {
     uploaded: uploadedImageCount,
     failed: Math.max(0, Number(latestBatch.imageCount || 0) - uploadedImageCount),
   };
+  latestBatch.warningCount = warningRows;
   await latestBatch.save();
 }
 
@@ -1406,6 +1480,7 @@ export const questionBulkUploadService = {
     if (!batch) throw new AppError("Upload batch not found", 404);
     const rows = await QuestionBulkUploadRow.find({ batchId }).sort({ rowNumber: 1 }).lean();
     const approved = rows.filter((row) => row.status === "approved").length;
+    const approvedWithWarning = rows.filter((row) => row.status === "approved" && row.payload?.questionStatus === "incomplete").length;
     const failed = rows.filter((row) => row.status === "failed" || row.status === "invalid").length;
     const duplicates = rows.filter((row) => row.status === "duplicate").length;
     const processed = approved + failed + duplicates;
@@ -1417,8 +1492,14 @@ export const questionBulkUploadService = {
       status: batch.status,
       totalRows: batch.totalRows,
       validCount: batch.validCount,
+      completeCount: Math.max(0, Number(batch.validCount || 0) - Number(batch.warningCount || approvedWithWarning || 0)),
+      warningCount: Number(batch.warningCount || approvedWithWarning || 0),
+      uploadedWithWarningCount: approvedWithWarning,
       invalidCount: batch.invalidCount,
       successCount: approved,
+      successfullyUploadedRows: approved,
+      uploadedWithWarningRows: approvedWithWarning,
+      completelyFailedRows: failed,
       failedCount: failed,
       skippedDuplicatesCount: duplicates,
       imageCount: batch.imageCount,

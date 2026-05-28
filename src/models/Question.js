@@ -32,10 +32,15 @@ const questionSchema = new Schema(
     passage: { type: String, trim: true },
     hasDiagram: { type: Boolean, default: false },
     isNumerical: { type: Boolean, default: false },
+    questionStatus: { type: String, enum: ["complete", "incomplete"], default: "complete", index: true },
+    reviewStatus: { type: String, enum: ["ready", "needs_review"], default: "ready", index: true },
+    isVisibleToUsers: { type: Boolean, default: true, index: true },
+    uploadWarnings: { type: [String], default: [] },
   },
   baseJsonOptions,
 );
 
 questionSchema.index({ subjectId: 1, chapterId: 1, topicId: 1, yearId: 1, difficultyId: 1, questionTypeId: 1, difficulty: 1 });
+questionSchema.index({ isVisibleToUsers: 1, questionStatus: 1, reviewStatus: 1 });
 
 export const Question = models.Question || model("Question", questionSchema);
