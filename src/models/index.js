@@ -30,6 +30,7 @@ export * from "./RevisionSettings.js";
 export * from "./RevisionAnalytics.js";
 export * from "./DailyTest.js";
 export * from "./DailyTestSettings.js";
+export * from "./FreeQuestionConfig.js";
 export * from "./DailyTestAnalytics.js";
 export * from "./ExamMarkingSettings.js";
 export * from "./InvoiceSettings.js";

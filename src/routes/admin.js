@@ -16,6 +16,7 @@ import {
   DailyTestSettings,
   DailyPlanConfig,
   Difficulty,
+  FreeQuestionConfig,
   EmailLog,
   EmailTemplate,
   ExamType,
@@ -2073,6 +2074,40 @@ router.post("/revision/generate", asyncHandler(async (req, res) => {
 router.get("/daily-test/settings", asyncHandler(async (_req, res) => {
   const settings = await getOrCreateDailyTestSettings();
   res.json({ success: true, data: mapDailyTestSettings(settings) });
+}));
+
+router.get("/free-question-configs", asyncHandler(async (_req, res) => {
+  const configs = await FreeQuestionConfig.find({}).sort({ createdAt: -1 }).lean();
+  const subjectIds = [...new Set(configs.map((item) => String(item.subjectId)).filter(Boolean))];
+  const subjects = subjectIds.length ? await Subject.find({ _id: { $in: subjectIds } }).lean() : [];
+  const subjectMap = new Map(subjects.map((item) => [String(item._id), item]));
+  res.json({
+    success: true,
+    data: configs.map((item) => ({
+      ...item,
+      id: String(item._id),
+      subjectName: subjectMap.get(String(item.subjectId))?.name || "-",
+    })),
+  });
+}));
+
+router.post("/free-question-configs", asyncHandler(async (req, res) => {
+  const subjectId = String(req.body?.subjectId || "").trim();
+  if (!subjectId) throw new AppError("Subject is required", 400);
+  const payload = {
+    subjectId,
+    selectionMode: String(req.body?.selectionMode || "automatic") === "manual" ? "manual" : "automatic",
+    questionCount: Math.max(1, Math.min(200, Number(req.body?.questionCount || 20))),
+    manualQuestionIds: Array.isArray(req.body?.manualQuestionIds) ? req.body.manualQuestionIds.map(String).filter(Boolean) : [],
+    isActive: req.body?.isActive === undefined ? true : Boolean(req.body.isActive),
+  };
+  const item = await FreeQuestionConfig.findOneAndUpdate({ subjectId }, payload, { upsert: true, new: true, setDefaultsOnInsert: true });
+  res.status(201).json({ success: true, message: "Free question configuration saved", data: item });
+}));
+
+router.delete("/free-question-configs/:id", asyncHandler(async (req, res) => {
+  await FreeQuestionConfig.findByIdAndDelete(req.params.id);
+  res.json({ success: true, message: "Free question configuration deleted" });
 }));
 
 router.post("/daily-test/settings", asyncHandler(async (req, res) => {
