@@ -1399,10 +1399,11 @@ router.post("/users/migration/preview", upload.single("file"), asyncHandler(asyn
   });
 }));
 router.post("/users/migration/import", upload.single("file"), asyncHandler(async (req, res) => {
+  res.status(202);
   sendResponse(res, {
-    status: 201,
-    message: "Old app users imported successfully",
-    data: await oldUserMigrationService.import(req.file),
+    status: 202,
+    message: "Old app user import started",
+    data: await oldUserMigrationService.startImport(req.file),
   });
 }));
 router.get("/users/migration/logs", asyncHandler(async (_req, res) => {

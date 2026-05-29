@@ -8,6 +8,12 @@ export function hashPassword(password) {
   return bcrypt.hashSync(String(password), BCRYPT_ROUNDS);
 }
 
+export function hashPasswordScrypt(password) {
+  const salt = crypto.randomBytes(16).toString("hex");
+  const hash = crypto.scryptSync(String(password), salt, SCRYPT_KEYLEN).toString("hex");
+  return `scrypt:${salt}:${hash}`;
+}
+
 export function verifyPassword(password, storedHash = "") {
   const hash = String(storedHash || "");
   if (!hash) return false;

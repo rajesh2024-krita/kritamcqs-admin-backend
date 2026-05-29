@@ -2,7 +2,9 @@ import path from "node:path";
 import * as XLSX from "xlsx";
 import { MigrationLog, User } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
-import { hashPassword } from "../utils/password.js";
+import { hashPasswordScrypt } from "../utils/password.js";
+
+const MIGRATION_INSERT_BATCH_SIZE = 1000;
 
 const OLD_USER_COLUMNS = {
   name: ["name", "user_name", "fullname", "full_name"],
@@ -64,12 +66,12 @@ function parseMigrationDate(input) {
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
 }
 
-function normalizeImportedPassword(input) {
+function normalizeImportedPassword(input, { hashPlain = true } = {}) {
   const password = String(input ?? "");
   if (!password.trim()) return null;
   if (/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(password)) return password;
   if (/^scrypt:[a-f0-9]{32}:[a-f0-9]{128}$/i.test(password)) return password;
-  return hashPassword(password);
+  return hashPlain ? hashPasswordScrypt(password) : "__plain_password_present__";
 }
 
 function parseMigrationTimestamp(input) {
@@ -260,7 +262,8 @@ function parseMigrationFile(file) {
   throw new AppError("Upload a .sql, .csv, or .xlsx file", 400);
 }
 
-async function prepareMigrationUsers(rows) {
+async function prepareMigrationUsers(rows, options = {}) {
+  const { hashPlainPasswords = true } = options;
   const validRows = [];
   const invalidRows = [];
   let sourceDuplicateCount = 0;
@@ -271,7 +274,7 @@ async function prepareMigrationUsers(rows) {
     const rawPasswordValue = getCell(row, OLD_USER_COLUMNS.password);
     const mobile = cleanMigrationMobile(rawMobileValue);
     const email = normalizeMigrationEmail(rawEmailValue);
-    const passwordHash = normalizeImportedPassword(rawPasswordValue);
+    const passwordHash = normalizeImportedPassword(rawPasswordValue, { hashPlain: hashPlainPasswords });
 
     if (!email) {
       invalidRows.push({
@@ -369,10 +372,70 @@ async function prepareMigrationUsers(rows) {
   };
 }
 
+async function runMigrationImport(file, existingLogId = null) {
+  const summary = await prepareMigrationUsers(parseMigrationFile(file));
+  const docs = summary.importable.map((item) => item.normalized);
+  let inserted = [];
+  const failedRows = [];
+
+  for (let start = 0; start < docs.length; start += MIGRATION_INSERT_BATCH_SIZE) {
+    const batchDocs = docs.slice(start, start + MIGRATION_INSERT_BATCH_SIZE);
+    try {
+      const batchInserted = await User.insertMany(batchDocs, { ordered: false });
+      inserted.push(...batchInserted);
+    } catch (error) {
+      const batchInserted = Array.isArray(error?.insertedDocs) ? error.insertedDocs : [];
+      inserted.push(...batchInserted);
+      const writeErrors = error?.writeErrors || error?.result?.result?.writeErrors || [];
+      writeErrors.forEach((writeError) => {
+        const sourceItem = summary.importable[start + Number(writeError.index)];
+        failedRows.push({
+          row: Number(sourceItem?.sourceIndex ?? writeError.index ?? 0) + 2,
+          name: sourceItem?.normalized?.name || "",
+          mobile: sourceItem?.normalized?.mobile || "",
+          email: sourceItem?.normalized?.email || "",
+          reason: writeError.errmsg || writeError.message || "MongoDB insert failed",
+        });
+      });
+
+      if (!batchInserted.length && !writeErrors.length) {
+        throw error;
+      }
+    }
+  }
+
+  const payload = {
+    totalUsers: summary.totalUsers,
+    importedUsers: inserted.length,
+    duplicateUsers: summary.duplicateUsers,
+    invalidUsers: summary.invalidUsers + failedRows.length,
+    failedRows: [...summary.invalidRows.slice(0, 100), ...failedRows.slice(0, 100)].slice(0, 100),
+    migrationDate: new Date(),
+    status: "completed",
+    errorMessage: "",
+  };
+
+  const log = existingLogId
+    ? await MigrationLog.findByIdAndUpdate(existingLogId, { $set: payload }, { new: true })
+    : await MigrationLog.create(payload);
+
+  return {
+    totalUsers: summary.totalUsers,
+    importedUsers: inserted.length,
+    duplicateUsers: summary.duplicateUsers,
+    invalidUsers: summary.invalidUsers + failedRows.length,
+    invalidRows: [...summary.invalidRows, ...failedRows].slice(0, 25),
+    failedRows: failedRows.slice(0, 25),
+    migrationDate: log.migrationDate,
+    logId: String(log._id),
+    status: "completed",
+  };
+}
+
 export const oldUserMigrationService = {
   async preview(file) {
     if (!file?.buffer) throw new AppError("Migration file is required", 400);
-    const summary = await prepareMigrationUsers(parseMigrationFile(file));
+    const summary = await prepareMigrationUsers(parseMigrationFile(file), { hashPlainPasswords: false });
     return {
       totalUsers: summary.totalUsers,
       importableUsers: summary.importable.length,
@@ -394,52 +457,48 @@ export const oldUserMigrationService = {
 
   async import(file) {
     if (!file?.buffer) throw new AppError("Migration file is required", 400);
-    const summary = await prepareMigrationUsers(parseMigrationFile(file));
-    const docs = summary.importable.map((item) => item.normalized);
-    let inserted = [];
-    const failedRows = [];
+    return runMigrationImport(file);
+  },
 
-    if (docs.length) {
-      try {
-        inserted = await User.insertMany(docs, { ordered: false });
-      } catch (error) {
-        inserted = Array.isArray(error?.insertedDocs) ? error.insertedDocs : [];
-        const writeErrors = error?.writeErrors || error?.result?.result?.writeErrors || [];
-        writeErrors.forEach((writeError) => {
-          const sourceItem = summary.importable[Number(writeError.index)];
-          failedRows.push({
-            row: Number(sourceItem?.sourceIndex ?? writeError.index ?? 0) + 2,
-            name: sourceItem?.normalized?.name || "",
-            mobile: sourceItem?.normalized?.mobile || "",
-            email: sourceItem?.normalized?.email || "",
-            reason: writeError.errmsg || writeError.message || "MongoDB insert failed",
-          });
-        });
-
-        if (!inserted.length && !failedRows.length) {
-          throw error;
-        }
-      }
-    }
-
+  async startImport(file) {
+    if (!file?.buffer) throw new AppError("Migration file is required", 400);
     const log = await MigrationLog.create({
-      totalUsers: summary.totalUsers,
-      importedUsers: inserted.length,
-      duplicateUsers: summary.duplicateUsers,
-      invalidUsers: summary.invalidUsers + failedRows.length,
-      failedRows: [...summary.invalidRows.slice(0, 100), ...failedRows.slice(0, 100)].slice(0, 100),
+      totalUsers: 0,
+      importedUsers: 0,
+      duplicateUsers: 0,
+      invalidUsers: 0,
+      failedRows: [],
       migrationDate: new Date(),
+      status: "processing",
+      errorMessage: "",
+    });
+
+    const backgroundFile = {
+      originalname: file.originalname,
+      buffer: Buffer.from(file.buffer),
+    };
+
+    setImmediate(async () => {
+      try {
+        await runMigrationImport(backgroundFile, log._id);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error("[OLD USER MIGRATION] Import failed:", message);
+        await MigrationLog.findByIdAndUpdate(log._id, {
+          $set: {
+            status: "failed",
+            errorMessage: message,
+            migrationDate: new Date(),
+          },
+        });
+      }
     });
 
     return {
-      totalUsers: summary.totalUsers,
-      importedUsers: inserted.length,
-      duplicateUsers: summary.duplicateUsers,
-      invalidUsers: summary.invalidUsers + failedRows.length,
-      invalidRows: [...summary.invalidRows, ...failedRows].slice(0, 25),
-      failedRows: failedRows.slice(0, 25),
-      migrationDate: log.migrationDate,
       logId: String(log._id),
+      status: "processing",
+      migrationDate: log.migrationDate,
+      message: "User import started. Check migration logs for completion.",
     };
   },
 
@@ -453,6 +512,8 @@ export const oldUserMigrationService = {
         importedUsers: raw.importedUsers,
         duplicateUsers: raw.duplicateUsers,
         invalidUsers: raw.invalidUsers,
+        status: raw.status || "completed",
+        errorMessage: raw.errorMessage || "",
         failedRows: raw.failedRows || [],
         migrationDate: raw.migrationDate,
       };

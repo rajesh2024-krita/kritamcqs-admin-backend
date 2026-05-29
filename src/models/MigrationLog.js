@@ -6,6 +6,8 @@ const migrationLogSchema = new Schema(
     importedUsers: { type: Number, required: true, default: 0 },
     duplicateUsers: { type: Number, required: true, default: 0 },
     invalidUsers: { type: Number, required: true, default: 0 },
+    status: { type: String, enum: ["processing", "completed", "failed"], default: "completed", index: true },
+    errorMessage: { type: String, default: "" },
     failedRows: {
       type: [
         {
