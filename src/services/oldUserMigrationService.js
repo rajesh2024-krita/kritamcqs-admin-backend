@@ -2,11 +2,13 @@ import path from "node:path";
 import * as XLSX from "xlsx";
 import { MigrationLog, User } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
+import { hashPassword } from "../utils/password.js";
 
 const OLD_USER_COLUMNS = {
   name: ["name", "user_name", "fullname", "full_name"],
   mobile: ["mobile", "mobile_number", "phone", "phone_number", "contact", "contact_number"],
   email: ["email", "email_id", "mail"],
+  password: ["password", "pass", "pwd", "user_password", "password_hash", "passwordhash"],
   role: ["role", "user_role"],
   planId: ["planid", "plan_id", "plan"],
   createdDateTime: ["createddatetime", "created_date_time", "created_at", "createddate", "created_date"],
@@ -60,6 +62,14 @@ function normalizeMigrationEmail(input) {
 function parseMigrationDate(input) {
   const parsed = new Date(String(input ?? "").trim());
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
+function normalizeImportedPassword(input) {
+  const password = String(input ?? "");
+  if (!password.trim()) return null;
+  if (/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(password)) return password;
+  if (/^scrypt:[a-f0-9]{32}:[a-f0-9]{128}$/i.test(password)) return password;
+  return hashPassword(password);
 }
 
 function parseMigrationTimestamp(input) {
@@ -215,7 +225,7 @@ function extractSqlTuples(valuesText) {
 function parseSqlBuffer(buffer) {
   const text = buffer.toString("utf8");
   const rows = [];
-  const insertRegex = /insert\s+into\s+`?user`?\s*\(([^)]+)\)\s*values\s*([\s\S]*?);/gi;
+  const insertRegex = /insert\s+into\s+`?(?:user|users)`?\s*\(([^)]+)\)\s*values\s*([\s\S]*?);/gi;
   let match;
 
   while ((match = insertRegex.exec(text))) {
@@ -258,22 +268,38 @@ async function prepareMigrationUsers(rows) {
   rows.forEach((row, index) => {
     const rawMobileValue = getCell(row, OLD_USER_COLUMNS.mobile);
     const rawEmailValue = getCell(row, OLD_USER_COLUMNS.email);
+    const rawPasswordValue = getCell(row, OLD_USER_COLUMNS.password);
     const mobile = cleanMigrationMobile(rawMobileValue);
     const email = normalizeMigrationEmail(rawEmailValue);
-    if (!mobile) {
+    const passwordHash = normalizeImportedPassword(rawPasswordValue);
+
+    if (!email) {
       invalidRows.push({
         row: index + 2,
-        reason: "Invalid mobile number",
+        reason: "Valid email address is required",
         name: getCell(row, OLD_USER_COLUMNS.name),
         mobile: rawMobileValue,
         email: rawEmailValue,
       });
       return;
     }
+
+    if (!passwordHash) {
+      invalidRows.push({
+        row: index + 2,
+        reason: "Password is required for email login",
+        name: getCell(row, OLD_USER_COLUMNS.name),
+        mobile: rawMobileValue,
+        email: rawEmailValue,
+      });
+      return;
+    }
+
     validRows.push({
       row,
       mobile,
       email,
+      passwordHash,
       sourceIndex: index,
       createdTimestamp: parseMigrationTimestamp(getCell(row, OLD_USER_COLUMNS.createdDateTime)),
     });
@@ -285,12 +311,12 @@ async function prepareMigrationUsers(rows) {
   validRows
     .sort((left, right) => right.createdTimestamp - left.createdTimestamp || right.sourceIndex - left.sourceIndex)
     .forEach((item) => {
-      if (usedMobiles.has(item.mobile) || (item.email && usedEmails.has(item.email))) {
+      if (usedEmails.has(item.email) || (item.mobile && usedMobiles.has(item.mobile))) {
         sourceDuplicateCount += 1;
         return;
       }
-      usedMobiles.add(item.mobile);
-      if (item.email) usedEmails.add(item.email);
+      usedEmails.add(item.email);
+      if (item.mobile) usedMobiles.add(item.mobile);
       selectedRows.push(item);
     });
 
@@ -302,12 +328,14 @@ async function prepareMigrationUsers(rows) {
       sourceIndex: item.sourceIndex,
       normalized: {
         name: String(getCell(row, OLD_USER_COLUMNS.name) ?? "").trim() || undefined,
-        mobile: item.mobile,
+        ...(item.mobile ? { mobile: item.mobile, mobileVerified: true } : { mobileVerified: false }),
         email: item.email,
+        passwordHash: item.passwordHash,
+        authTypes: ["email"],
         examMode: "BOTH",
         level: "Beginner",
         onboardingComplete: true,
-        mobileVerified: true,
+        emailVerified: true,
         isPremium: Number(getCell(row, OLD_USER_COLUMNS.planId) ?? 0) > 1,
         isAdmin: String(getCell(row, OLD_USER_COLUMNS.role) ?? "").trim().toLowerCase() === "admin",
         migratedFromOldApp: true,
@@ -317,16 +345,16 @@ async function prepareMigrationUsers(rows) {
     };
   });
 
-  const mobiles = [...new Set(prepared.map((item) => item.normalized.mobile))];
+  const mobiles = [...new Set(prepared.map((item) => item.normalized.mobile).filter(Boolean))];
   const emails = [...new Set(prepared.map((item) => item.normalized.email).filter(Boolean))];
   const duplicateFilters = [
     ...(mobiles.length ? [{ mobile: { $in: mobiles } }] : []),
     ...(emails.length ? [{ email: { $in: emails } }] : []),
   ];
   const existingUsers = duplicateFilters.length ? await User.find({ $or: duplicateFilters }).select("mobile email") : [];
-  const existingMobiles = new Set(existingUsers.map((user) => String(user.mobile)));
+  const existingMobiles = new Set(existingUsers.map((user) => String(user.mobile || "")).filter(Boolean));
   const existingEmails = new Set(existingUsers.map((user) => String(user.email ?? "").toLowerCase()).filter(Boolean));
-  const importable = prepared.filter((item) => !existingMobiles.has(item.normalized.mobile) && (!item.normalized.email || !existingEmails.has(item.normalized.email)));
+  const importable = prepared.filter((item) => !existingEmails.has(item.normalized.email) && (!item.normalized.mobile || !existingMobiles.has(item.normalized.mobile)));
   const existingDuplicateCount = prepared.length - importable.length;
 
   return {
@@ -368,12 +396,38 @@ export const oldUserMigrationService = {
     if (!file?.buffer) throw new AppError("Migration file is required", 400);
     const summary = await prepareMigrationUsers(parseMigrationFile(file));
     const docs = summary.importable.map((item) => item.normalized);
-    const inserted = docs.length ? await User.insertMany(docs, { ordered: false }) : [];
+    let inserted = [];
+    const failedRows = [];
+
+    if (docs.length) {
+      try {
+        inserted = await User.insertMany(docs, { ordered: false });
+      } catch (error) {
+        inserted = Array.isArray(error?.insertedDocs) ? error.insertedDocs : [];
+        const writeErrors = error?.writeErrors || error?.result?.result?.writeErrors || [];
+        writeErrors.forEach((writeError) => {
+          const sourceItem = summary.importable[Number(writeError.index)];
+          failedRows.push({
+            row: Number(sourceItem?.sourceIndex ?? writeError.index ?? 0) + 2,
+            name: sourceItem?.normalized?.name || "",
+            mobile: sourceItem?.normalized?.mobile || "",
+            email: sourceItem?.normalized?.email || "",
+            reason: writeError.errmsg || writeError.message || "MongoDB insert failed",
+          });
+        });
+
+        if (!inserted.length && !failedRows.length) {
+          throw error;
+        }
+      }
+    }
+
     const log = await MigrationLog.create({
       totalUsers: summary.totalUsers,
       importedUsers: inserted.length,
       duplicateUsers: summary.duplicateUsers,
-      invalidUsers: summary.invalidUsers,
+      invalidUsers: summary.invalidUsers + failedRows.length,
+      failedRows: [...summary.invalidRows.slice(0, 100), ...failedRows.slice(0, 100)].slice(0, 100),
       migrationDate: new Date(),
     });
 
@@ -381,7 +435,9 @@ export const oldUserMigrationService = {
       totalUsers: summary.totalUsers,
       importedUsers: inserted.length,
       duplicateUsers: summary.duplicateUsers,
-      invalidUsers: summary.invalidUsers,
+      invalidUsers: summary.invalidUsers + failedRows.length,
+      invalidRows: [...summary.invalidRows, ...failedRows].slice(0, 25),
+      failedRows: failedRows.slice(0, 25),
       migrationDate: log.migrationDate,
       logId: String(log._id),
     };
@@ -397,6 +453,7 @@ export const oldUserMigrationService = {
         importedUsers: raw.importedUsers,
         duplicateUsers: raw.duplicateUsers,
         invalidUsers: raw.invalidUsers,
+        failedRows: raw.failedRows || [],
         migrationDate: raw.migrationDate,
       };
     });

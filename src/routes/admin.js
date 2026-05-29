@@ -5432,23 +5432,33 @@ const userService = createCrudService({
   allowedSorts: ["createdAt", "updatedAt", "lastLoginAt", "name", "mobile", "email"],
   searchFields: ["name", "mobile", "email"],
   exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete", "isActive", "isBlocked"],
-  beforeCreate: async (payload) => ({
-    ...payload,
-    passwordHash: payload.password ? hashPassword(payload.password) : undefined,
-    authTypes: payload.password ? ["email"] : payload.authTypes,
-    premiumExpiresAt: payload.premiumExpiresAt || undefined,
-  }),
-  beforeUpdate: async (_existing, payload) => ({
-    ...Object.fromEntries(
-      Object.entries(payload).filter(([key]) => !["password", "isPremium", "premiumExpiresAt"].includes(key)),
-    ),
-    ...(payload.password
-      ? {
-          passwordHash: hashPassword(payload.password),
-          authTypes: [...new Set([...(Array.isArray(_existing.authTypes) ? _existing.authTypes : []), "email"])],
-        }
-      : {}),
-  }),
+  beforeCreate: async (payload) => {
+    const next = {
+      ...payload,
+      passwordHash: payload.password ? hashPassword(payload.password) : undefined,
+      authTypes: payload.password ? ["email"] : payload.authTypes,
+      premiumExpiresAt: payload.premiumExpiresAt || undefined,
+    };
+    if (!String(next.mobile || "").trim()) delete next.mobile;
+    if (!String(next.email || "").trim()) delete next.email;
+    return next;
+  },
+  beforeUpdate: async (_existing, payload) => {
+    const next = {
+      ...Object.fromEntries(
+        Object.entries(payload).filter(([key]) => !["password", "isPremium", "premiumExpiresAt"].includes(key)),
+      ),
+      ...(payload.password
+        ? {
+            passwordHash: hashPassword(payload.password),
+            authTypes: [...new Set([...(Array.isArray(_existing.authTypes) ? _existing.authTypes : []), "email"])],
+          }
+        : {}),
+    };
+    if (payload.mobile !== undefined && !String(payload.mobile || "").trim()) next.mobile = undefined;
+    if (payload.email !== undefined && !String(payload.email || "").trim()) next.email = undefined;
+    return next;
+  },
   beforeDelete: async (user) => {
     if (user.isAdmin) {
       const adminCount = await User.countDocuments({ isAdmin: true });
