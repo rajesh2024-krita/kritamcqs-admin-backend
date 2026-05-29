@@ -1,7 +1,7 @@
 import { Router } from "express";
 import mongoose from "mongoose";
 import { z } from "zod";
-import { Chapter, Question, Subject, Topic } from "../models/index.js";
+import { Chapter, InvoiceSettings, Question, Subject, Topic } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 
@@ -105,6 +105,20 @@ router.get("/subjects", asyncHandler(async (req, res) => {
       icon: item.icon,
       color: item.color,
     })),
+  });
+}));
+
+router.get("/app-settings", asyncHandler(async (_req, res) => {
+  const settings = await InvoiceSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  res.json({
+    appName: settings.companyName || "Krita NEET JEE",
+    logoUrl: settings.logoUrl || "",
+    updatedAt: settings.updatedAt,
   });
 }));
 

@@ -3589,6 +3589,46 @@ router.get(
   }),
 );
 
+router.get(
+  "/app-settings",
+  asyncHandler(async (_req, res) => {
+    const settings = await getInvoiceSettingsDoc();
+    res.json({
+      success: true,
+      data: {
+        appName: settings.companyName || "Krita NEET JEE",
+        logoUrl: settings.logoUrl || "",
+        updatedAt: settings.updatedAt,
+      },
+    });
+  }),
+);
+
+router.post(
+  "/app-settings/logo",
+  upload.single("logo"),
+  asyncHandler(async (req, res) => {
+    if (!req.file) throw new AppError("Logo file is required", 400);
+    const invoiceUploadsRoot = path.join(uploadsRoot, "invoice-assets");
+    ensureDir(invoiceUploadsRoot);
+    const fileName = `app-logo-${Date.now()}-${crypto.randomBytes(4).toString("hex")}${path.extname(invoiceAssetFileName(req.file)) || ".png"}`;
+    await fs.writeFile(path.join(invoiceUploadsRoot, fileName), req.file.buffer);
+    const logoUrl = `/uploads/invoice-assets/${fileName}`;
+    const settings = await getInvoiceSettingsDoc();
+    settings.logoUrl = logoUrl;
+    await settings.save();
+    res.status(201).json({
+      success: true,
+      message: "App logo uploaded",
+      data: {
+        appName: settings.companyName || "Krita NEET JEE",
+        logoUrl,
+        updatedAt: settings.updatedAt,
+      },
+    });
+  }),
+);
+
 router.post(
   "/invoice-settings/logo",
   upload.single("logo"),
