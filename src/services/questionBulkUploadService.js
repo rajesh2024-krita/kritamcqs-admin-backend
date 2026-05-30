@@ -296,11 +296,30 @@ function isImageValue(value) {
   return lower.includes("/uploads/") || lower.includes("cloudinary") || lower.includes("firebase");
 }
 
+function cleanExtractedUrl(value) {
+  return normalizeText(value).replace(/[),.;\]]+$/g, "");
+}
+
+function findImageUrlInText(value) {
+  const text = normalizeText(value);
+  if (!text) return "";
+  const matches = text.match(/data:image\/[a-zA-Z0-9.+-]+;base64,[^\s"'<>]+|https?:\/\/[^\s"'<>]+|www\.[^\s"'<>]+|\/uploads\/[^\s"'<>]+/gi) || [];
+  for (const match of matches) {
+    const url = cleanExtractedUrl(match);
+    const lower = url.toLowerCase();
+    if (lower.includes("youtube.com") || lower.includes("youtu.be")) continue;
+    if (isImageValue(url)) return url;
+  }
+  return "";
+}
+
 function extractImageUrl(value) {
   const normalized = normalizeText(value);
   if (!normalized) return "";
   
   if (normalized.includes("youtube.com") || normalized.includes("youtu.be")) return "";
+  const inlineImageUrl = findImageUrlInText(normalized);
+  if (inlineImageUrl) return inlineImageUrl;
   if (!isImageValue(normalized)) return "";
   return normalized;
 }
@@ -308,6 +327,11 @@ function extractImageUrl(value) {
 function splitTextImageValue(value) {
   const text = normalizeText(value);
   if (!text) return { text: "", image: "" };
+  const image = extractImageUrl(text);
+  if (image) {
+    const cleanText = normalizeText(text.replace(image, "").replace(/\s{2,}/g, " "));
+    return { text: cleanText, image };
+  }
   if (isImageValue(text)) return { text: "", image: extractImageUrl(text) };
   return { text, image: "" };
 }

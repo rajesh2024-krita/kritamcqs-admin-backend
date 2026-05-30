@@ -2714,27 +2714,6 @@ async function serializeMockTests(items) {
   const chapterMap = new Map(chapters.map((item) => [String(item._id), item.name]));
   const questionMap = new Map(questions.map((item) => [String(item._id), item]));
 
-  if (existing && Array.isArray(existing.questionIds) && existing.questionIds.length === questionIds.length) {
-    const existingIds = existing.questionIds.map(String);
-    const changedPairs = existingIds
-      .map((oldId, index) => ({ oldId, newId: questionIds[index] }))
-      .filter((pair) => pair.oldId !== pair.newId);
-    if (changedPairs.length) {
-      const oldQuestions = await Question.find({ _id: { $in: changedPairs.map((pair) => pair.oldId) } }).select("_id subjectId chapterId topicId");
-      const oldQuestionMap = new Map(oldQuestions.map((item) => [String(item._id), item]));
-      changedPairs.forEach((pair) => {
-        const oldQuestion = oldQuestionMap.get(pair.oldId);
-        const newQuestion = questionMap.get(pair.newId);
-        if (!oldQuestion || !newQuestion) throw new AppError("Replacement question metadata could not be verified", 400);
-        const sameSubject = String(oldQuestion.subjectId || "") === String(newQuestion.subjectId || "");
-        const sameChapter = String(oldQuestion.chapterId || "") === String(newQuestion.chapterId || "");
-        const sameTopic = String(oldQuestion.topicId || "") === String(newQuestion.topicId || "");
-        if (!sameSubject || !sameChapter || !sameTopic) {
-          throw new AppError("Replacement questions must match the same Subject, Chapter, and Topic as the original question", 400);
-        }
-      });
-    }
-  }
   const statsByMockId = new Map(attemptStats.map((item) => [String(item._id), item]));
   const completedUserIds = [...new Set(attemptStats.flatMap((item) => item.completedUserIds || []).map(String).filter(Boolean))];
   const completedUsers = completedUserIds.length
