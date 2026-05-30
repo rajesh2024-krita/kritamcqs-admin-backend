@@ -16,6 +16,7 @@ export * from "./MigrationLog.js";
 export * from "./LearningSession.js";
 export * from "./Test.js";
 export * from "./MockTest.js";
+export * from "./MockPatternBlueprint.js";
 export * from "./SessionAttempt.js";
 export * from "./QuestionAttempt.js";
 export * from "./Mistake.js";

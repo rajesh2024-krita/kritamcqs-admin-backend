@@ -26,6 +26,7 @@ import {
   LearningSession,
   LearningLevel,
   Mistake,
+  MockPatternBlueprint,
   MockTest,
   Mode,
   NotificationSettings,
@@ -2399,6 +2400,132 @@ const MOCK_TEST_PRESETS = {
 const WEEKDAY_OPTIONS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 const AUTO_MOCK_HISTORY_LIMIT = 30;
 
+const DEFAULT_MOCK_PATTERN_BLUEPRINTS = {
+  NEET: {
+    key: "NEET",
+    title: "NEET Pattern Blueprint",
+    summary: [
+      { label: "Total Questions in NEET", value: "180" },
+      { label: "Physics Questions", value: "45" },
+      { label: "Chemistry Questions", value: "45" },
+      { label: "Botany Questions", value: "45" },
+      { label: "Zoology Questions", value: "45" },
+      { label: "Total Marks", value: "720" },
+    ],
+    subjectWise: [
+      { subject: "Physics", questions: 45, marks: 180, weightage: 25 },
+      { subject: "Chemistry", questions: 45, marks: 180, weightage: 25 },
+      { subject: "Botany", questions: 45, marks: 180, weightage: 25 },
+      { subject: "Zoology", questions: 45, marks: 180, weightage: 25 },
+    ],
+    chapterWise: [
+      { subject: "Physics", chapter: "Mechanics (combined)", expectedQuestions: 12 },
+      { subject: "Physics", chapter: "Electrodynamics", expectedQuestions: 9 },
+      { subject: "Physics", chapter: "Modern Physics", expectedQuestions: 5 },
+      { subject: "Physics", chapter: "Optics", expectedQuestions: 4 },
+      { subject: "Physics", chapter: "Thermodynamics", expectedQuestions: 4 },
+      { subject: "Physics", chapter: "SHM & Waves", expectedQuestions: 3 },
+      { subject: "Chemistry", chapter: "Physical Chemistry", expectedQuestions: 14 },
+      { subject: "Chemistry", chapter: "Organic Chemistry", expectedQuestions: 16 },
+      { subject: "Chemistry", chapter: "Inorganic Chemistry", expectedQuestions: 15 },
+      { subject: "Botany", chapter: "Genetics & Evolution", expectedQuestions: 10 },
+      { subject: "Botany", chapter: "Plant Physiology", expectedQuestions: 8 },
+      { subject: "Botany", chapter: "Cell Biology", expectedQuestions: 5 },
+      { subject: "Botany", chapter: "Biotechnology", expectedQuestions: 5 },
+      { subject: "Botany", chapter: "Ecology", expectedQuestions: 5 },
+      { subject: "Botany", chapter: "Other Botany Units", expectedQuestions: 12 },
+      { subject: "Zoology", chapter: "Human Physiology", expectedQuestions: 10 },
+      { subject: "Zoology", chapter: "Human Reproduction", expectedQuestions: 4 },
+      { subject: "Zoology", chapter: "Animal Kingdom", expectedQuestions: 4 },
+      { subject: "Zoology", chapter: "Biomolecules", expectedQuestions: 3 },
+      { subject: "Zoology", chapter: "Ecology Related", expectedQuestions: 4 },
+      { subject: "Zoology", chapter: "Other Zoology Units", expectedQuestions: 20 },
+    ],
+    topicWise: [
+      { subject: "Botany", chapter: "Genetics & Evolution", topic: "DNA Replication", expectedQuestions: 2 },
+      { subject: "Botany", chapter: "Genetics & Evolution", topic: "Genetic Code", expectedQuestions: 2 },
+      { subject: "Botany", chapter: "Genetics & Evolution", topic: "Inheritance", expectedQuestions: 3 },
+      { subject: "Botany", chapter: "Genetics & Evolution", topic: "Evolution", expectedQuestions: 3 },
+      { subject: "Zoology", chapter: "Human Physiology", topic: "Digestion", expectedQuestions: 2 },
+      { subject: "Zoology", chapter: "Human Physiology", topic: "Respiration", expectedQuestions: 2 },
+      { subject: "Zoology", chapter: "Human Physiology", topic: "Circulation", expectedQuestions: 2 },
+      { subject: "Zoology", chapter: "Human Physiology", topic: "Excretion", expectedQuestions: 2 },
+      { subject: "Zoology", chapter: "Human Physiology", topic: "Neural Control", expectedQuestions: 2 },
+      { subject: "Physics", chapter: "Electrodynamics", topic: "Current Electricity", expectedQuestions: 2 },
+      { subject: "Physics", chapter: "Electrodynamics", topic: "EMI", expectedQuestions: 2 },
+      { subject: "Physics", chapter: "Electrodynamics", topic: "Magnetism", expectedQuestions: 2 },
+      { subject: "Chemistry", chapter: "Organic Chemistry", topic: "Hydrocarbons", expectedQuestions: 2 },
+      { subject: "Chemistry", chapter: "Organic Chemistry", topic: "Amines", expectedQuestions: 2 },
+      { subject: "Chemistry", chapter: "Organic Chemistry", topic: "Biomolecules", expectedQuestions: 2 },
+    ],
+    rules: [
+      { rule: "Physics Questions", value: "45" },
+      { rule: "Chemistry Questions", value: "45" },
+      { rule: "Botany Questions", value: "45" },
+      { rule: "Zoology Questions", value: "45" },
+      { rule: "Easy %", value: "30" },
+      { rule: "Medium %", value: "50" },
+      { rule: "Hard %", value: "20" },
+    ],
+  },
+  JEE: {
+    key: "JEE",
+    title: "JEE Pattern Blueprint",
+    summary: [
+      { label: "Total Questions in JEE Main", value: "90" },
+      { label: "Physics Questions", value: "30" },
+      { label: "Chemistry Questions", value: "30" },
+      { label: "Mathematics Questions", value: "30" },
+      { label: "Total Marks", value: "300" },
+      { label: "Marks per Correct Answer", value: "4" },
+      { label: "Negative Mark per Wrong Answer", value: "-1" },
+    ],
+    subjectWise: [
+      { subject: "Physics", questions: 30, marks: 100, weightage: 33.3 },
+      { subject: "Chemistry", questions: 30, marks: 100, weightage: 33.3 },
+      { subject: "Mathematics", questions: 30, marks: 100, weightage: 33.3 },
+    ],
+    chapterWise: [
+      { subject: "Physics", chapter: "Mechanics", expectedQuestions: 8 },
+      { subject: "Physics", chapter: "Electrodynamics", expectedQuestions: 6 },
+      { subject: "Physics", chapter: "Modern Physics", expectedQuestions: 3 },
+      { subject: "Physics", chapter: "Optics", expectedQuestions: 3 },
+      { subject: "Physics", chapter: "Thermodynamics", expectedQuestions: 3 },
+      { subject: "Physics", chapter: "SHM & Waves", expectedQuestions: 3 },
+      { subject: "Chemistry", chapter: "Physical Chemistry", expectedQuestions: 10 },
+      { subject: "Chemistry", chapter: "Organic Chemistry", expectedQuestions: 10 },
+      { subject: "Chemistry", chapter: "Inorganic Chemistry", expectedQuestions: 10 },
+      { subject: "Mathematics", chapter: "Algebra", expectedQuestions: 10 },
+      { subject: "Mathematics", chapter: "Calculus", expectedQuestions: 8 },
+      { subject: "Mathematics", chapter: "Coordinate Geometry", expectedQuestions: 6 },
+      { subject: "Mathematics", chapter: "Vectors & 3D Geometry", expectedQuestions: 3 },
+      { subject: "Mathematics", chapter: "Probability & Statistics", expectedQuestions: 3 },
+    ],
+    topicWise: [
+      { subject: "Physics", chapter: "Mechanics", topic: "Laws of Motion", expectedQuestions: 2 },
+      { subject: "Physics", chapter: "Mechanics", topic: "Work Energy Power", expectedQuestions: 2 },
+      { subject: "Physics", chapter: "Mechanics", topic: "Rotational Motion", expectedQuestions: 2 },
+      { subject: "Chemistry", chapter: "Organic Chemistry", topic: "Hydrocarbons", expectedQuestions: 2 },
+      { subject: "Chemistry", chapter: "Organic Chemistry", topic: "Amines", expectedQuestions: 1 },
+      { subject: "Chemistry", chapter: "Physical Chemistry", topic: "Mole Concept", expectedQuestions: 2 },
+      { subject: "Mathematics", chapter: "Calculus", topic: "Limits", expectedQuestions: 2 },
+      { subject: "Mathematics", chapter: "Calculus", topic: "Differentiation", expectedQuestions: 2 },
+      { subject: "Mathematics", chapter: "Calculus", topic: "Integration", expectedQuestions: 2 },
+      { subject: "Mathematics", chapter: "Algebra", topic: "Quadratic Equations", expectedQuestions: 2 },
+      { subject: "Mathematics", chapter: "Algebra", topic: "Matrices", expectedQuestions: 2 },
+      { subject: "Mathematics", chapter: "Coordinate Geometry", topic: "Straight Lines", expectedQuestions: 2 },
+    ],
+    rules: [
+      { rule: "Physics Questions", value: "30" },
+      { rule: "Chemistry Questions", value: "30" },
+      { rule: "Mathematics Questions", value: "30" },
+      { rule: "Easy %", value: "25" },
+      { rule: "Medium %", value: "50" },
+      { rule: "Hard %", value: "25" },
+    ],
+  },
+};
+
 const AUTO_MOCK_PRESET_BY_EXAM = {
   NEET: {
     patternPreset: "NEET_REAL",
@@ -2439,6 +2566,41 @@ function requireAdminPassword(req) {
   if (!verifyPassword(password, req.admin?.passwordHash)) {
     throw new AppError("Admin password verification failed", 403);
   }
+}
+
+function normalizeBlueprintRows(rows, fields) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => Object.fromEntries(fields.map((field) => {
+      const raw = row?.[field];
+      return [field, typeof raw === "number" ? raw : String(raw ?? "").trim()];
+    })))
+    .filter((row) => fields.some((field) => String(row[field] ?? "").trim()));
+}
+
+function normalizePatternBlueprintPayload(key, payload = {}) {
+  const fallback = DEFAULT_MOCK_PATTERN_BLUEPRINTS[key];
+  if (!fallback) throw new AppError("Pattern blueprint not found", 404);
+  return {
+    key,
+    title: String(payload.title ?? fallback.title).trim() || fallback.title,
+    summary: normalizeBlueprintRows(payload.summary ?? fallback.summary, ["label", "value"]),
+    subjectWise: normalizeBlueprintRows(payload.subjectWise ?? fallback.subjectWise, ["subject", "questions", "marks", "weightage"]),
+    chapterWise: normalizeBlueprintRows(payload.chapterWise ?? fallback.chapterWise, ["subject", "chapter", "expectedQuestions"]),
+    topicWise: normalizeBlueprintRows(payload.topicWise ?? fallback.topicWise, ["subject", "chapter", "topic", "expectedQuestions"]),
+    rules: normalizeBlueprintRows(payload.rules ?? fallback.rules, ["rule", "value"]),
+  };
+}
+
+async function getOrCreatePatternBlueprints() {
+  const keys = Object.keys(DEFAULT_MOCK_PATTERN_BLUEPRINTS);
+  await Promise.all(keys.map((key) =>
+    MockPatternBlueprint.findOneAndUpdate(
+      { key },
+      { $setOnInsert: DEFAULT_MOCK_PATTERN_BLUEPRINTS[key] },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    ),
+  ));
+  return MockPatternBlueprint.find({ key: { $in: keys } }).sort({ key: -1 });
 }
 
 function createSlug(value) {
@@ -4698,6 +4860,29 @@ router.post(
       runValidators: true,
     });
     res.json({ success: true, message: "Marking settings updated", data: mapMarkingSettingsResponse(settings) });
+  }),
+);
+
+router.get(
+  "/mock-tests/pattern-blueprints",
+  asyncHandler(async (_req, res) => {
+    const blueprints = await getOrCreatePatternBlueprints();
+    res.json({ success: true, data: blueprints });
+  }),
+);
+
+router.put(
+  "/mock-tests/pattern-blueprints/:key",
+  asyncHandler(async (req, res) => {
+    requireAdminPassword(req);
+    const key = String(req.params.key || "").trim().toUpperCase();
+    const payload = normalizePatternBlueprintPayload(key, req.body || {});
+    const blueprint = await MockPatternBlueprint.findOneAndUpdate(
+      { key },
+      payload,
+      { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true },
+    );
+    res.json({ success: true, message: "Pattern blueprint updated", data: blueprint });
   }),
 );
 
