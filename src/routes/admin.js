@@ -2378,10 +2378,10 @@ const MOCK_TEST_PRESETS = {
     predictionTitle: "Predicted JEE Score",
     predictionDescription: "This mock follows the real JEE structure, so your result is a direct prediction of your likely exam-day score.",
     instructions: [
-      "Each subject has 20 MCQs and 5 numerical value questions.",
+      "Physics, Chemistry, and Mathematics question counts follow the saved JEE pattern blueprint.",
       "MCQ correct +4 and wrong -1.",
-      "Numerical correct +4; wrong numerical marking follows the configured JEE Main pattern.",
-      "Total questions 75, total marks 300, duration 180 minutes.",
+      "Numerical marking follows the configured JEE Main pattern.",
+      "Total questions and marks follow the saved JEE pattern blueprint.",
       "Chemistry first, then Physics, then Maths is the recommended time strategy.",
     ],
   },
@@ -2547,15 +2547,12 @@ const AUTO_MOCK_PRESET_BY_EXAM = {
     marksPerQuestion: 4,
     negativeMarks: 1,
     maxScore: 300,
-    totalQuestions: 75,
-    totalAttemptQuestions: 75,
+    totalQuestions: 90,
+    totalAttemptQuestions: 90,
     sectionGroups: [
-      { key: "PHY_MCQ", label: "Physics - MCQ", subjectKey: "PHYSICS", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
-      { key: "PHY_NUM", label: "Physics - Numerical", subjectKey: "PHYSICS", questionType: "NUMERICAL", totalQuestions: 5, attemptQuestions: 5 },
-      { key: "CHEM_MCQ", label: "Chemistry - MCQ", subjectKey: "CHEMISTRY", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
-      { key: "CHEM_NUM", label: "Chemistry - Numerical", subjectKey: "CHEMISTRY", questionType: "NUMERICAL", totalQuestions: 5, attemptQuestions: 5 },
-      { key: "MATH_MCQ", label: "Mathematics - MCQ", subjectKey: "MATHEMATICS", questionType: "MCQ", totalQuestions: 20, attemptQuestions: 20 },
-      { key: "MATH_NUM", label: "Mathematics - Numerical", subjectKey: "MATHEMATICS", questionType: "NUMERICAL", totalQuestions: 5, attemptQuestions: 5 },
+      { key: "PHY", label: "Physics", subjectKey: "PHYSICS", totalQuestions: 30, attemptQuestions: 30 },
+      { key: "CHEM", label: "Chemistry", subjectKey: "CHEMISTRY", totalQuestions: 30, attemptQuestions: 30 },
+      { key: "MATH", label: "Mathematics", subjectKey: "MATHEMATICS", totalQuestions: 30, attemptQuestions: 30 },
     ],
   },
 };
@@ -2601,6 +2598,60 @@ async function getOrCreatePatternBlueprints() {
     ),
   ));
   return MockPatternBlueprint.find({ key: { $in: keys } }).sort({ key: -1 });
+}
+
+function parseBlueprintNumber(value) {
+  const match = String(value ?? "").match(/-?\d+(?:\.\d+)?/);
+  return match ? Number(match[0]) : 0;
+}
+
+function getBlueprintSummaryNumber(blueprint, labelPart) {
+  const row = (blueprint?.summary || []).find((item) =>
+    String(item?.label || "").toLowerCase().includes(String(labelPart || "").toLowerCase()),
+  );
+  return parseBlueprintNumber(row?.value);
+}
+
+function buildSectionGroupsFromBlueprint(blueprint, fallbackGroups = []) {
+  const rows = Array.isArray(blueprint?.subjectWise) ? blueprint.subjectWise : [];
+  const groups = rows
+    .map((row, index) => {
+      const label = String(row?.subject || "").trim();
+      const totalQuestions = parseBlueprintNumber(row?.questions);
+      if (!label || totalQuestions <= 0) return null;
+      const subjectKey = normalizeSubjectKey(label);
+      return {
+        key: `${subjectKey}_${index + 1}`,
+        label,
+        subjectKey,
+        totalQuestions,
+        attemptQuestions: totalQuestions,
+      };
+    })
+    .filter(Boolean);
+
+  return groups.length ? groups : fallbackGroups;
+}
+
+async function getPatternBlueprintConfig(examType, fallbackPreset = null) {
+  const key = normalizeExamType(examType);
+  const fallback = DEFAULT_MOCK_PATTERN_BLUEPRINTS[key];
+  if (!fallback) return null;
+  const blueprint = await MockPatternBlueprint.findOne({ key }).lean();
+  const source = blueprint || fallback;
+  const sectionGroups = buildSectionGroupsFromBlueprint(source, fallbackPreset?.sectionGroups || []);
+  const totalQuestions = sectionGroups.reduce((sum, item) => sum + Number(item.totalQuestions || 0), 0)
+    || getBlueprintSummaryNumber(source, "total questions")
+    || Number(fallbackPreset?.totalQuestions || 0);
+  const totalMarks = getBlueprintSummaryNumber(source, "total marks") || Number(fallbackPreset?.maxScore || 0);
+
+  return {
+    blueprint: source,
+    sectionGroups,
+    totalQuestions,
+    totalAttemptQuestions: totalQuestions || Number(fallbackPreset?.totalAttemptQuestions || 0),
+    maxScore: totalMarks,
+  };
 }
 
 function createSlug(value) {
@@ -2709,6 +2760,9 @@ async function buildMockTestPayload(payload, existing = null) {
   const patternPreset = String(payload.patternPreset || existing?.patternPreset || "CUSTOM").toUpperCase();
   const preset = MOCK_TEST_PRESETS[patternPreset] || MOCK_TEST_PRESETS.CUSTOM;
   const examType = normalizeExamType(payload.examType || existing?.examType || preset.examType);
+  const blueprintConfig = patternPreset === "NEET_REAL" || patternPreset === "JEE_REAL"
+    ? await getPatternBlueprintConfig(examType, AUTO_MOCK_PRESET_BY_EXAM[examType])
+    : null;
   const markingSettingsDoc = await getOrCreateExamMarkingSettings();
   const normalizedMarkingSettings = normalizeMarkingSettingsDocument(markingSettingsDoc);
   const defaultMarkingScheme = getMarkingSchemeByExamType(normalizedMarkingSettings, examType);
@@ -2751,11 +2805,7 @@ async function buildMockTestPayload(payload, existing = null) {
 
   if (!title) throw new AppError("Title is required", 400);
   if (questionIds.length < 2) throw new AppError("Select at least two questions", 400);
-  const requiredPresetQuestions = patternPreset === "NEET_REAL"
-    ? AUTO_MOCK_PRESET_BY_EXAM.NEET.totalQuestions
-    : patternPreset === "JEE_REAL"
-      ? AUTO_MOCK_PRESET_BY_EXAM.JEE.totalQuestions
-      : 0;
+  const requiredPresetQuestions = blueprintConfig?.totalQuestions || 0;
   if (requiredPresetQuestions && questionIds.length !== requiredPresetQuestions) {
     throw new AppError(
       `The mock test requires ${requiredPresetQuestions} questions based on the selected ${examType} pattern, but only ${questionIds.length} questions are currently selected.`,
@@ -2786,7 +2836,7 @@ async function buildMockTestPayload(payload, existing = null) {
   const questionMarkingRules = buildQuestionMarkingRules(questionIds, questionMap, effectiveMarkingScheme);
   const totalAttemptQuestions = Number(payload.totalAttemptQuestions ?? existing?.totalAttemptQuestions ?? questionIds.length);
   const computedMaxScore = calculateMaxScoreFromRules(questionMarkingRules, totalAttemptQuestions);
-  const maxScore = Number(payload.maxScore ?? existing?.maxScore ?? computedMaxScore ?? preset.maxScore);
+  const maxScore = Number(payload.maxScore ?? existing?.maxScore ?? blueprintConfig?.maxScore ?? computedMaxScore ?? preset.maxScore);
   if (!Number.isFinite(maxScore) || maxScore <= 0) {
     throw new AppError("Max score must be greater than 0", 400);
   }
@@ -3004,6 +3054,8 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
   }
 
   const preset = AUTO_MOCK_PRESET_BY_EXAM[examType];
+  const blueprintConfig = await getPatternBlueprintConfig(examType, preset);
+  const blueprintSectionGroups = blueprintConfig?.sectionGroups?.length ? blueprintConfig.sectionGroups : preset.sectionGroups;
   const markingSettingsDoc = await getOrCreateExamMarkingSettings();
   const normalizedMarkingSettings = normalizeMarkingSettingsDocument(markingSettingsDoc);
   const defaultMarkingScheme = getMarkingSchemeByExamType(normalizedMarkingSettings, examType);
@@ -3068,7 +3120,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
   const sectionGroups = [];
   const sectionShortages = [];
 
-  for (const section of preset.sectionGroups) {
+  for (const section of blueprintSectionGroups) {
     const sectionSubjectIds = groupedSubjectIds[section.subjectKey] || [];
     if (!sectionSubjectIds.length) {
       throw new AppError(`Missing required subject pool for section ${section.label}`, 400);
@@ -3143,7 +3195,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
   const marksPerQuestion = Number(effectiveMarkingScheme?.mcq?.correct ?? payload.marksPerQuestion ?? existing?.marksPerQuestion ?? preset.marksPerQuestion);
   const negativeMarks = Math.abs(Number(effectiveMarkingScheme?.mcq?.wrong ?? -(payload.negativeMarks ?? existing?.negativeMarks ?? preset.negativeMarks)));
   const computedAttemptQuestions = sectionGroups.reduce((sum, item) => sum + Number(item.attemptQuestions || 0), 0);
-  const requestedAttemptQuestions = Number(payload.totalAttemptQuestions ?? preset.totalAttemptQuestions);
+  const requestedAttemptQuestions = Number(payload.totalAttemptQuestions ?? blueprintConfig?.totalAttemptQuestions ?? preset.totalAttemptQuestions);
   const totalAttemptQuestions = Math.max(
     1,
     Math.min(
@@ -3158,6 +3210,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
   const maxScore = Number(
     payload.maxScore
       ?? (sectionShortages.length ? computedMaxScore : existing?.maxScore)
+      ?? blueprintConfig?.maxScore
       ?? computedMaxScore,
   );
   if (!Number.isFinite(maxScore) || maxScore <= 0) {
@@ -3234,6 +3287,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
       difficulty: requestedDifficulty || "mixed",
       markingSchemeVersion: effectiveMarkingScheme.version,
       markingOverrideEnabled,
+      blueprintTotalQuestions: blueprintConfig?.totalQuestions || null,
       strictPattern: sectionShortages.length === 0,
       shortages: sectionShortages,
     },
