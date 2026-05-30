@@ -24,6 +24,7 @@ const questionBulkUploadBatchSchema = new Schema(
     completedAt: { type: Date },
     createdSummary: { type: Schema.Types.Mixed, default: {} },
     imageSummary: { type: Schema.Types.Mixed, default: {} },
+    newColumnUpdateSummary: { type: Schema.Types.Mixed, default: {} },
   },
   baseJsonOptions,
 );

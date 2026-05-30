@@ -4551,6 +4551,16 @@ router.post(
   }),
 );
 
+router.post(
+  "/questions/bulk-upload/:batchId/update-new-columns",
+  asyncHandler(async (req, res) => {
+    const data = await questionBulkUploadService.updateNewColumnValues({
+      batchId: req.params.batchId,
+    });
+    res.json({ success: true, message: "New column values updated successfully", data });
+  }),
+);
+
 router.get(
   "/questions/bulk-upload/:batchId/status",
   asyncHandler(async (req, res) => {

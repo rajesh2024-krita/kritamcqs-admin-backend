@@ -1158,6 +1158,7 @@ async function buildPreview(batchId) {
   const missingCategories = summarizeMissing(rows);
   const duplicateCount = rows.filter((row) => row.status === "duplicate" || row.errorMessage?.includes("Duplicate")).length;
   const imageCount = rows.reduce((sum, row) => sum + Number(row.imageCount || countRawImages(row.raw)), 0);
+  const newColumnStatus = getNewColumnStatus(rows, batch);
 
   await QuestionBulkUploadBatch.findByIdAndUpdate(batchId, {
     ...(batch?.status === "pending" || batch?.status === "validating" ? { status: "validated" } : {}),
@@ -1168,6 +1169,10 @@ async function buildPreview(batchId) {
     missingCategoriesCount: missingCategories.length,
     duplicateCount,
     imageCount,
+    newColumnUpdateSummary: {
+      ...(batch?.newColumnUpdateSummary || {}),
+      pending: newColumnStatus.columns.reduce((summary, column) => ({ ...summary, [column.field]: column.missingCount }), {}),
+    },
     validPercent: percent(validRows.length + warningRows.length, totalRows),
   });
 
@@ -1189,6 +1194,10 @@ async function buildPreview(batchId) {
     totalBatches: Math.ceil((validRows.length + warningRows.length) / APPROVAL_CHUNK_SIZE),
     createdSummary: batch?.createdSummary || {},
     imageSummary: batch?.imageSummary || { detected: imageCount, uploaded: 0, failed: 0 },
+    newColumnStatus,
+    newColumnMissingCount: newColumnStatus.totalMissingCount,
+    requiresNewColumnUpdate: newColumnStatus.requiresUpdate,
+    newColumnUpdateCompleted: newColumnStatus.updateCompleted,
     validPercent: percent(validRows.length + warningRows.length, totalRows),
     missingCategories,
     rows: rows.slice(0, 500).map(rowDto),
@@ -1291,6 +1300,30 @@ async function createQuestionTypeIfMissing(catalog, raw, examType) {
 
 const APPROVAL_CHUNK_SIZE = 200;
 const activeApprovalJobs = new Set();
+const NEW_COLUMN_DEFAULTS = {
+  exact: false,
+};
+
+function getNewColumnStatus(rows = [], batch = {}) {
+  const columns = Object.entries(NEW_COLUMN_DEFAULTS).map(([field, defaultValue]) => {
+    const missingCount = rows.filter((row) => !normalizeText(row.raw?.[field])).length;
+    return {
+      field,
+      label: field,
+      defaultValue,
+      missingCount,
+      updatedCount: Number(batch?.newColumnUpdateSummary?.[field]?.updatedCount || 0),
+      completed: missingCount === 0,
+    };
+  });
+  const totalMissingCount = columns.reduce((sum, column) => sum + column.missingCount, 0);
+  return {
+    columns,
+    totalMissingCount,
+    requiresUpdate: totalMissingCount > 0,
+    updateCompleted: totalMissingCount === 0,
+  };
+}
 
 async function ensureCategoriesCreatedForBatch(batchId) {
   const batch = await QuestionBulkUploadBatch.findById(batchId);
@@ -1353,6 +1386,39 @@ async function ensureCategoriesCreatedForBatch(batchId) {
   batch.createdSummary = createdSummary;
   await batch.save();
   return createdSummary;
+}
+
+async function updateNewColumnValuesForBatch(batchId) {
+  const batch = await QuestionBulkUploadBatch.findById(batchId);
+  if (!batch) throw new AppError("Upload batch not found", 404);
+  if (["processing", "approved"].includes(batch.status)) throw new AppError("New column values cannot be updated after approval starts", 400);
+
+  const rows = await QuestionBulkUploadRow.find({ batchId });
+  const summary = {};
+  for (const [field, defaultValue] of Object.entries(NEW_COLUMN_DEFAULTS)) {
+    let updatedCount = 0;
+    for (const row of rows) {
+      if (normalizeText(row.raw?.[field])) continue;
+      row.raw = { ...(row.raw || {}), [field]: String(defaultValue) };
+      row.payload = { ...(row.payload || {}), [field]: defaultValue };
+      updatedCount += 1;
+      await row.save();
+    }
+    summary[field] = {
+      defaultValue,
+      updatedCount,
+      completedAt: new Date(),
+    };
+  }
+
+  const catalog = await loadCatalog();
+  await validateRowsForBatch(batchId, catalog);
+  batch.newColumnUpdateSummary = {
+    ...(batch.newColumnUpdateSummary || {}),
+    ...summary,
+  };
+  await batch.save();
+  return summary;
 }
 
 async function processApprovalJob(batchId) {
@@ -1479,12 +1545,24 @@ export const questionBulkUploadService = {
     return buildPreview(batch._id);
   },
 
+  async updateNewColumnValues({ batchId }) {
+    if (!mongoose.isValidObjectId(batchId)) throw new AppError("Invalid upload batch", 400);
+    const summary = await updateNewColumnValuesForBatch(batchId);
+    const preview = await buildPreview(batchId);
+    return { ...preview, newColumnUpdateSummary: summary };
+  },
+
   async approve({ batchId }) {
     if (!mongoose.isValidObjectId(batchId)) throw new AppError("Invalid upload batch", 400);
     const batch = await QuestionBulkUploadBatch.findById(batchId);
     if (!batch) throw new AppError("Upload batch not found", 404);
 
     await ensureCategoriesCreatedForBatch(batchId);
+    const rows = await QuestionBulkUploadRow.find({ batchId }).lean();
+    const newColumnStatus = getNewColumnStatus(rows, batch);
+    if (newColumnStatus.requiresUpdate) {
+      throw new AppError("Update new column values before approving this bulk upload", 400);
+    }
 
     await QuestionBulkUploadBatch.findByIdAndUpdate(batchId, {
       status: "processing",
@@ -1526,6 +1604,7 @@ export const questionBulkUploadService = {
     const completedAt = batch.completedAt ? new Date(batch.completedAt) : null;
     const startedAt = batch.startedAt ? new Date(batch.startedAt) : null;
     const processingTimeMs = completedAt && startedAt ? completedAt.getTime() - startedAt.getTime() : 0;
+    const newColumnStatus = getNewColumnStatus(rows, batch);
     return {
       batchId: String(batch._id),
       status: batch.status,
@@ -1552,6 +1631,10 @@ export const questionBulkUploadService = {
       failedPercent: percent(failed, batch.totalRows),
       createdSummary: batch.createdSummary || {},
       imageSummary: batch.imageSummary || {},
+      newColumnStatus,
+      newColumnMissingCount: newColumnStatus.totalMissingCount,
+      requiresNewColumnUpdate: newColumnStatus.requiresUpdate,
+      newColumnUpdateCompleted: newColumnStatus.updateCompleted,
       rows: rows.slice(0, 500).map(rowDto),
     };
   },
