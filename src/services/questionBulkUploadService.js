@@ -188,6 +188,11 @@ function normalizeStrictBoolean(value) {
   return normalizeHeader(value) === "true";
 }
 
+function normalizeStoredExact(value) {
+  if (value === true || value === 1) return true;
+  return ["true", "1", "yes", "y"].includes(normalizeHeader(value));
+}
+
 function isBooleanLike(value) {
   return ["1", "0", "true", "false", "yes", "no", "y", "n"].includes(normalizeHeader(value));
 }
@@ -1217,11 +1222,20 @@ async function validateRowsForBatch(batchId, catalog) {
     const warnings = [...validation.warnings, ...imageWarnings];
     if (seenKeys.has(duplicateKey)) errors.push("Duplicate Question in upload file");
     else seenKeys.add(duplicateKey);
+    let existingQuestion = null;
     if (!errors.length && validation.payload) {
-      const exists = await Question.exists(buildDuplicateQuery(validation.payload));
-      if (exists) errors.push("Duplicate Question");
+      existingQuestion = await Question.findOne(buildDuplicateQuery(validation.payload)).select("_id exact").lean();
+      if (existingQuestion && normalizeStoredExact(existingQuestion.exact) === normalizeStoredExact(validation.payload.exact)) {
+        errors.push("Duplicate Question");
+      }
     }
     row.payload = validation.payload || {};
+    if (existingQuestion && !errors.length) {
+      row.uploadedQuestionId = existingQuestion._id;
+      warnings.push("Existing question exact value will be updated");
+    } else {
+      row.uploadedQuestionId = undefined;
+    }
     row.status = errors.some((error) => error.includes("Duplicate")) ? "duplicate" : (errors.length ? "invalid" : (warnings.length ? "warning" : "valid"));
     row.errorMessage = [...errors, ...warnings].join(", ");
     row.question = (normalizeText(row.raw.question) || (row.raw.questionImageUrl ? "[Image Question]" : "[Incomplete Question]")).slice(0, 300);
@@ -1455,8 +1469,19 @@ async function processApprovalJob(batchId) {
           uploadedImageCount += owned.uploadedImageCount;
           row.uploadedImageCount = owned.uploadedImageCount;
 
-          const exists = await Question.exists(buildDuplicateQuery(payload));
-          if (exists) {
+          const existing = await Question.findOne(buildDuplicateQuery(payload)).select("_id exact");
+          if (existing) {
+            if (normalizeStoredExact(existing.exact) !== normalizeStoredExact(payload.exact)) {
+              existing.exact = normalizeStoredExact(payload.exact);
+              await existing.save();
+              row.status = "approved";
+              row.uploadedQuestionId = existing._id;
+              row.errorMessage = "";
+              inserted += 1;
+              await row.save();
+              lastError = null;
+              break;
+            }
             row.status = "duplicate";
             row.errorMessage = "Duplicate Question";
             skipped += 1;
