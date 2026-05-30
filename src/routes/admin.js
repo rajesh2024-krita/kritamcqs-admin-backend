@@ -50,7 +50,7 @@ import { createCrudService } from "../services/crudService.js";
 import { AppError } from "../utils/AppError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { sendResponse } from "../utils/apiResponse.js";
-import { hashPassword } from "../utils/password.js";
+import { hashPassword, verifyPassword } from "../utils/password.js";
 import { bulkDeleteSchema, createSchemas, listQuerySchema, updateSchemas } from "../validators/crudValidators.js";
 import { upload } from "../middlewares/upload.js";
 import { z } from "zod";
@@ -2433,6 +2433,14 @@ const AUTO_MOCK_PRESET_BY_EXAM = {
   },
 };
 
+function requireAdminPassword(req) {
+  const password = String(req.body?.adminPassword || "").trim();
+  if (!password) throw new AppError("Admin password is required to edit mock test patterns", 401);
+  if (!verifyPassword(password, req.admin?.passwordHash)) {
+    throw new AppError("Admin password verification failed", 403);
+  }
+}
+
 function createSlug(value) {
   return String(value || "")
     .trim()
@@ -2597,7 +2605,7 @@ async function buildMockTestPayload(payload, existing = null) {
   if (availabilityMode === "day_wise" && !availableDaysOfMonth.length) throw new AppError("Select at least one day of month", 400);
   if (availabilityMode === "week_wise" && !availableWeekdays.length) throw new AppError("Select at least one weekday", 400);
 
-  const questions = await Question.find({ _id: { $in: questionIds } }).select("_id subjectId chapterId examMode exam responseType");
+  const questions = await Question.find({ _id: { $in: questionIds } }).select("_id subjectId chapterId topicId examMode exam responseType");
   if (questions.length !== questionIds.length) {
     throw new AppError("One or more selected questions were not found", 400);
   }
@@ -2682,9 +2690,10 @@ async function serializeMockTests(items) {
     chapterIds.length ? Chapter.find({ _id: { $in: chapterIds } }).select("name") : [],
     questionIds.length
       ? Question.find({ _id: { $in: questionIds } })
-        .select("_id question questionImageUrl optionA optionAImageUrl optionB optionBImageUrl optionC optionCImageUrl optionD optionDImageUrl subjectId chapterId difficulty difficultyId hasDiagram")
+        .select("_id question questionImageUrl optionA optionAImageUrl optionB optionBImageUrl optionC optionCImageUrl optionD optionDImageUrl correctOption correctOptions numericAnswer explanation subjectId chapterId topicId difficulty difficultyId hasDiagram responseType")
         .populate("subjectId", "name")
         .populate("chapterId", "name")
+        .populate("topicId", "name")
         .populate("difficultyId", "name")
       : [],
     mockTestIds.length
@@ -2704,6 +2713,28 @@ async function serializeMockTests(items) {
   const subjectMap = new Map(subjects.map((item) => [String(item._id), item.name]));
   const chapterMap = new Map(chapters.map((item) => [String(item._id), item.name]));
   const questionMap = new Map(questions.map((item) => [String(item._id), item]));
+
+  if (existing && Array.isArray(existing.questionIds) && existing.questionIds.length === questionIds.length) {
+    const existingIds = existing.questionIds.map(String);
+    const changedPairs = existingIds
+      .map((oldId, index) => ({ oldId, newId: questionIds[index] }))
+      .filter((pair) => pair.oldId !== pair.newId);
+    if (changedPairs.length) {
+      const oldQuestions = await Question.find({ _id: { $in: changedPairs.map((pair) => pair.oldId) } }).select("_id subjectId chapterId topicId");
+      const oldQuestionMap = new Map(oldQuestions.map((item) => [String(item._id), item]));
+      changedPairs.forEach((pair) => {
+        const oldQuestion = oldQuestionMap.get(pair.oldId);
+        const newQuestion = questionMap.get(pair.newId);
+        if (!oldQuestion || !newQuestion) throw new AppError("Replacement question metadata could not be verified", 400);
+        const sameSubject = String(oldQuestion.subjectId || "") === String(newQuestion.subjectId || "");
+        const sameChapter = String(oldQuestion.chapterId || "") === String(newQuestion.chapterId || "");
+        const sameTopic = String(oldQuestion.topicId || "") === String(newQuestion.topicId || "");
+        if (!sameSubject || !sameChapter || !sameTopic) {
+          throw new AppError("Replacement questions must match the same Subject, Chapter, and Topic as the original question", 400);
+        }
+      });
+    }
+  }
   const statsByMockId = new Map(attemptStats.map((item) => [String(item._id), item]));
   const completedUserIds = [...new Set(attemptStats.flatMap((item) => item.completedUserIds || []).map(String).filter(Boolean))];
   const completedUsers = completedUserIds.length
@@ -2738,7 +2769,17 @@ async function serializeMockTests(items) {
           hasDiagram: Boolean(question.hasDiagram || question.questionImageUrl),
           subjectName: question.subjectId?.name || "-",
           chapterName: question.chapterId?.name || "-",
+          subjectId: question.subjectId?._id ? String(question.subjectId._id) : String(question.subjectId || ""),
+          chapterId: question.chapterId?._id ? String(question.chapterId._id) : String(question.chapterId || ""),
+          topicId: question.topicId?._id ? String(question.topicId._id) : String(question.topicId || ""),
+          topicName: question.topicId?.name || "-",
           difficulty: question.difficultyId?.name || question.difficulty || "-",
+          correctAnswer: question.responseType === "numeric"
+            ? question.numericAnswer || ""
+            : Array.isArray(question.correctOptions) && question.correctOptions.length
+              ? question.correctOptions.join(", ")
+              : question.correctOption || "",
+          explanation: question.explanation || "",
         })),
       subjectIds: (raw.subjectIds || []).map(String),
       chapterIds: (raw.chapterIds || []).map(String),
@@ -4722,6 +4763,7 @@ router.get(
     }
     if (req.query.subjectId) filters.subjectId = String(req.query.subjectId);
     if (req.query.chapterId) filters.chapterId = String(req.query.chapterId);
+    if (req.query.topicId) filters.topicId = String(req.query.topicId);
     if (search) {
       filters.question = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     }
@@ -4731,6 +4773,7 @@ router.get(
       Question.find(filters)
         .populate("subjectId")
         .populate("chapterId")
+        .populate("topicId")
         .populate("questionTypeId")
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -4747,9 +4790,19 @@ router.get(
         hasDiagram: Boolean(item.hasDiagram || item.questionImageUrl),
         examMode: item.examMode,
         difficulty: item.difficulty,
+        subjectId: item.subjectId?._id ? String(item.subjectId._id) : String(item.subjectId || ""),
+        chapterId: item.chapterId?._id ? String(item.chapterId._id) : String(item.chapterId || ""),
+        topicId: item.topicId?._id ? String(item.topicId._id) : String(item.topicId || ""),
         subjectName: item.subjectId?.name || "-",
         chapterName: item.chapterId?.name || "-",
+        topicName: item.topicId?.name || "-",
         questionTypeLabel: item.questionTypeId?.name || item.questionTypeId?.label || "-",
+        correctAnswer: item.responseType === "numeric"
+          ? item.numericAnswer || ""
+          : Array.isArray(item.correctOptions) && item.correctOptions.length
+            ? item.correctOptions.join(", ")
+            : item.correctOption || "",
+        explanation: item.explanation || "",
       })),
       meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
     });
@@ -4774,8 +4827,17 @@ router.post(
 );
 
 router.post(
+  "/mock-tests/verify-edit-password",
+  asyncHandler(async (req, res) => {
+    requireAdminPassword(req);
+    res.json({ success: true, message: "Admin password verified" });
+  }),
+);
+
+router.post(
   "/mock-tests/:id/regenerate",
   asyncHandler(async (req, res) => {
+    requireAdminPassword(req);
     const existing = await MockTest.findById(req.params.id);
     if (!existing) throw new AppError("Mock test not found", 404);
     const payload = await buildAutoMockTestPayload(req.body || {}, req.userId, existing);
@@ -4809,6 +4871,56 @@ router.get(
 );
 
 router.get(
+  "/mock-tests/:id/download",
+  asyncHandler(async (req, res) => {
+    const item = await MockTest.findById(req.params.id);
+    if (!item) throw new AppError("Mock test not found", 404);
+    const questions = await Question.find({ _id: { $in: item.questionIds || [] } })
+      .populate("subjectId", "name")
+      .populate("chapterId", "name")
+      .populate("topicId", "name");
+    const questionMap = new Map(questions.map((question) => [String(question._id), question]));
+    const lines = [
+      item.title,
+      `Exam: ${item.examType}`,
+      `Pattern: ${item.patternPreset || "CUSTOM"}`,
+      `Duration: ${item.durationMinutes} minutes`,
+      `Max Score: ${item.maxScore}`,
+      "",
+    ];
+
+    (item.questionIds || []).map(String).forEach((id, index) => {
+      const question = questionMap.get(id);
+      if (!question) return;
+      const answer = String(question.responseType || "") === "numeric"
+        ? question.numericAnswer || ""
+        : Array.isArray(question.correctOptions) && question.correctOptions.length
+          ? question.correctOptions.join(", ")
+          : question.correctOption || "";
+      lines.push(
+        `Q${index + 1}. ${question.question || "[Image Question]"}`,
+        `Question ID: ${String(question._id)}`,
+        `Subject: ${question.subjectId?.name || "-"}`,
+        `Chapter: ${question.chapterId?.name || "-"}`,
+        `Topic: ${question.topicId?.name || "-"}`,
+        `A. ${question.optionA || ""}`,
+        `B. ${question.optionB || ""}`,
+        `C. ${question.optionC || ""}`,
+        `D. ${question.optionD || ""}`,
+        `Correct Answer: ${answer}`,
+        `Detailed Explanation: ${question.explanation || ""}`,
+        "",
+      );
+    });
+
+    const filename = `${createSlug(item.title) || "mock-test"}.txt`;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(lines.join("\n"));
+  }),
+);
+
+router.get(
   "/mock-tests/:id",
   asyncHandler(async (req, res) => {
     const item = await MockTest.findById(req.params.id);
@@ -4829,6 +4941,7 @@ router.post(
 router.put(
   "/mock-tests/:id",
   asyncHandler(async (req, res) => {
+    requireAdminPassword(req);
     const existing = await MockTest.findById(req.params.id);
     if (!existing) throw new AppError("Mock test not found", 404);
     const payload = await buildMockTestPayload(req.body, existing);
