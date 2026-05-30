@@ -52,6 +52,7 @@ const HEADER_ALIASES = {
   concept_tags: ["concept_tags", "concepttags", "tags"],
   has_diagram: ["has_diagram", "hasdiagram"],
   is_numerical: ["is_numerical", "isnumerical"],
+  exact: ["exact"],
 };
 
 const KNOWN_QUESTION_TYPES = new Set(["MCQ", "TRUE_FALSE", "FILL_BLANKS", "MATCH_FOLLOWING", "DESCRIPTIVE", "NUMERICAL"]);
@@ -176,6 +177,15 @@ function getCompletenessWarnings(raw = {}) {
 function normalizeBoolean(value) {
   const normalized = normalizeHeader(value);
   return ["1", "true", "yes", "y"].includes(normalized);
+}
+
+function isStrictBooleanValue(value) {
+  const normalized = normalizeHeader(value);
+  return normalized === "true" || normalized === "false";
+}
+
+function normalizeStrictBoolean(value) {
+  return normalizeHeader(value) === "true";
 }
 
 function isBooleanLike(value) {
@@ -592,6 +602,7 @@ function resolveHeaderMap(headers) {
     "concept_tags",
     "has_diagram",
     "is_numerical",
+    "exact",
   ]) {
     const match = HEADER_ALIASES[optional].find((alias) => normalizedHeaders.includes(normalizeHeader(alias)));
     if (match) map[optional] = headers[normalizedHeaders.indexOf(normalizeHeader(match))];
@@ -745,6 +756,7 @@ async function parseSheet(sheetFile) {
       conceptTags: Array.isArray(row.conceptTags) ? row.conceptTags.join(",") : (row.conceptTags ?? row.concept_tags ?? row.tags ?? ""),
       hasDiagram: row.hasDiagram ?? row.has_diagram ?? "",
       isNumerical: row.isNumerical ?? row.is_numerical ?? "",
+      exact: row.exact ?? "",
       videoUrl: row.videoUrl ?? row.video_url ?? "",
     }));
   }
@@ -813,6 +825,7 @@ async function parseSheet(sheetFile) {
         conceptTags: map.concept_tags ? row[map.concept_tags] : "",
         hasDiagram: map.has_diagram ? row[map.has_diagram] : "",
         isNumerical: map.is_numerical ? row[map.is_numerical] : "",
+        exact: map.exact ? row[map.exact] : "",
         videoUrl: map.video_url ? row[map.video_url] : "",
       };
       parsed = mergeEmbeddedImages(parsed, {
@@ -992,6 +1005,7 @@ function buildQuestionPayload(raw, matches) {
     numericAnswer: isNumericLike ? answerText : "",
     explanation: [normalizeText(raw.explanation), normalizeText(raw.videoUrl) ? `Media: ${normalizeText(raw.videoUrl)}` : ""].filter(Boolean).join("\n\n"),
     explanationImageUrl: raw.explanationImageUrl || "",
+    exact: normalizeText(raw.exact) ? normalizeStrictBoolean(raw.exact) : false,
     examMode: examType,
     exam: getDefaultExamForExamType(examType),
     responseType: isNumericLike ? "numeric" : responseType || "single",
@@ -1070,6 +1084,7 @@ function validateRawRow(raw, catalog) {
   if (normalizeText(raw.difficulty) && !difficulty) errors.push("Invalid Difficulty");
   if (questionType && !questionTypeDoc) errors.push("Question Type not configured");
   if (normalizeText(raw.year) && !year) errors.push("Missing Year");
+  if (normalizeText(raw.exact) && !isStrictBooleanValue(raw.exact)) errors.push("Invalid Exact Value");
 
   const matches = { subject, chapter, topic, difficulty, questionType: questionTypeDoc, year };
   let payload = null;

@@ -30,6 +30,7 @@ const questionSchema = new Schema(
     conceptTags: { type: [String], default: [] },
     numericAnswer: { type: String, trim: true },
     passage: { type: String, trim: true },
+    exact: { type: Boolean, default: false, index: true },
     hasDiagram: { type: Boolean, default: false },
     isNumerical: { type: Boolean, default: false },
     questionStatus: { type: String, enum: ["complete", "incomplete"], default: "complete", index: true },

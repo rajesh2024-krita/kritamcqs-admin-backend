@@ -5415,7 +5415,7 @@ const questionService = createCrudService({
   populate: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId"],
   allowedSorts: ["createdAt", "updatedAt", "difficulty", "examMode", "exam"],
   searchFields: ["question", "passage", "conceptTags"],
-  exactFilters: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId", "examMode", "difficulty", "responseType", "questionStatus", "reviewStatus", "isVisibleToUsers"],
+  exactFilters: ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId", "examMode", "difficulty", "responseType", "questionStatus", "reviewStatus", "isVisibleToUsers", "exact"],
   beforeCreate: async (payload) => {
     const normalizedPayload = normalizeQuestionExamFields(payload);
     Object.assign(normalizedPayload, await resolveDifficultyPayload(normalizedPayload));
