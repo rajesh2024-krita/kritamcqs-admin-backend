@@ -28,6 +28,8 @@ import {
   Mistake,
   MockPatternBlueprint,
   MockTest,
+  MockTestGenerationLog,
+  MockTestGenerationSchedule,
   Mode,
   NotificationSettings,
   PaymentGatewaySettings,
@@ -2399,6 +2401,21 @@ const MOCK_TEST_PRESETS = {
 
 const WEEKDAY_OPTIONS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 const AUTO_MOCK_HISTORY_LIMIT = 30;
+const MOCK_SCHEDULER_INTERVAL_MS = 60 * 1000;
+const DEFAULT_MOCK_GENERATION_SCHEDULE = {
+  enabled: false,
+  recurrenceType: "weekly",
+  weeklyDays: ["FRI"],
+  monthlyDay: 1,
+  generationTime: "09:00",
+  timezone: "local",
+  examType: "NEET",
+  subjectIds: [],
+  chapterIds: [],
+  difficulty: "mixed",
+  questionCount: 0,
+  titlePrefix: "Premium Auto Mock",
+};
 
 const DEFAULT_MOCK_PATTERN_BLUEPRINTS = {
   NEET: {
@@ -2631,6 +2648,27 @@ function buildSectionGroupsFromBlueprint(blueprint, fallbackGroups = []) {
     .filter(Boolean);
 
   return groups.length ? groups : fallbackGroups;
+}
+
+function scaleSectionGroups(sectionGroups, requestedQuestionCount) {
+  const targetTotal = Math.max(0, Math.floor(Number(requestedQuestionCount || 0)));
+  if (!targetTotal || !Array.isArray(sectionGroups) || sectionGroups.length === 0) return sectionGroups;
+  const currentTotal = sectionGroups.reduce((sum, item) => sum + Number(item.totalQuestions || 0), 0);
+  if (!currentTotal || currentTotal === targetTotal) return sectionGroups;
+
+  const scaled = sectionGroups.map((item) => {
+    const exact = (Number(item.totalQuestions || 0) / currentTotal) * targetTotal;
+    const totalQuestions = Math.max(1, Math.floor(exact));
+    return { ...item, totalQuestions, attemptQuestions: totalQuestions, _remainder: exact - totalQuestions };
+  });
+  let delta = targetTotal - scaled.reduce((sum, item) => sum + Number(item.totalQuestions || 0), 0);
+  const ordered = [...scaled].sort((a, b) => Number(b._remainder || 0) - Number(a._remainder || 0));
+  for (let index = 0; delta > 0 && ordered.length; index += 1, delta -= 1) {
+    const row = ordered[index % ordered.length];
+    row.totalQuestions += 1;
+    row.attemptQuestions = row.totalQuestions;
+  }
+  return scaled.map(({ _remainder, ...item }) => item);
 }
 
 async function getPatternBlueprintConfig(examType, fallbackPreset = null) {
@@ -3055,7 +3093,10 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
 
   const preset = AUTO_MOCK_PRESET_BY_EXAM[examType];
   const blueprintConfig = await getPatternBlueprintConfig(examType, preset);
-  const blueprintSectionGroups = blueprintConfig?.sectionGroups?.length ? blueprintConfig.sectionGroups : preset.sectionGroups;
+  const blueprintSectionGroups = scaleSectionGroups(
+    blueprintConfig?.sectionGroups?.length ? blueprintConfig.sectionGroups : preset.sectionGroups,
+    payload.questionCount ?? existing?.generationConfig?.questionCount,
+  );
   const markingSettingsDoc = await getOrCreateExamMarkingSettings();
   const normalizedMarkingSettings = normalizeMarkingSettingsDocument(markingSettingsDoc);
   const defaultMarkingScheme = getMarkingSchemeByExamType(normalizedMarkingSettings, examType);
@@ -3098,10 +3139,13 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
         : true;
 
   const sourceSubjectIds = payload.subjectIds ?? existing?.generationConfig?.subjectIds ?? existing?.subjectIds ?? [];
+  const rawChapterIds = payload.chapterIds ?? existing?.generationConfig?.chapterIds ?? [];
+  const sourceChapterIds = [...new Set((Array.isArray(rawChapterIds) ? rawChapterIds : []).map(String).filter(Boolean))];
   const { subjects, groupedSubjectIds } = await resolveAutoMockSubjects(examType, sourceSubjectIds);
 
   const baseFilter = {
     subjectId: { $in: subjects.map((item) => String(item._id)) },
+    ...(sourceChapterIds.length ? { chapterId: { $in: sourceChapterIds } } : {}),
     ...(examType === "NEET" || examType === "JEE"
       ? { $or: [{ examMode: examType }, { examMode: "BOTH" }] }
       : {}),
@@ -3285,9 +3329,11 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
       examType,
       subjectIds,
       difficulty: requestedDifficulty || "mixed",
+      questionCount: Number(payload.questionCount ?? existing?.generationConfig?.questionCount ?? 0),
       markingSchemeVersion: effectiveMarkingScheme.version,
       markingOverrideEnabled,
       blueprintTotalQuestions: blueprintConfig?.totalQuestions || null,
+      chapterIds: sourceChapterIds,
       strictPattern: sectionShortages.length === 0,
       shortages: sectionShortages,
     },
@@ -3306,6 +3352,177 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : existing ? Boolean(existing.isPremiumOnly) : false,
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
   };
+}
+
+function padDatePart(value) {
+  return String(value).padStart(2, "0");
+}
+
+function formatLocalDateKey(date = new Date()) {
+  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
+}
+
+function formatLocalDateTimeForTitle(date = new Date()) {
+  return `${formatLocalDateKey(date)} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`;
+}
+
+function getDaysInMonth(date = new Date()) {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+}
+
+function normalizeGenerationTime(value) {
+  const raw = String(value || "").trim();
+  return /^\d{2}:\d{2}$/.test(raw) ? raw : DEFAULT_MOCK_GENERATION_SCHEDULE.generationTime;
+}
+
+function normalizeMockGenerationSchedulePayload(payload = {}, existing = {}) {
+  const recurrenceType = ["daily", "weekly", "monthly"].includes(String(payload.recurrenceType ?? existing.recurrenceType ?? "").toLowerCase())
+    ? String(payload.recurrenceType ?? existing.recurrenceType).toLowerCase()
+    : DEFAULT_MOCK_GENERATION_SCHEDULE.recurrenceType;
+  const weeklyDays = [...new Set((Array.isArray(payload.weeklyDays) ? payload.weeklyDays : existing.weeklyDays || DEFAULT_MOCK_GENERATION_SCHEDULE.weeklyDays)
+    .map((item) => String(item).toUpperCase())
+    .filter((item) => WEEKDAY_OPTIONS.includes(item)))];
+  return {
+    enabled: payload.enabled !== undefined ? Boolean(payload.enabled) : Boolean(existing.enabled ?? DEFAULT_MOCK_GENERATION_SCHEDULE.enabled),
+    recurrenceType,
+    weeklyDays: weeklyDays.length ? weeklyDays : DEFAULT_MOCK_GENERATION_SCHEDULE.weeklyDays,
+    monthlyDay: Math.max(1, Math.min(31, Number(payload.monthlyDay ?? existing.monthlyDay ?? DEFAULT_MOCK_GENERATION_SCHEDULE.monthlyDay))),
+    generationTime: normalizeGenerationTime(payload.generationTime ?? existing.generationTime),
+    timezone: "local",
+    examType: normalizeExamType(payload.examType ?? existing.examType ?? DEFAULT_MOCK_GENERATION_SCHEDULE.examType),
+    subjectIds: [...new Set((Array.isArray(payload.subjectIds) ? payload.subjectIds : existing.subjectIds || []).map(String).filter(Boolean))],
+    chapterIds: [...new Set((Array.isArray(payload.chapterIds) ? payload.chapterIds : existing.chapterIds || []).map(String).filter(Boolean))],
+    difficulty: String(payload.difficulty ?? existing.difficulty ?? DEFAULT_MOCK_GENERATION_SCHEDULE.difficulty).trim().toLowerCase() || "mixed",
+    questionCount: Math.max(0, Math.min(300, Number(payload.questionCount ?? existing.questionCount ?? 0))),
+    titlePrefix: String(payload.titlePrefix ?? existing.titlePrefix ?? DEFAULT_MOCK_GENERATION_SCHEDULE.titlePrefix).trim() || DEFAULT_MOCK_GENERATION_SCHEDULE.titlePrefix,
+  };
+}
+
+async function getOrCreateMockGenerationSchedule() {
+  const existing = await MockTestGenerationSchedule.findOne().sort({ createdAt: 1 });
+  if (existing) return existing;
+  return MockTestGenerationSchedule.create(DEFAULT_MOCK_GENERATION_SCHEDULE);
+}
+
+function serializeMockGenerationSchedule(doc) {
+  const raw = typeof doc?.toJSON === "function" ? doc.toJSON() : doc;
+  return {
+    id: String(raw?._id || raw?.id || ""),
+    enabled: Boolean(raw?.enabled),
+    recurrenceType: raw?.recurrenceType || DEFAULT_MOCK_GENERATION_SCHEDULE.recurrenceType,
+    weeklyDays: Array.isArray(raw?.weeklyDays) && raw.weeklyDays.length ? raw.weeklyDays : DEFAULT_MOCK_GENERATION_SCHEDULE.weeklyDays,
+    monthlyDay: Number(raw?.monthlyDay || DEFAULT_MOCK_GENERATION_SCHEDULE.monthlyDay),
+    generationTime: raw?.generationTime || DEFAULT_MOCK_GENERATION_SCHEDULE.generationTime,
+    timezone: raw?.timezone || "local",
+    examType: raw?.examType || DEFAULT_MOCK_GENERATION_SCHEDULE.examType,
+    subjectIds: Array.isArray(raw?.subjectIds) ? raw.subjectIds.map(String) : [],
+    chapterIds: Array.isArray(raw?.chapterIds) ? raw.chapterIds.map(String) : [],
+    difficulty: raw?.difficulty || "mixed",
+    questionCount: Number(raw?.questionCount || 0),
+    titlePrefix: raw?.titlePrefix || DEFAULT_MOCK_GENERATION_SCHEDULE.titlePrefix,
+    lastRunKey: raw?.lastRunKey || "",
+    lastRunAt: raw?.lastRunAt || null,
+  };
+}
+
+function getScheduleDueState(schedule, now = new Date()) {
+  const time = normalizeGenerationTime(schedule.generationTime);
+  const [hour, minute] = time.split(":").map(Number);
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const scheduledMinutes = hour * 60 + minute;
+  if (currentMinutes < scheduledMinutes) return { due: false, runKey: "" };
+
+  const dayKey = formatLocalDateKey(now);
+  if (schedule.recurrenceType === "daily") return { due: true, runKey: `daily:${dayKey}` };
+
+  if (schedule.recurrenceType === "weekly") {
+    const dayCode = WEEKDAY_OPTIONS[now.getDay()];
+    const allowedDays = Array.isArray(schedule.weeklyDays) && schedule.weeklyDays.length ? schedule.weeklyDays : DEFAULT_MOCK_GENERATION_SCHEDULE.weeklyDays;
+    return { due: allowedDays.includes(dayCode), runKey: `weekly:${dayKey}` };
+  }
+
+  const targetDay = Math.min(Number(schedule.monthlyDay || 1), getDaysInMonth(now));
+  const monthKey = `${now.getFullYear()}-${padDatePart(now.getMonth() + 1)}`;
+  return { due: now.getDate() === targetDay, runKey: `monthly:${monthKey}` };
+}
+
+async function runMockGenerationFromSchedule({ force = false, actorId = null } = {}) {
+  const scheduleDoc = await getOrCreateMockGenerationSchedule();
+  const schedule = serializeMockGenerationSchedule(scheduleDoc);
+  const now = new Date();
+  const dueState = getScheduleDueState(schedule, now);
+  const runKey = force ? `manual:${now.toISOString()}` : dueState.runKey;
+
+  if (!force && (!schedule.enabled || !dueState.due || schedule.lastRunKey === dueState.runKey)) {
+    return { skipped: true, reason: !schedule.enabled ? "disabled" : schedule.lastRunKey === dueState.runKey ? "already_run" : "not_due" };
+  }
+
+  const configSnapshot = { ...schedule, runKey };
+  try {
+    const title = `${schedule.titlePrefix} ${schedule.examType} ${formatLocalDateTimeForTitle(now)}`;
+    const payload = await buildAutoMockTestPayload(
+      {
+        title,
+        examType: schedule.examType,
+        subjectIds: schedule.subjectIds,
+        chapterIds: schedule.chapterIds,
+        difficulty: schedule.difficulty === "mixed" ? "" : schedule.difficulty,
+        questionCount: schedule.questionCount,
+        isPremiumOnly: true,
+        isActive: true,
+        autoDailyQuestionGeneration: true,
+      },
+      actorId,
+    );
+    const item = await MockTest.create(payload);
+    await MockTestGenerationLog.create({
+      generatedAt: now,
+      scheduleType: force ? "manual" : schedule.recurrenceType,
+      testName: item.title,
+      mockTestId: String(item._id),
+      status: "success",
+      message: "Mock test generated and published for premium users.",
+      configSnapshot,
+    });
+    scheduleDoc.lastRunKey = runKey;
+    scheduleDoc.lastRunAt = now;
+    await scheduleDoc.save();
+    return { skipped: false, status: "success", item };
+  } catch (error) {
+    await MockTestGenerationLog.create({
+      generatedAt: now,
+      scheduleType: force ? "manual" : schedule.recurrenceType,
+      testName: "",
+      status: "failed",
+      message: error?.message || "Mock test generation failed",
+      configSnapshot,
+    });
+    scheduleDoc.lastRunKey = runKey;
+    scheduleDoc.lastRunAt = now;
+    await scheduleDoc.save();
+    if (force) throw error;
+    return { skipped: false, status: "failed", error };
+  }
+}
+
+let mockSchedulerTimer = null;
+let mockSchedulerRunning = false;
+
+export function startMockTestGenerationScheduler() {
+  if (mockSchedulerTimer) return;
+  const tick = async () => {
+    if (mockSchedulerRunning) return;
+    mockSchedulerRunning = true;
+    try {
+      await runMockGenerationFromSchedule();
+    } catch (error) {
+      console.error("Automatic mock test scheduler failed", error);
+    } finally {
+      mockSchedulerRunning = false;
+    }
+  };
+  mockSchedulerTimer = setInterval(tick, MOCK_SCHEDULER_INTERVAL_MS);
+  void tick();
 }
 
 function normalizeModeKey(value) {
@@ -5050,6 +5267,54 @@ router.post(
         ...preview,
         previewOnly: true,
       },
+    });
+  }),
+);
+
+router.get(
+  "/mock-tests/generation-schedule",
+  asyncHandler(async (_req, res) => {
+    const schedule = await getOrCreateMockGenerationSchedule();
+    res.json({ success: true, data: serializeMockGenerationSchedule(schedule) });
+  }),
+);
+
+router.put(
+  "/mock-tests/generation-schedule",
+  asyncHandler(async (req, res) => {
+    const existing = await getOrCreateMockGenerationSchedule();
+    const payload = normalizeMockGenerationSchedulePayload(req.body || {}, existing);
+    Object.assign(existing, payload);
+    await existing.save();
+    res.json({ success: true, message: "Mock generation schedule saved", data: serializeMockGenerationSchedule(existing) });
+  }),
+);
+
+router.post(
+  "/mock-tests/generation-schedule/run-now",
+  asyncHandler(async (req, res) => {
+    const result = await runMockGenerationFromSchedule({ force: true, actorId: req.userId });
+    const data = result.item ? (await serializeMockTests([result.item]))[0] : null;
+    res.json({ success: true, message: "Premium mock test generated and published", data });
+  }),
+);
+
+router.get(
+  "/mock-tests/generation-logs",
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+    const logs = await MockTestGenerationLog.find().sort({ generatedAt: -1 }).limit(limit).lean();
+    res.json({
+      success: true,
+      data: logs.map((item) => ({
+        id: String(item._id),
+        generatedAt: item.generatedAt,
+        scheduleType: item.scheduleType,
+        testName: item.testName || "-",
+        mockTestId: item.mockTestId || "",
+        status: item.status,
+        message: item.message || "",
+      })),
     });
   }),
 );
