@@ -204,6 +204,19 @@ function actorSnapshot(admin) {
   };
 }
 
+function questionModificationFields(admin, modifiedAt = new Date()) {
+  const actor = actorSnapshot(admin);
+  return {
+    actor,
+    fields: {
+      lastModifiedById: actor.employeeId || undefined,
+      lastModifiedByName: actor.employeeName,
+      lastModifiedByEmail: actor.employeeEmail,
+      lastModifiedAt: modifiedAt,
+    },
+  };
+}
+
 function compactQuestionSnapshot(question) {
   if (!question) return null;
   const source = typeof question.toObject === "function" ? question.toObject({ depopulate: true }) : question;
@@ -235,8 +248,45 @@ function compactQuestionSnapshot(question) {
 }
 
 async function logQuestionActivity(action, questionId, previousValue, updatedValue, admin) {
+  const { actor, fields } = questionModificationFields(admin);
+  if (questionId && action === "create") {
+    await Question.findByIdAndUpdate(questionId, {
+      $set: {
+        createdById: actor.employeeId || undefined,
+        createdByName: actor.employeeName,
+        createdByEmail: actor.employeeEmail,
+        ...fields,
+        editCount: 0,
+      },
+    }).catch((error) => {
+      console.error("[AUDIT] Failed to update question create metadata", error);
+    });
+    if (updatedValue && typeof updatedValue === "object") {
+      Object.assign(updatedValue, {
+        createdById: actor.employeeId,
+        createdByName: actor.employeeName,
+        createdByEmail: actor.employeeEmail,
+        ...fields,
+        editCount: 0,
+      });
+    }
+  }
+  if (questionId && action === "edit") {
+    await Question.findByIdAndUpdate(questionId, {
+      $set: fields,
+      $inc: { editCount: 1 },
+    }).catch((error) => {
+      console.error("[AUDIT] Failed to update question edit metadata", error);
+    });
+    if (updatedValue && typeof updatedValue === "object") {
+      Object.assign(updatedValue, {
+        ...fields,
+        editCount: Number(updatedValue.editCount || 0) + 1,
+      });
+    }
+  }
   await AdminActivityLog.create({
-    ...actorSnapshot(admin),
+    ...actor,
     action,
     questionId: questionId || undefined,
     previousValue: compactQuestionSnapshot(previousValue),
@@ -424,6 +474,7 @@ router.get(
     const limit = Math.max(1, Math.min(100, Number(req.query.limit || 20)));
     const filters = {};
     if (mongoose.isValidObjectId(req.query.employeeId)) filters.employeeId = req.query.employeeId;
+    if (mongoose.isValidObjectId(req.query.questionId)) filters.questionId = req.query.questionId;
     if (req.query.action) filters.action = String(req.query.action);
     if (req.query.dateFrom || req.query.dateTo) {
       filters.createdAt = {};

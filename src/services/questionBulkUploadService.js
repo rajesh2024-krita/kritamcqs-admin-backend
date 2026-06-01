@@ -1341,10 +1341,27 @@ function compactQuestionSnapshot(question) {
 
 async function logBulkQuestionCreate(created, uploadedBy) {
   const actor = uploadedBy ? await User.findById(uploadedBy).select("name email").lean().catch(() => null) : null;
+  const modifiedAt = new Date();
+  const metadata = {
+    createdById: uploadedBy || undefined,
+    createdByName: actor?.name || "Administrator",
+    createdByEmail: actor?.email || "",
+    lastModifiedById: uploadedBy || undefined,
+    lastModifiedByName: actor?.name || "Administrator",
+    lastModifiedByEmail: actor?.email || "",
+    lastModifiedAt: modifiedAt,
+    editCount: 0,
+  };
+  if (created?._id) {
+    await Question.findByIdAndUpdate(created._id, { $set: metadata }).catch((error) => {
+      console.error("[AUDIT] Failed to update bulk question create metadata", error);
+    });
+  }
+  if (created && typeof created === "object") Object.assign(created, metadata);
   await AdminActivityLog.create({
     employeeId: uploadedBy || undefined,
-    employeeName: actor?.name || "Administrator",
-    employeeEmail: actor?.email || "",
+    employeeName: metadata.createdByName,
+    employeeEmail: metadata.createdByEmail,
     action: "create",
     questionId: created?._id,
     previousValue: null,
