@@ -22,8 +22,33 @@ export function isMainAdmin(admin) {
 export function hasEmployeePermission(admin, permission) {
   if (!admin?.isAdmin) return false;
   if (isMainAdmin(admin)) return true;
+  const modulePermissionMap = {
+    createQuestions: ["questions", "create"],
+    createManualQuestions: ["questions", "create"],
+    editQuestions: ["questions", "edit"],
+    deleteQuestions: ["questions", "delete"],
+    viewQuestions: ["questions", "view"],
+    bulkUploadQuestions: ["questions", "bulkUpload"],
+  };
+  const mapped = modulePermissionMap[permission];
+  if (mapped && admin.modulePermissions?.[mapped[0]]?.[mapped[1]] === true) return true;
   const aliases = QUESTION_PERMISSION_ALIASES[permission] || [permission];
   return aliases.some((key) => admin.employeePermissions?.[key] === true);
+}
+
+export function hasModulePermission(admin, moduleKey, action = "view") {
+  if (!admin?.isAdmin) return false;
+  if (isMainAdmin(admin)) return true;
+  const modulePermissions = admin.modulePermissions || {};
+  const modulePermission = modulePermissions[moduleKey] || {};
+  if (moduleKey === "questions") {
+    if (action === "view") return modulePermission.view === true || admin.employeePermissions?.viewQuestions === true;
+    if (action === "create") return modulePermission.create === true || admin.employeePermissions?.createQuestions === true || admin.employeePermissions?.createManualQuestions === true;
+    if (action === "edit") return modulePermission.edit === true || admin.employeePermissions?.editQuestions === true;
+    if (action === "delete") return modulePermission.delete === true || admin.employeePermissions?.deleteQuestions === true;
+    if (action === "bulkUpload") return modulePermission.bulkUpload === true || admin.employeePermissions?.bulkUploadQuestions === true;
+  }
+  return modulePermission[action] === true;
 }
 
 export async function requireAdmin(req, _res, next) {
@@ -69,6 +94,15 @@ export function requireQuestionPermission(permission) {
   return (req, _res, next) => {
     if (!hasEmployeePermission(req.admin, permission)) {
       return next(new AppError("You do not have permission to perform this question action", 403));
+    }
+    return next();
+  };
+}
+
+export function requireModulePermission(moduleKey, action = "view") {
+  return (req, _res, next) => {
+    if (!hasModulePermission(req.admin, moduleKey, action)) {
+      return next(new AppError("You do not have permission to access this module", 403));
     }
     return next();
   };

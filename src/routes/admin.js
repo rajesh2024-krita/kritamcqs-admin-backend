@@ -2,7 +2,7 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import { createCrudController } from "../controllers/crudController.js";
 import { dashboardController } from "../controllers/dashboardController.js";
-import { requireAdmin, requireMainAdmin, requireQuestionPermission } from "../middlewares/auth.js";
+import { requireAdmin, requireMainAdmin, requireModulePermission, requireQuestionPermission } from "../middlewares/auth.js";
 import { validate } from "../middlewares/validate.js";
 import {
   Chapter,
@@ -105,6 +105,13 @@ const employeeBodySchema = z.object({
     bulkUploadQuestions: z.boolean().optional().default(false),
     createManualQuestions: z.boolean().optional().default(false),
   }).optional().default({}),
+  modulePermissions: z.record(z.object({
+    view: z.boolean().optional().default(false),
+    create: z.boolean().optional().default(false),
+    edit: z.boolean().optional().default(false),
+    delete: z.boolean().optional().default(false),
+    bulkUpload: z.boolean().optional().default(false),
+  })).optional().default({}),
 });
 const employeeCreateSchema = z.object({ body: employeeBodySchema.extend({ password: z.string().min(8).max(128) }) });
 const employeeUpdateSchema = z.object({ body: employeeBodySchema.partial() });
@@ -116,6 +123,22 @@ const QUESTION_PERMISSION_MAP = {
   delete: "deleteQuestions",
   bulkDelete: "deleteQuestions",
   bulkUpload: "bulkUploadQuestions",
+};
+const CRUD_MODULE_KEYS = {
+  mode: "modes",
+  learningLevel: "learning-levels",
+  difficulty: "difficulties",
+  examType: "exam-types",
+  subject: "subjects",
+  chapter: "chapters",
+  topic: "topics",
+  year: "years",
+  questionType: "question-types",
+  question: "questions",
+  user: "users",
+  coupon: "coupons",
+  subscriptionPlan: "subscription-plans",
+  emailTemplate: "email-templates",
 };
 
 function isMainAdminAccount(admin) {
@@ -133,6 +156,30 @@ function sanitizeEmployeePermissions(input = {}) {
   };
 }
 
+function sanitizeModulePermissions(input = {}, employeePermissions = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const normalized = {};
+  Object.entries(source).forEach(([key, value]) => {
+    if (!key || !value || typeof value !== "object") return;
+    normalized[key] = {
+      view: Boolean(value.view),
+      create: Boolean(value.create),
+      edit: Boolean(value.edit),
+      delete: Boolean(value.delete),
+      bulkUpload: Boolean(value.bulkUpload),
+    };
+  });
+  if (!normalized.questions) normalized.questions = {};
+  normalized.questions = {
+    view: Boolean(normalized.questions.view || employeePermissions.viewQuestions),
+    create: Boolean(normalized.questions.create || employeePermissions.createQuestions || employeePermissions.createManualQuestions),
+    edit: Boolean(normalized.questions.edit || employeePermissions.editQuestions),
+    delete: Boolean(normalized.questions.delete || employeePermissions.deleteQuestions),
+    bulkUpload: Boolean(normalized.questions.bulkUpload || employeePermissions.bulkUploadQuestions),
+  };
+  return normalized;
+}
+
 function publicEmployee(user) {
   const json = typeof user?.toJSON === "function" ? user.toJSON() : user;
   return {
@@ -142,6 +189,7 @@ function publicEmployee(user) {
     isActive: json?.isActive !== false,
     adminRole: json?.adminRole || "employee",
     employeePermissions: sanitizeEmployeePermissions(json?.employeePermissions || {}),
+    modulePermissions: sanitizeModulePermissions(json?.modulePermissions || {}, json?.employeePermissions || {}),
     createdAt: json?.createdAt,
     updatedAt: json?.updatedAt,
     lastLoginAt: json?.lastLoginAt,
@@ -306,6 +354,7 @@ router.post(
       emailVerified: true,
       authTypes: ["email"],
       employeePermissions: sanitizeEmployeePermissions(payload.employeePermissions),
+      modulePermissions: sanitizeModulePermissions(payload.modulePermissions, payload.employeePermissions),
     });
     sendResponse(res, { status: 201, message: "Employee created successfully", data: publicEmployee(employee) });
   }),
@@ -331,6 +380,9 @@ router.put(
     if (payload.isActive !== undefined) employee.isActive = payload.isActive !== false;
     if (payload.employeePermissions !== undefined) {
       employee.employeePermissions = sanitizeEmployeePermissions(payload.employeePermissions);
+    }
+    if (payload.modulePermissions !== undefined || payload.employeePermissions !== undefined) {
+      employee.modulePermissions = sanitizeModulePermissions(payload.modulePermissions ?? employee.modulePermissions, payload.employeePermissions ?? employee.employeePermissions);
     }
     await employee.save();
     sendResponse(res, { message: "Employee updated successfully", data: publicEmployee(employee) });
@@ -5877,9 +5929,13 @@ router.delete(
 function createCrudRouter({ key, label, service }) {
   const route = Router();
   const controller = createCrudController(service, label);
-  const guard = (action) => key === "question"
-    ? [requireQuestionPermission(QUESTION_PERMISSION_MAP[action])]
-    : [];
+  const guard = (action) => {
+    if (key === "question") return [requireQuestionPermission(QUESTION_PERMISSION_MAP[action])];
+    const moduleKey = CRUD_MODULE_KEYS[key];
+    if (!moduleKey) return [];
+    const moduleAction = action === "list" || action === "get" ? "view" : action === "update" ? "edit" : action === "bulkDelete" ? "delete" : action;
+    return [requireModulePermission(moduleKey, moduleAction)];
+  };
 
   route.get("/", ...guard("list"), validate(listQuerySchema), asyncHandler(controller.list));
   route.post("/reorder", ...guard("update"), asyncHandler(async (req, res) => {

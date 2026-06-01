@@ -50,6 +50,7 @@ const userSchema = new Schema(
       bulkUploadQuestions: { type: Boolean, default: false },
       createManualQuestions: { type: Boolean, default: false },
     },
+    modulePermissions: { type: Schema.Types.Mixed, default: {} },
     migratedFromOldApp: { type: Boolean, default: false, index: true },
   },
   baseJsonOptions,
