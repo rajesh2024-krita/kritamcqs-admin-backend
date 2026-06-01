@@ -76,6 +76,7 @@ import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import crypto from "crypto";
 import puppeteer from "puppeteer";
+import * as XLSX from "xlsx";
 import { env } from "../config/env.js";
 import {
   deriveExamType,
@@ -118,6 +119,7 @@ const employeeUpdateSchema = z.object({ body: employeeBodySchema.partial() });
 const QUESTION_PERMISSION_MAP = {
   list: "viewQuestions",
   get: "viewQuestions",
+  export: "viewQuestions",
   create: "createManualQuestions",
   update: "editQuestions",
   delete: "deleteQuestions",
@@ -5345,6 +5347,95 @@ router.post(
   }),
 );
 
+function resolvePopulatedName(value) {
+  if (!value) return "";
+  if (typeof value === "object") return value.name || value.label || value.key || String(value._id || value.id || "");
+  return String(value);
+}
+
+function flattenQuestionForExport(item = {}) {
+  const row = {
+    id: String(item._id || item.id || ""),
+    examType: item.examType || deriveExamType(item.examMode, item.exam),
+    examMode: item.examMode || "",
+    exam: item.exam || "",
+    subject: resolvePopulatedName(item.subjectId),
+    subjectId: String(item.subjectId?._id || item.subjectId || ""),
+    chapter: resolvePopulatedName(item.chapterId),
+    chapterId: String(item.chapterId?._id || item.chapterId || ""),
+    topic: resolvePopulatedName(item.topicId),
+    topicId: String(item.topicId?._id || item.topicId || ""),
+    year: resolvePopulatedName(item.yearId),
+    difficulty: resolvePopulatedName(item.difficultyId) || item.difficulty || "",
+    questionType: resolvePopulatedName(item.questionTypeId),
+    responseType: item.responseType || "",
+    question: item.question || "",
+    questionImageUrl: item.questionImageUrl || "",
+    optionA: item.optionA || "",
+    optionAImageUrl: item.optionAImageUrl || "",
+    optionB: item.optionB || "",
+    optionBImageUrl: item.optionBImageUrl || "",
+    optionC: item.optionC || "",
+    optionCImageUrl: item.optionCImageUrl || "",
+    optionD: item.optionD || "",
+    optionDImageUrl: item.optionDImageUrl || "",
+    correctOption: item.correctOption || "",
+    correctOptions: Array.isArray(item.correctOptions) ? item.correctOptions.join("|") : "",
+    numericAnswer: item.numericAnswer || "",
+    explanation: item.explanation || "",
+    explanationImageUrl: item.explanationImageUrl || "",
+    conceptTags: Array.isArray(item.conceptTags) ? item.conceptTags.join("|") : "",
+    exact: item.exact === true,
+    hasDiagram: item.hasDiagram === true,
+    isNumerical: item.isNumerical === true,
+    questionStatus: item.questionStatus || "",
+    reviewStatus: item.reviewStatus || "",
+    isVisibleToUsers: item.isVisibleToUsers !== false,
+    createdAt: item.createdAt ? new Date(item.createdAt).toISOString() : "",
+    updatedAt: item.updatedAt ? new Date(item.updatedAt).toISOString() : "",
+  };
+
+  Object.entries(item.extraFields || {}).forEach(([key, value]) => {
+    row[`extra_${key}`] = Array.isArray(value) ? value.join("|") : value;
+  });
+
+  return row;
+}
+
+function sendQuestionExport(res, rows, format) {
+  const normalizedFormat = String(format || "csv").toLowerCase() === "xlsx" ? "xlsx" : "csv";
+  const timestamp = new Date().toISOString().slice(0, 10);
+  const filename = `questions-${timestamp}.${normalizedFormat}`;
+
+  if (normalizedFormat === "xlsx") {
+    const worksheet = XLSX.utils.json_to_sheet(rows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Questions");
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(buffer);
+    return;
+  }
+
+  const worksheet = XLSX.utils.json_to_sheet(rows);
+  const csv = XLSX.utils.sheet_to_csv(worksheet);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+  res.send(csv);
+}
+
+router.get(
+  "/questions/export",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.export),
+  asyncHandler(async (req, res) => {
+    const scope = String(req.query.scope || "filtered").toLowerCase();
+    const exportQuery = scope === "all" ? {} : req.query;
+    const { items } = await questionService.listAll(exportQuery);
+    sendQuestionExport(res, items.map(flattenQuestionForExport), req.query.format);
+  }),
+);
+
 router.post(
   "/questions/bulk-upload/validate",
   requireQuestionPermission(QUESTION_PERMISSION_MAP.bulkUpload),
@@ -5353,6 +5444,7 @@ router.post(
     const data = await questionBulkUploadService.validateFile({
       sheetFile: req.files?.sheet?.[0],
       uploadedBy: req.admin?._id,
+      uploadMode: req.body?.uploadMode,
     });
     res.json({ success: true, message: "Bulk upload validation completed", data });
   }),
@@ -5398,6 +5490,7 @@ router.post(
     const data = await questionBulkUploadService.approve({
       batchId: req.params.batchId,
       uploadAnyway: req.body?.uploadAnyway === true,
+      updateExisting: req.body?.updateExisting === true,
     });
     res.status(202).json({ success: true, message: req.body?.uploadAnyway === true ? "Bulk upload approved with incomplete rows" : "Bulk upload approved and processing started", data });
   }),

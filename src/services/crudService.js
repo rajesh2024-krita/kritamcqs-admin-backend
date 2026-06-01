@@ -39,6 +39,17 @@ export function createCrudService(config) {
       return { items, meta: buildPaginationMeta(total, page, limit) };
     },
 
+    async listAll(query = {}) {
+      const { filters, sort } = buildListOptions({ ...query, page: 1, limit: 500 }, {
+        allowedSorts,
+        exactFilters,
+        searchFields,
+      });
+
+      const items = await model.find(filters).populate(populate).sort(sort).lean();
+      return { items, filters };
+    },
+
     async getById(id) {
       assertObjectId(id);
       const item = await model.findById(id).populate(populate);

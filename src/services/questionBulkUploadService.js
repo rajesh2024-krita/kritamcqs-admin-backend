@@ -26,6 +26,7 @@ import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName
 
 const REQUIRED_HEADERS = ["question", "subject", "chapter", "topic", "difficulty", "exam_type", "year"];
 const IMAGE_FIELDS = ["questionImageUrl", "optionAImageUrl", "optionBImageUrl", "optionCImageUrl", "optionDImageUrl", "explanationImageUrl"];
+const BULK_UPLOAD_MODES = new Set(["upload", "update"]);
 const HEADER_ALIASES = {
   question: ["question", "question_text", "question_title", "question_statement"],
   question_image: ["question_image", "question_image_url", "questionimage", "questionimageurl", "image", "image_url", "diagram", "diagram_url", "question_diagram", "question_media", "question_media_url"],
@@ -72,6 +73,11 @@ const INCOMPLETE_UPLOAD_WARNINGS = new Set([
 
 function normalizeHeader(value) {
   return String(value ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function normalizeUploadMode(value) {
+  const normalized = normalizeHeader(value);
+  return BULK_UPLOAD_MODES.has(normalized) ? normalized : "upload";
 }
 
 function normalizeText(value) {
@@ -618,6 +624,19 @@ function resolveHeaderMap(headers) {
   return { map, missing };
 }
 
+function collectExtraFields(source = {}, headers = [], map = {}) {
+  const mappedHeaders = new Set(Object.values(map).filter(Boolean).map(normalizeHeader));
+  const extra = {};
+  headers.forEach((header) => {
+    const key = normalizeHeader(header);
+    if (!key || mappedHeaders.has(key) || key.startsWith("__")) return;
+    const value = source[header];
+    if (normalizeText(value) === "") return;
+    extra[key] = value;
+  });
+  return extra;
+}
+
 function detectAndHandleImageMCQRows(row, headers, map) {
   // Check if this is an image-based MCQ row
   const hasImageColumns = map.question_image && row[map.question_image];
@@ -765,6 +784,12 @@ async function parseSheet(sheetFile) {
       isNumerical: row.isNumerical ?? row.is_numerical ?? "",
       exact: row.exact ?? "",
       videoUrl: row.videoUrl ?? row.video_url ?? "",
+      extraFields: Object.fromEntries(
+        Object.entries(row)
+          .filter(([key, value]) => !key.startsWith("__") && normalizeText(value) !== "")
+          .filter(([key]) => !Object.values(HEADER_ALIASES).flat().map(normalizeHeader).includes(normalizeHeader(key)))
+          .map(([key, value]) => [normalizeHeader(key), value]),
+      ),
     }));
   }
 
@@ -834,6 +859,7 @@ async function parseSheet(sheetFile) {
         isNumerical: map.is_numerical ? row[map.is_numerical] : "",
         exact: map.exact ? row[map.exact] : "",
         videoUrl: map.video_url ? row[map.video_url] : "",
+        extraFields: collectExtraFields(row, headers, map),
       };
       parsed = mergeEmbeddedImages(parsed, {
         rowNumber: row.__excelRowNumber,
@@ -1024,6 +1050,7 @@ function buildQuestionPayload(raw, matches) {
     reviewStatus: isIncomplete ? "needs_review" : "ready",
     isVisibleToUsers: !isIncomplete,
     uploadWarnings,
+    extraFields: raw.extraFields && typeof raw.extraFields === "object" ? raw.extraFields : {},
   };
 }
 
@@ -1212,6 +1239,8 @@ async function buildPreview(batchId) {
 }
 
 async function validateRowsForBatch(batchId, catalog) {
+  const batch = await QuestionBulkUploadBatch.findById(batchId).select("uploadMode").lean();
+  const uploadMode = normalizeUploadMode(batch?.uploadMode);
   const rows = await QuestionBulkUploadRow.find({ batchId }).sort({ rowNumber: 1 });
   const seenKeys = new Set();
   for (const row of rows) {
@@ -1227,7 +1256,9 @@ async function validateRowsForBatch(batchId, catalog) {
     let existingQuestion = null;
     if (!errors.length && validation.payload) {
       existingQuestion = await Question.findOne(buildDuplicateQuery(validation.payload)).select("_id exact").lean();
-      if (existingQuestion && normalizeStoredExact(existingQuestion.exact) === normalizeStoredExact(validation.payload.exact)) {
+      if (existingQuestion && uploadMode === "update") {
+        warnings.push("Existing question will be updated");
+      } else if (existingQuestion && normalizeStoredExact(existingQuestion.exact) === normalizeStoredExact(validation.payload.exact)) {
         errors.push("Duplicate Question");
       }
     }
@@ -1370,6 +1401,35 @@ async function logBulkQuestionCreate(created, uploadedBy) {
     console.error("[AUDIT] Failed to write bulk question activity log", error);
   });
 }
+
+async function logBulkQuestionEdit(previous, updated, uploadedBy) {
+  const actor = uploadedBy ? await User.findById(uploadedBy).select("name email").lean().catch(() => null) : null;
+  const modifiedAt = new Date();
+  const metadata = {
+    lastModifiedById: uploadedBy || undefined,
+    lastModifiedByName: actor?.name || "Administrator",
+    lastModifiedByEmail: actor?.email || "",
+    lastModifiedAt: modifiedAt,
+    editCount: Number(updated?.editCount || 0) + 1,
+  };
+  if (updated?._id) {
+    await Question.findByIdAndUpdate(updated._id, { $set: metadata }).catch((error) => {
+      console.error("[AUDIT] Failed to update bulk question edit metadata", error);
+    });
+  }
+  if (updated && typeof updated === "object") Object.assign(updated, metadata);
+  await AdminActivityLog.create({
+    employeeId: uploadedBy || undefined,
+    employeeName: metadata.lastModifiedByName,
+    employeeEmail: metadata.lastModifiedByEmail,
+    action: "edit",
+    questionId: updated?._id,
+    previousValue: compactQuestionSnapshot(previous),
+    updatedValue: compactQuestionSnapshot(updated),
+  }).catch((error) => {
+    console.error("[AUDIT] Failed to write bulk question edit activity log", error);
+  });
+}
 const NEW_COLUMN_DEFAULTS = {
   exact: false,
 };
@@ -1494,6 +1554,7 @@ async function updateNewColumnValuesForBatch(batchId) {
 async function processApprovalJob(batchId) {
   const batch = await QuestionBulkUploadBatch.findById(batchId);
   if (!batch) throw new AppError("Upload batch not found", 404);
+  const uploadMode = normalizeUploadMode(batch.uploadMode);
 
   batch.status = "processing";
   batch.startedAt = batch.startedAt || new Date();
@@ -1525,8 +1586,21 @@ async function processApprovalJob(batchId) {
           uploadedImageCount += owned.uploadedImageCount;
           row.uploadedImageCount = owned.uploadedImageCount;
 
-          const existing = await Question.findOne(buildDuplicateQuery(payload)).select("_id exact");
+          const existing = await Question.findOne(buildDuplicateQuery(payload));
           if (existing) {
+            if (uploadMode === "update") {
+              const previous = existing.toObject({ depopulate: true });
+              Object.assign(existing, payload);
+              await existing.save();
+              await logBulkQuestionEdit(previous, existing, batch.uploadedBy);
+              row.status = "approved";
+              row.uploadedQuestionId = existing._id;
+              row.errorMessage = "";
+              inserted += 1;
+              await row.save();
+              lastError = null;
+              break;
+            }
             if (normalizeStoredExact(existing.exact) !== normalizeStoredExact(payload.exact)) {
               existing.exact = normalizeStoredExact(payload.exact);
               await existing.save();
@@ -1590,11 +1664,12 @@ async function processApprovalJob(batchId) {
 }
 
 export const questionBulkUploadService = {
-  async validateFile({ sheetFile, uploadedBy }) {
+  async validateFile({ sheetFile, uploadedBy, uploadMode = "upload" }) {
     const parsedRows = await parseSheet(sheetFile);
     const batch = await QuestionBulkUploadBatch.create({
       fileName: sheetFile.originalname || "questions-upload",
       uploadedBy: uploadedBy || undefined,
+      uploadMode: normalizeUploadMode(uploadMode),
       status: "validating",
       totalRows: parsedRows.length,
       batchSize: APPROVAL_CHUNK_SIZE,
@@ -1634,10 +1709,14 @@ export const questionBulkUploadService = {
     return { ...preview, newColumnUpdateSummary: summary };
   },
 
-  async approve({ batchId }) {
+  async approve({ batchId, updateExisting = false }) {
     if (!mongoose.isValidObjectId(batchId)) throw new AppError("Invalid upload batch", 400);
     const batch = await QuestionBulkUploadBatch.findById(batchId);
     if (!batch) throw new AppError("Upload batch not found", 404);
+    if (updateExisting && batch.uploadMode !== "update") {
+      batch.uploadMode = "update";
+      await batch.save();
+    }
 
     await ensureCategoriesCreatedForBatch(batchId);
     const rows = await QuestionBulkUploadRow.find({ batchId }).lean();

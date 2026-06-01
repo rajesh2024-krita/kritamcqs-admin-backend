@@ -28,6 +28,7 @@ export const listQuerySchema = z.object({
     questionStatus: z.string().optional(),
     reviewStatus: z.string().optional(),
     isVisibleToUsers: z.string().optional(),
+    exact: z.string().optional(),
     displayVariant: z.string().optional(),
     isPremium: z.string().optional(),
     isAdmin: z.string().optional(),
@@ -177,6 +178,7 @@ export const questionBodySchema = z.object({
   reviewStatus: z.enum(["ready", "needs_review"]).optional().default("ready"),
   isVisibleToUsers: z.boolean().optional().default(true),
   uploadWarnings: z.array(z.string()).optional().default([]),
+  extraFields: z.record(z.any()).optional().default({}),
 }).superRefine((value, ctx) => {
   const allowIncomplete = value.questionStatus === "incomplete" || value.reviewStatus === "needs_review" || value.isVisibleToUsers === false;
   const isNumeric = value.responseType === "numeric" || value.isNumerical === true;
@@ -247,6 +249,7 @@ export const questionUpdateBodySchema = z.object({
   reviewStatus: z.enum(["ready", "needs_review"]).optional(),
   isVisibleToUsers: z.boolean().optional(),
   uploadWarnings: z.array(z.string()).optional(),
+  extraFields: z.record(z.any()).optional(),
 }).superRefine((value, ctx) => {
   const allowIncomplete = value.questionStatus === "incomplete" || value.reviewStatus === "needs_review" || value.isVisibleToUsers === false;
   const isNumeric = value.responseType === "numeric" || value.isNumerical === true;

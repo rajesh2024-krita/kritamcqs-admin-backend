@@ -37,6 +37,7 @@ const questionSchema = new Schema(
     reviewStatus: { type: String, enum: ["ready", "needs_review"], default: "ready", index: true },
     isVisibleToUsers: { type: Boolean, default: true, index: true },
     uploadWarnings: { type: [String], default: [] },
+    extraFields: { type: Schema.Types.Mixed, default: {} },
     createdById: { type: Types.ObjectId, ref: "User", index: true },
     createdByName: { type: String, trim: true },
     createdByEmail: { type: String, trim: true, lowercase: true },
