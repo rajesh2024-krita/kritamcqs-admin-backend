@@ -18,8 +18,13 @@ export const adminAuthController = {
   },
 
   async login(req, res) {
-    const data = await authService.login(req.validated.body);
+    const data = await authService.login(req.validated.body, req);
     sendResponse(res, { message: "Login successful", data });
+  },
+
+  async logout(req, res) {
+    const data = await authService.logout(req.admin, req.auth?.sessionId);
+    sendResponse(res, { message: "Logout successful", data });
   },
 
   async me(req, res) {

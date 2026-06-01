@@ -18,6 +18,9 @@ export function createCrudService(config) {
     beforeCreate,
     beforeUpdate,
     beforeDelete,
+    afterCreate,
+    afterUpdate,
+    afterDelete,
   } = config;
 
   return {
@@ -43,32 +46,39 @@ export function createCrudService(config) {
       return item;
     },
 
-    async create(payload) {
-      const input = beforeCreate ? await beforeCreate(payload) : payload;
+    async create(payload, context = {}) {
+      const input = beforeCreate ? await beforeCreate(payload, context) : payload;
       const item = await model.create(input);
-      return this.getById(item._id.toString());
+      const created = await this.getById(item._id.toString());
+      if (afterCreate) await afterCreate(created, context);
+      return created;
     },
 
-    async update(id, payload) {
+    async update(id, payload, context = {}) {
       assertObjectId(id);
       const existing = await model.findById(id);
       if (!existing) throw new AppError(`${model.modelName} not found`, 404);
-      const input = beforeUpdate ? await beforeUpdate(existing, payload) : payload;
+      const previous = existing.toObject({ depopulate: true });
+      const input = beforeUpdate ? await beforeUpdate(existing, payload, context) : payload;
       Object.assign(existing, input);
       await existing.save();
-      return this.getById(id);
+      const updated = await this.getById(id);
+      if (afterUpdate) await afterUpdate(previous, updated, context);
+      return updated;
     },
 
-    async remove(id) {
+    async remove(id, context = {}) {
       assertObjectId(id);
       const existing = await model.findById(id);
       if (!existing) throw new AppError(`${model.modelName} not found`, 404);
-      if (beforeDelete) await beforeDelete(existing);
+      const previous = existing.toObject({ depopulate: true });
+      if (beforeDelete) await beforeDelete(existing, context);
       await existing.deleteOne();
+      if (afterDelete) await afterDelete(previous, context);
       return existing;
     },
 
-    async removeMany(ids = []) {
+    async removeMany(ids = [], context = {}) {
       const uniqueIds = [...new Set(ids.map((id) => String(id || "").trim()).filter(Boolean))];
       if (!uniqueIds.length) {
         throw new AppError("Select at least one record to delete", 400);
@@ -79,7 +89,7 @@ export function createCrudService(config) {
       const results = [];
       for (const id of uniqueIds) {
         try {
-          await this.remove(id);
+          await this.remove(id, context);
           results.push({ id, success: true });
         } catch (error) {
           results.push({ id, success: false, message: error.message || "Delete failed" });

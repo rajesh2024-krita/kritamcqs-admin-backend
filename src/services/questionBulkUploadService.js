@@ -7,6 +7,7 @@ import zlib from "zlib";
 import * as XLSX from "xlsx";
 import {
   Chapter,
+  AdminActivityLog,
   Difficulty,
   ExamType,
   Question,
@@ -15,6 +16,7 @@ import {
   QuestionType,
   Subject,
   Topic,
+  User,
   Year,
 } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
@@ -1314,6 +1316,43 @@ async function createQuestionTypeIfMissing(catalog, raw, examType) {
 
 const APPROVAL_CHUNK_SIZE = 200;
 const activeApprovalJobs = new Set();
+
+function compactQuestionSnapshot(question) {
+  const source = typeof question?.toObject === "function" ? question.toObject({ depopulate: true }) : question;
+  if (!source) return null;
+  return {
+    id: String(source._id || source.id || ""),
+    examType: source.examType,
+    subjectId: source.subjectId ? String(source.subjectId) : undefined,
+    chapterId: source.chapterId ? String(source.chapterId) : undefined,
+    topicId: source.topicId ? String(source.topicId) : undefined,
+    question: source.question,
+    optionA: source.optionA,
+    optionB: source.optionB,
+    optionC: source.optionC,
+    optionD: source.optionD,
+    correctOption: source.correctOption,
+    numericAnswer: source.numericAnswer,
+    explanation: source.explanation,
+    responseType: source.responseType,
+    questionStatus: source.questionStatus,
+  };
+}
+
+async function logBulkQuestionCreate(created, uploadedBy) {
+  const actor = uploadedBy ? await User.findById(uploadedBy).select("name email").lean().catch(() => null) : null;
+  await AdminActivityLog.create({
+    employeeId: uploadedBy || undefined,
+    employeeName: actor?.name || "Administrator",
+    employeeEmail: actor?.email || "",
+    action: "create",
+    questionId: created?._id,
+    previousValue: null,
+    updatedValue: compactQuestionSnapshot(created),
+  }).catch((error) => {
+    console.error("[AUDIT] Failed to write bulk question activity log", error);
+  });
+}
 const NEW_COLUMN_DEFAULTS = {
   exact: false,
 };
@@ -1491,6 +1530,7 @@ async function processApprovalJob(batchId) {
           }
 
           const created = await Question.create(payload);
+          await logBulkQuestionCreate(created, batch.uploadedBy);
           row.status = "approved";
           row.uploadedQuestionId = created._id;
           row.errorMessage = "";

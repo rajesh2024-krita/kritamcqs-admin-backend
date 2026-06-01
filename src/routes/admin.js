@@ -2,12 +2,14 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import { createCrudController } from "../controllers/crudController.js";
 import { dashboardController } from "../controllers/dashboardController.js";
-import { requireAdmin } from "../middlewares/auth.js";
+import { requireAdmin, requireMainAdmin, requireQuestionPermission } from "../middlewares/auth.js";
 import { validate } from "../middlewares/validate.js";
 import {
   Chapter,
   ChapterPerformance,
   AuthSettings,
+  AdminActivityLog,
+  AdminLoginHistory,
   Topic,
   Coupon,
   DailyAssignment,
@@ -90,6 +92,111 @@ const invoiceRenderViewportWidth = Math.max(600, Math.min(1800, Number(process.e
 const invoiceRenderScale = Math.max(1, Math.min(3, Number(process.env.INVOICE_RENDER_SCALE || 2)));
 const invoiceRenderTimeoutMs = Math.max(30000, Math.min(180000, Number(process.env.INVOICE_RENDER_TIMEOUT_MS || 90000)));
 const invoiceAssetTimeoutMs = Math.max(3000, Math.min(30000, Number(process.env.INVOICE_ASSET_TIMEOUT_MS || 10000)));
+const employeeBodySchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  email: z.string().trim().email().max(180),
+  password: z.string().min(8).max(128).optional(),
+  isActive: z.boolean().optional().default(true),
+  employeePermissions: z.object({
+    createQuestions: z.boolean().optional().default(false),
+    editQuestions: z.boolean().optional().default(false),
+    deleteQuestions: z.boolean().optional().default(false),
+    viewQuestions: z.boolean().optional().default(false),
+    bulkUploadQuestions: z.boolean().optional().default(false),
+    createManualQuestions: z.boolean().optional().default(false),
+  }).optional().default({}),
+});
+const employeeCreateSchema = z.object({ body: employeeBodySchema.extend({ password: z.string().min(8).max(128) }) });
+const employeeUpdateSchema = z.object({ body: employeeBodySchema.partial() });
+const QUESTION_PERMISSION_MAP = {
+  list: "viewQuestions",
+  get: "viewQuestions",
+  create: "createManualQuestions",
+  update: "editQuestions",
+  delete: "deleteQuestions",
+  bulkDelete: "deleteQuestions",
+  bulkUpload: "bulkUploadQuestions",
+};
+
+function isMainAdminAccount(admin) {
+  return admin?.adminRole !== "employee";
+}
+
+function sanitizeEmployeePermissions(input = {}) {
+  return {
+    createQuestions: Boolean(input.createQuestions),
+    editQuestions: Boolean(input.editQuestions),
+    deleteQuestions: Boolean(input.deleteQuestions),
+    viewQuestions: Boolean(input.viewQuestions),
+    bulkUploadQuestions: Boolean(input.bulkUploadQuestions),
+    createManualQuestions: Boolean(input.createManualQuestions),
+  };
+}
+
+function publicEmployee(user) {
+  const json = typeof user?.toJSON === "function" ? user.toJSON() : user;
+  return {
+    id: String(json?.id || json?._id || ""),
+    name: json?.name || "",
+    email: json?.email || "",
+    isActive: json?.isActive !== false,
+    adminRole: json?.adminRole || "employee",
+    employeePermissions: sanitizeEmployeePermissions(json?.employeePermissions || {}),
+    createdAt: json?.createdAt,
+    updatedAt: json?.updatedAt,
+    lastLoginAt: json?.lastLoginAt,
+  };
+}
+
+function actorSnapshot(admin) {
+  return {
+    employeeId: admin?._id,
+    employeeName: admin?.name || "Administrator",
+    employeeEmail: admin?.email || "",
+  };
+}
+
+function compactQuestionSnapshot(question) {
+  if (!question) return null;
+  const source = typeof question.toObject === "function" ? question.toObject({ depopulate: true }) : question;
+  return {
+    id: String(source._id || source.id || ""),
+    examType: source.examType,
+    subjectId: source.subjectId ? String(source.subjectId) : undefined,
+    chapterId: source.chapterId ? String(source.chapterId) : undefined,
+    topicId: source.topicId ? String(source.topicId) : undefined,
+    yearId: source.yearId ? String(source.yearId) : undefined,
+    difficultyId: source.difficultyId ? String(source.difficultyId) : undefined,
+    questionTypeId: source.questionTypeId ? String(source.questionTypeId) : undefined,
+    question: source.question,
+    passage: source.passage,
+    optionA: source.optionA,
+    optionB: source.optionB,
+    optionC: source.optionC,
+    optionD: source.optionD,
+    correctOption: source.correctOption,
+    correctOptions: source.correctOptions,
+    numericAnswer: source.numericAnswer,
+    explanation: source.explanation,
+    responseType: source.responseType,
+    questionStatus: source.questionStatus,
+    reviewStatus: source.reviewStatus,
+    isVisibleToUsers: source.isVisibleToUsers,
+    updatedAt: source.updatedAt,
+  };
+}
+
+async function logQuestionActivity(action, questionId, previousValue, updatedValue, admin) {
+  await AdminActivityLog.create({
+    ...actorSnapshot(admin),
+    action,
+    questionId: questionId || undefined,
+    previousValue: compactQuestionSnapshot(previousValue),
+    updatedValue: compactQuestionSnapshot(updatedValue),
+  }).catch((error) => {
+    console.error("[AUDIT] Failed to write question activity log", error);
+  });
+}
 
 function renderTemplate(template, values) {
   return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
@@ -150,6 +257,177 @@ function buildDefaultHtmlBody(textContent) {
     : "This email contains no HTML content.";
   return `<html><body><div style="font-family:Arial,Helvetica,sans-serif;color:#111;font-size:14px;line-height:1.5;">${safeText}</div></body></html>`;
 }
+
+router.get(
+  "/employees",
+  requireMainAdmin,
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit || 20)));
+    const search = String(req.query.search || "").trim();
+    const filters = { isAdmin: true, adminRole: "employee" };
+    if (search) {
+      filters.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { email: { $regex: search, $options: "i" } },
+      ];
+    }
+    if (req.query.isActive !== undefined && req.query.isActive !== "") {
+      filters.isActive = String(req.query.isActive) === "true";
+    }
+    const [items, total] = await Promise.all([
+      User.find(filters).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
+      User.countDocuments(filters),
+    ]);
+    sendResponse(res, {
+      data: items.map(publicEmployee),
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.post(
+  "/employees",
+  requireMainAdmin,
+  validate(employeeCreateSchema),
+  asyncHandler(async (req, res) => {
+    const payload = req.validated.body;
+    const email = payload.email.trim().toLowerCase();
+    const existing = await User.findOne({ email });
+    if (existing) throw new AppError("An employee with this email already exists", 409);
+    const employee = await User.create({
+      name: payload.name.trim(),
+      email,
+      passwordHash: hashPassword(payload.password),
+      isAdmin: true,
+      adminRole: "employee",
+      isActive: payload.isActive !== false,
+      onboardingComplete: true,
+      emailVerified: true,
+      authTypes: ["email"],
+      employeePermissions: sanitizeEmployeePermissions(payload.employeePermissions),
+    });
+    sendResponse(res, { status: 201, message: "Employee created successfully", data: publicEmployee(employee) });
+  }),
+);
+
+router.put(
+  "/employees/:id",
+  requireMainAdmin,
+  validate(employeeUpdateSchema),
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid employee id", 400);
+    const employee = await User.findOne({ _id: req.params.id, isAdmin: true, adminRole: "employee" });
+    if (!employee) throw new AppError("Employee not found", 404);
+    const payload = req.validated.body;
+    if (payload.email !== undefined) {
+      const email = payload.email.trim().toLowerCase();
+      const duplicate = await User.findOne({ email, _id: { $ne: employee._id } });
+      if (duplicate) throw new AppError("An employee with this email already exists", 409);
+      employee.email = email;
+    }
+    if (payload.name !== undefined) employee.name = payload.name.trim();
+    if (payload.password) employee.passwordHash = hashPassword(payload.password);
+    if (payload.isActive !== undefined) employee.isActive = payload.isActive !== false;
+    if (payload.employeePermissions !== undefined) {
+      employee.employeePermissions = sanitizeEmployeePermissions(payload.employeePermissions);
+    }
+    await employee.save();
+    sendResponse(res, { message: "Employee updated successfully", data: publicEmployee(employee) });
+  }),
+);
+
+router.post(
+  "/employees/:id/deactivate",
+  requireMainAdmin,
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid employee id", 400);
+    const employee = await User.findOneAndUpdate(
+      { _id: req.params.id, isAdmin: true, adminRole: "employee" },
+      { isActive: false },
+      { new: true },
+    );
+    if (!employee) throw new AppError("Employee not found", 404);
+    sendResponse(res, { message: "Employee deactivated successfully", data: publicEmployee(employee) });
+  }),
+);
+
+router.delete(
+  "/employees/:id",
+  requireMainAdmin,
+  asyncHandler(async (req, res) => {
+    if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid employee id", 400);
+    const employee = await User.findOne({ _id: req.params.id, isAdmin: true, adminRole: "employee" });
+    if (!employee) throw new AppError("Employee not found", 404);
+    await employee.deleteOne();
+    sendResponse(res, { message: "Employee deleted successfully" });
+  }),
+);
+
+router.get(
+  "/question-activity-logs",
+  requireMainAdmin,
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit || 20)));
+    const filters = {};
+    if (mongoose.isValidObjectId(req.query.employeeId)) filters.employeeId = req.query.employeeId;
+    if (req.query.action) filters.action = String(req.query.action);
+    if (req.query.dateFrom || req.query.dateTo) {
+      filters.createdAt = {};
+      if (req.query.dateFrom) filters.createdAt.$gte = new Date(String(req.query.dateFrom));
+      if (req.query.dateTo) filters.createdAt.$lte = new Date(String(req.query.dateTo));
+    }
+    const search = String(req.query.search || "").trim();
+    if (search) {
+      filters.$or = [
+        { employeeName: { $regex: search, $options: "i" } },
+        { employeeEmail: { $regex: search, $options: "i" } },
+      ];
+    }
+    const [items, total] = await Promise.all([
+      AdminActivityLog.find(filters).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit),
+      AdminActivityLog.countDocuments(filters),
+    ]);
+    sendResponse(res, {
+      data: items,
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
+
+router.get(
+  "/login-history",
+  requireMainAdmin,
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.max(1, Math.min(100, Number(req.query.limit || 20)));
+    const filters = {};
+    if (mongoose.isValidObjectId(req.query.employeeId)) filters.adminId = req.query.employeeId;
+    if (req.query.loginStatus) filters.loginStatus = String(req.query.loginStatus);
+    if (req.query.dateFrom || req.query.dateTo) {
+      filters.loginTime = {};
+      if (req.query.dateFrom) filters.loginTime.$gte = new Date(String(req.query.dateFrom));
+      if (req.query.dateTo) filters.loginTime.$lte = new Date(String(req.query.dateTo));
+    }
+    const search = String(req.query.search || "").trim();
+    if (search) {
+      filters.$or = [
+        { employeeName: { $regex: search, $options: "i" } },
+        { employeeEmail: { $regex: search, $options: "i" } },
+        { ipAddress: { $regex: search, $options: "i" } },
+      ];
+    }
+    const [items, total] = await Promise.all([
+      AdminLoginHistory.find(filters).sort({ loginTime: -1 }).skip((page - 1) * limit).limit(limit),
+      AdminLoginHistory.countDocuments(filters),
+    ]);
+    sendResponse(res, {
+      data: items,
+      meta: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  }),
+);
 
 async function sendTemplatedEmail(templateKey, to, variables, attachments = []) {
   const template = await EmailTemplate.findOne({ key: templateKey });
@@ -4911,6 +5189,7 @@ router.get(
 );
 router.post(
   "/questions/upload-asset",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.create),
   upload.single("image"),
   asyncHandler(async (req, res) => {
     if (!req.file) {
@@ -4944,6 +5223,7 @@ router.post(
 
 router.post(
   "/questions/own-asset-url",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.create),
   asyncHandler(async (req, res) => {
     const sourceUrl = String(req.body?.url || "").trim();
     if (!sourceUrl) {
@@ -4964,6 +5244,7 @@ router.post(
 
 router.post(
   "/questions/bulk-upload/validate",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.bulkUpload),
   upload.fields([{ name: "sheet", maxCount: 1 }]),
   asyncHandler(async (req, res) => {
     const data = await questionBulkUploadService.validateFile({
@@ -4976,6 +5257,7 @@ router.post(
 
 router.post(
   "/questions/bulk-upload/:batchId/create-categories",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.bulkUpload),
   asyncHandler(async (req, res) => {
     const data = await questionBulkUploadService.createMissingCategories({
       batchId: req.params.batchId,
@@ -4986,6 +5268,7 @@ router.post(
 
 router.post(
   "/questions/bulk-upload/:batchId/update-new-columns",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.bulkUpload),
   asyncHandler(async (req, res) => {
     const data = await questionBulkUploadService.updateNewColumnValues({
       batchId: req.params.batchId,
@@ -4996,6 +5279,7 @@ router.post(
 
 router.get(
   "/questions/bulk-upload/:batchId/status",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.bulkUpload),
   asyncHandler(async (req, res) => {
     const data = await questionBulkUploadService.getStatus({
       batchId: req.params.batchId,
@@ -5006,6 +5290,7 @@ router.get(
 
 router.post(
   "/questions/bulk-upload/:batchId/approve",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.bulkUpload),
   asyncHandler(async (req, res) => {
     const data = await questionBulkUploadService.approve({
       batchId: req.params.batchId,
@@ -5592,19 +5877,22 @@ router.delete(
 function createCrudRouter({ key, label, service }) {
   const route = Router();
   const controller = createCrudController(service, label);
+  const guard = (action) => key === "question"
+    ? [requireQuestionPermission(QUESTION_PERMISSION_MAP[action])]
+    : [];
 
-  route.get("/", validate(listQuerySchema), asyncHandler(controller.list));
-  route.post("/reorder", asyncHandler(async (req, res) => {
+  route.get("/", ...guard("list"), validate(listQuerySchema), asyncHandler(controller.list));
+  route.post("/reorder", ...guard("update"), asyncHandler(async (req, res) => {
     if (!service.reorder) throw new AppError(`${label} sorting is not supported`, 400);
     const result = await service.reorder(Array.isArray(req.body?.items) ? req.body.items : []);
     sendResponse(res, { message: `${label} order updated`, data: result });
   }));
-  route.post("/bulk-delete", validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
-  route.delete("/bulk", validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
-  route.get("/:id", asyncHandler(controller.getById));
-  route.post("/", validate(createSchemas[key]), asyncHandler(controller.create));
-  route.put("/:id", validate(updateSchemas[key]), asyncHandler(controller.update));
-  route.delete("/:id", asyncHandler(controller.remove));
+  route.post("/bulk-delete", ...guard("bulkDelete"), validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
+  route.delete("/bulk", ...guard("bulkDelete"), validate(bulkDeleteSchema), asyncHandler(controller.bulkRemove));
+  route.get("/:id", ...guard("get"), asyncHandler(controller.getById));
+  route.post("/", ...guard("create"), validate(createSchemas[key]), asyncHandler(controller.create));
+  route.put("/:id", ...guard("update"), validate(updateSchemas[key]), asyncHandler(controller.update));
+  route.delete("/:id", ...guard("delete"), asyncHandler(controller.remove));
 
   return route;
 }
@@ -6031,6 +6319,15 @@ const questionService = createCrudService({
       }, existing._id);
     }
     return normalizedPayload;
+  },
+  afterCreate: async (created, context) => {
+    await logQuestionActivity("create", created?._id, null, created, context.admin);
+  },
+  afterUpdate: async (previous, updated, context) => {
+    await logQuestionActivity("edit", updated?._id || previous?._id, previous, updated, context.admin);
+  },
+  afterDelete: async (previous, context) => {
+    await logQuestionActivity("delete", previous?._id, previous, null, context.admin);
   },
 });
 

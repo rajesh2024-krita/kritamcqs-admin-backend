@@ -11,6 +11,7 @@ router.get("/status", asyncHandler(adminAuthController.status));
 router.post("/bootstrap", validate(bootstrapAdminSchema), asyncHandler(adminAuthController.bootstrap));
 router.post("/register", validate(registerAdminSchema), asyncHandler(adminAuthController.register));
 router.post("/login", validate(loginSchema), asyncHandler(adminAuthController.login));
+router.post("/logout", requireAdmin, asyncHandler(adminAuthController.logout));
 router.get("/me", requireAdmin, asyncHandler(adminAuthController.me));
 
 export default router;

@@ -1,11 +1,13 @@
 import jwt from "jsonwebtoken";
 import { env } from "../config/env.js";
 
-export function signAdminToken(user) {
+export function signAdminToken(user, sessionId) {
   return jwt.sign(
     {
       userId: user._id.toString(),
       isAdmin: true,
+      adminRole: user.adminRole || "main",
+      sessionId: sessionId ? String(sessionId) : undefined,
     },
     env.jwtSecret,
     { expiresIn: "12h" },

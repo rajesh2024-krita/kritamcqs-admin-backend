@@ -12,6 +12,8 @@ export * from "./QuestionBulkUploadBatch.js";
 export * from "./QuestionBulkUploadRow.js";
 export * from "./User.js";
 export * from "./AuthSettings.js";
+export * from "./AdminActivityLog.js";
+export * from "./AdminLoginHistory.js";
 export * from "./MigrationLog.js";
 export * from "./LearningSession.js";
 export * from "./Test.js";
