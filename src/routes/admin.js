@@ -2214,15 +2214,31 @@ router.put("/notification-management", requireMainAdmin, asyncHandler(async (req
 }));
 
 const REMINDER_SCHEDULER_INTERVAL_MS = 60 * 1000;
+const APP_TIME_ZONE = "Asia/Kolkata";
 let reminderSchedulerTimer = null;
 let reminderSchedulerRunning = false;
 
-function todayRange() {
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
+function zonedDateTimeParts(date = new Date(), timeZone = APP_TIME_ZONE) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(date);
+
+  return Object.fromEntries(parts.filter((part) => part.type !== "literal").map((part) => [part.type, part.value]));
+}
+
+function todayRange(now = new Date()) {
+  const parts = zonedDateTimeParts(now);
+  const dateKey = `${parts.year}-${parts.month}-${parts.day}`;
+  const start = new Date(`${dateKey}T00:00:00.000+05:30`);
   const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { start, end, dateKey: start.toISOString().slice(0, 10) };
+  end.setUTCDate(end.getUTCDate() + 1);
+  return { start, end, dateKey };
 }
 
 function notificationLinkForAction(action, customLink) {
@@ -2246,9 +2262,10 @@ function scheduleIsDue(schedule, now = new Date()) {
   if (schedule?.enabled === false) return false;
   const [hour, minute] = String(schedule?.time || "09:00").split(":").map(Number);
   if (!Number.isFinite(hour) || !Number.isFinite(minute)) return false;
-  const scheduledAt = new Date(now);
-  scheduledAt.setHours(hour, minute, 0, 0);
-  return now.getTime() >= scheduledAt.getTime();
+  const parts = zonedDateTimeParts(now);
+  const currentMinutes = Number(parts.hour) * 60 + Number(parts.minute);
+  const scheduledMinutes = hour * 60 + minute;
+  return currentMinutes >= scheduledMinutes;
 }
 
 async function eligibleReminderUsers(kind, reminder, email) {
@@ -4716,15 +4733,18 @@ function padDatePart(value) {
 }
 
 function formatLocalDateKey(date = new Date()) {
-  return `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`;
+  const parts = zonedDateTimeParts(date);
+  return `${parts.year}-${parts.month}-${parts.day}`;
 }
 
 function formatLocalDateTimeForTitle(date = new Date()) {
-  return `${formatLocalDateKey(date)} ${padDatePart(date.getHours())}:${padDatePart(date.getMinutes())}`;
+  const parts = zonedDateTimeParts(date);
+  return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}`;
 }
 
 function getDaysInMonth(date = new Date()) {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  const parts = zonedDateTimeParts(date);
+  return new Date(Date.UTC(Number(parts.year), Number(parts.month), 0)).getUTCDate();
 }
 
 function normalizeGenerationTime(value) {
@@ -4793,7 +4813,8 @@ function serializeMockGenerationSchedule(doc) {
 function getScheduleDueState(schedule, now = new Date()) {
   const time = normalizeGenerationTime(schedule.generationTime);
   const [hour, minute] = time.split(":").map(Number);
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  const parts = zonedDateTimeParts(now);
+  const currentMinutes = Number(parts.hour) * 60 + Number(parts.minute);
   const scheduledMinutes = hour * 60 + minute;
   if (currentMinutes < scheduledMinutes) return { due: false, runKey: "" };
 
@@ -4801,14 +4822,15 @@ function getScheduleDueState(schedule, now = new Date()) {
   if (schedule.recurrenceType === "daily") return { due: true, runKey: `daily:${dayKey}` };
 
   if (schedule.recurrenceType === "weekly") {
-    const dayCode = WEEKDAY_OPTIONS[now.getDay()];
+    const zonedMidnight = new Date(`${dayKey}T00:00:00.000+05:30`);
+    const dayCode = WEEKDAY_OPTIONS[zonedMidnight.getUTCDay()];
     const allowedDays = Array.isArray(schedule.weeklyDays) && schedule.weeklyDays.length ? schedule.weeklyDays : DEFAULT_MOCK_GENERATION_SCHEDULE.weeklyDays;
     return { due: allowedDays.includes(dayCode), runKey: `weekly:${dayKey}` };
   }
 
   const targetDay = Math.min(Number(schedule.monthlyDay || 1), getDaysInMonth(now));
-  const monthKey = `${now.getFullYear()}-${padDatePart(now.getMonth() + 1)}`;
-  return { due: now.getDate() === targetDay, runKey: `monthly:${monthKey}` };
+  const monthKey = `${parts.year}-${parts.month}`;
+  return { due: Number(parts.day) === targetDay, runKey: `monthly:${monthKey}` };
 }
 
 async function runMockGenerationFromSchedule({ force = false, actorId = null } = {}) {
