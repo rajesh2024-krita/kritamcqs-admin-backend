@@ -51,7 +51,18 @@ export async function sendPushForNotifications(notifications = []) {
   const { tokensByUser } = await activeTokensForUsers(visibleNotifications.map((item) => item.userId));
 
   for (const notification of visibleNotifications) {
+    console.info("[NOTIFICATION SAVED]", {
+      notificationId: String(notification._id || notification.id || ""),
+      userId: String(notification.userId || ""),
+      type: notification.type,
+      title: notification.title,
+    });
     const tokens = tokensByUser.get(String(notification.userId || "")) || [];
+    console.info("[FCM TOKEN FOUND]", {
+      notificationId: String(notification._id || notification.id || ""),
+      userId: String(notification.userId || ""),
+      tokenCount: tokens.length,
+    });
     if (!tokens.length) {
       result.noTokenCount += 1;
       await UserNotification.updateOne(
@@ -80,6 +91,13 @@ export async function sendPushForNotifications(notifications = []) {
       result.errors.push(...(delivery.errors || []));
 
       const status = delivery.successCount > 0 ? "sent" : "failed";
+      console.info(status === "sent" ? "[FCM SENT SUCCESS]" : "[FCM SENT FAILED]", {
+        notificationId: String(notification._id || notification.id || ""),
+        userId: String(notification.userId || ""),
+        successCount: delivery.successCount || 0,
+        failedCount: delivery.failedCount || 0,
+        errors: delivery.errors || [],
+      });
       await UserNotification.updateOne(
         { _id: notification._id },
         {
@@ -92,6 +110,11 @@ export async function sendPushForNotifications(notifications = []) {
       );
     } catch (error) {
       const message = error.message || "Push delivery failed";
+      console.error("[FCM SENT FAILED]", {
+        notificationId: String(notification._id || notification.id || ""),
+        userId: String(notification.userId || ""),
+        error: message,
+      });
       result.failedCount += 1;
       result.errors.push(message);
       await UserNotification.updateOne(
@@ -105,6 +128,7 @@ export async function sendPushForNotifications(notifications = []) {
 }
 
 export async function createUserNotification(doc, options = {}) {
+  console.info("[NOTIFICATION CREATED]", { userId: doc.userId, type: doc.type, title: doc.title });
   const notification = await UserNotification.create(doc);
   if (options.autoPush !== false) {
     await sendPushForNotifications([notification]);
@@ -113,6 +137,7 @@ export async function createUserNotification(doc, options = {}) {
 }
 
 export async function insertUserNotifications(docs = [], options = {}) {
+  console.info("[NOTIFICATION CREATED]", { count: docs.length, type: docs[0]?.type || "" });
   const notifications = docs.length ? await UserNotification.insertMany(docs, { ordered: false, ...(options.insertOptions || {}) }) : [];
   let pushDelivery = null;
   if (options.autoPush !== false && notifications.length) {
@@ -122,6 +147,7 @@ export async function insertUserNotifications(docs = [], options = {}) {
 }
 
 export async function upsertUserNotificationOnInsert(filter, insertDoc, options = {}) {
+  console.info("[NOTIFICATION CREATED]", { userId: insertDoc.userId, type: insertDoc.type, title: insertDoc.title });
   const result = await UserNotification.updateOne(
     filter,
     { $setOnInsert: insertDoc },
@@ -133,4 +159,27 @@ export async function upsertUserNotificationOnInsert(filter, insertDoc, options 
   const notification = await UserNotification.findOne(filter);
   const pushDelivery = options.autoPush === false || !notification ? null : await sendPushForNotifications([notification]);
   return { created: true, notification, result, pushDelivery };
+}
+
+export async function createAndSend(input = {}) {
+  const userIds = [...new Set((input.userIds || input.targetUsers || []).map((id) => String(id || "")).filter(Boolean))];
+  const docs = userIds.map((userId) => ({
+    userId,
+    type: input.type || input.category || "custom",
+    title: input.title,
+    body: input.body || input.message,
+    dedupeKey: input.dedupeKey ? `${input.dedupeKey}:${userId}` : `notification:${Date.now()}:${userId}`,
+    visibleInApp: input.visibleInApp !== false,
+    linkUrl: input.linkUrl || input.deepLink || "/notifications",
+    imageUrl: input.image || input.imageUrl || "",
+    targetGroup: input.targetGroup || "",
+    deliveryMode: input.deliveryMode || "notification",
+    notificationStatus: input.visibleInApp === false ? "not_requested" : "created",
+    pushStatus: input.visibleInApp === false ? "not_requested" : "pending",
+    senderId: input.senderId || "",
+    senderName: input.senderName || "System",
+    sentAt: new Date(),
+    metadata: input.metadata || undefined,
+  }));
+  return insertUserNotifications(docs, { autoPush: true });
 }
