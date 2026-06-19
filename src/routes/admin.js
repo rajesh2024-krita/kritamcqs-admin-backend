@@ -86,9 +86,14 @@ import { questionBulkUploadService } from "../services/questionBulkUploadService
 import { katexAuditService } from "../services/katexAuditService.js";
 import { aiAuditService } from "../services/aiAuditService.js";
 import { oldUserMigrationService } from "../services/oldUserMigrationService.js";
+import {
+  createUserNotification,
+  insertUserNotifications,
+  upsertUserNotificationOnInsert,
+} from "../services/notificationService.js";
 import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName, uploadsRoot } from "../utils/uploadStorage.js";
 import { sendEmail } from "../utils/simpleEmail.js";
-import { isPushConfigured, sendPushToTokens } from "../utils/pushNotificationSender.js";
+import { isPushConfigured } from "../utils/pushNotificationSender.js";
 import {
   COMMON_EMAIL_VARIABLES,
   DEFAULT_TEMPLATES,
@@ -2288,9 +2293,8 @@ async function createReminderNotificationsForKind(kind, reminder, options = {}) 
   const deliveryMode = allowedDeliveryModes.includes(options.deliveryMode)
     ? options.deliveryMode
     : reminder.deliveryMode || "app";
-  const shouldCreateApp = ["app", "both", "app_push", "all"].includes(deliveryMode);
+  const shouldCreateApp = deliveryMode !== "email";
   const shouldEmail = ["email", "both", "email_push", "all"].includes(deliveryMode);
-  const shouldPush = ["push", "app_push", "email_push", "all"].includes(deliveryMode);
   const users = await eligibleReminderUsers(kind, reminder, options.email);
   const { dateKey } = todayRange();
   const invoiceSettings = shouldEmail ? await InvoiceSettings.findOne({ key: "default" }).lean() : null;
@@ -2305,35 +2309,34 @@ async function createReminderNotificationsForKind(kind, reminder, options = {}) 
 
   for (const schedule of dueSchedules) {
     const scheduleKey = String(schedule.time || "09:00").replace(/[^0-9]/g, "");
-    const createdUsers = [];
     for (const user of users) {
       const dedupeKey = `app-reminder:${kind}:${dateKey}:${scheduleKey}:${user._id}`;
-      const result = await UserNotification.updateOne(
+      const { created: wasCreated, pushDelivery } = await upsertUserNotificationOnInsert(
         { dedupeKey },
         {
-          $setOnInsert: {
-            userId: String(user._id),
-            type: kind === "dailyTest" ? "daily_test" : "weak_area",
-            title: reminder.title || (kind === "dailyTest" ? "Your Daily Test is waiting" : "Practice your Weak Areas"),
-            body: reminder.message || (kind === "dailyTest" ? "Complete today's Daily Test." : "Focused weak area practice is ready."),
-            dedupeKey,
-            visibleInApp: shouldCreateApp,
-            linkUrl: notificationLinkForAction(reminder.ctaAction, reminder.ctaLink),
-            imageUrl: reminder.image || "",
-            targetGroup: reminder.audience || "all",
-            deliveryMode,
-            notificationStatus: shouldCreateApp ? "created" : "not_requested",
-            emailStatus: shouldEmail ? "pending" : "",
-            pushStatus: shouldPush ? "pending" : "",
-            senderName: "System",
-            sentAt: new Date(),
-          },
+          userId: String(user._id),
+          type: kind === "dailyTest" ? "daily_test" : "weak_area",
+          title: reminder.title || (kind === "dailyTest" ? "Your Daily Test is waiting" : "Practice your Weak Areas"),
+          body: reminder.message || (kind === "dailyTest" ? "Complete today's Daily Test." : "Focused weak area practice is ready."),
+          dedupeKey,
+          visibleInApp: shouldCreateApp,
+          linkUrl: notificationLinkForAction(reminder.ctaAction, reminder.ctaLink),
+          imageUrl: reminder.image || "",
+          targetGroup: reminder.audience || "all",
+          deliveryMode,
+          notificationStatus: shouldCreateApp ? "created" : "not_requested",
+          emailStatus: shouldEmail ? "pending" : "",
+          pushStatus: shouldCreateApp ? "pending" : "not_requested",
+          senderName: "System",
+          sentAt: new Date(),
         },
-        { upsert: true },
       );
-      if (result.upsertedCount) {
+      if (wasCreated) {
         created += 1;
-        createdUsers.push(user);
+        pushSent += pushDelivery?.sentCount || 0;
+        pushDelivered += pushDelivery?.successCount || 0;
+        pushFailed += pushDelivery?.failedCount || 0;
+        pushNoToken += pushDelivery?.noTokenCount || 0;
       } else {
         skipped += 1;
       }
@@ -2353,24 +2356,6 @@ async function createReminderNotificationsForKind(kind, reminder, options = {}) 
       }
     }
 
-    if (shouldPush && createdUsers.length) {
-      if (!isPushConfigured()) {
-        pushFailed += createdUsers.length;
-      } else {
-        const pushResult = await sendPushToUsers(createdUsers, {
-          title: reminder.title || (kind === "dailyTest" ? "Your Daily Test is waiting" : "Practice your Weak Areas"),
-          body: reminder.message || (kind === "dailyTest" ? "Complete today's Daily Test." : "Focused weak area practice is ready."),
-          image: reminder.image ? resolvePublicAssetUrl(reminder.image) : "",
-          deepLink: notificationLinkForAction(reminder.ctaAction, reminder.ctaLink),
-          category: kind === "dailyTest" ? "exam" : "revision",
-          priority: "high",
-        });
-        pushSent += pushResult.sentCount || 0;
-        pushDelivered += pushResult.successCount || 0;
-        pushFailed += pushResult.failedCount || 0;
-        pushNoToken += pushResult.noTokenCount || 0;
-      }
-    }
   }
 
   return { kind, checked: users.length, created, skipped, emailSent, emailSkipped, pushSent, pushDelivered, pushFailed, pushNoToken };
@@ -2768,43 +2753,6 @@ async function getNotificationRecipients(targetGroup, selectedUsers = "") {
   const premiumUsers = await User.find({ isAdmin: { $ne: true }, isPremium: true }).lean();
   if (targetGroup === "premium") return premiumUsers;
   return splitPremiumUsersBySpend(premiumUsers, targetGroup);
-}
-
-async function sendPushToUsers(users = [], payload = {}) {
-  const userIds = [...new Set(users.map((user) => String(user._id || user.id || "")).filter(Boolean))];
-  if (!userIds.length) return { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, errors: [] };
-
-  const tokenRows = await PushDeviceToken.find({
-    userId: { $in: userIds },
-    enabled: true,
-    active: { $ne: false },
-  }).lean();
-  const tokensByUser = new Map();
-  tokenRows.forEach((row) => {
-    const key = String(row.userId || "");
-    if (!tokensByUser.has(key)) tokensByUser.set(key, []);
-    tokensByUser.get(key).push(row.token);
-  });
-
-  const tokens = tokenRows.map((row) => row.token).filter(Boolean);
-  const noTokenCount = userIds.filter((userId) => !tokensByUser.get(userId)?.length).length;
-  if (!tokens.length) return { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount, errors: [] };
-
-  const result = await sendPushToTokens(tokens, payload);
-  if (result.invalidTokens.length) {
-    await PushDeviceToken.updateMany(
-      { token: { $in: result.invalidTokens } },
-      { $set: { enabled: false, active: false, lastUpdated: new Date() } },
-    );
-  }
-
-  return {
-    sentCount: result.attempted,
-    successCount: result.successCount,
-    failedCount: result.failedCount,
-    noTokenCount,
-    errors: result.errors,
-  };
 }
 
 function notificationHistoryStatus({ action, successCount, failedCount, noTokenCount }) {
@@ -6144,7 +6092,7 @@ router.post(
             daysBefore: reminder.daysBefore,
             expiryDate: subscription.endDate ? new Date(subscription.endDate).toLocaleDateString("en-IN") : "",
           };
-          const result = await UserNotification.updateOne(
+          const { created: wasCreated } = await upsertUserNotificationOnInsert(
             { dedupeKey: `subscription-expiry:${subscription._id}:${reminder.daysBefore}` },
             {
               userId: String(subscription.userId),
@@ -6153,10 +6101,15 @@ router.post(
               body: replaceTokens(reminder.body, data),
               visibleInApp: settings.inAppEnabled !== false,
               dedupeKey: `subscription-expiry:${subscription._id}:${reminder.daysBefore}`,
+              linkUrl: "/subscription",
+              deliveryMode: settings.inAppEnabled !== false ? "notification" : "email",
+              notificationStatus: settings.inAppEnabled !== false ? "created" : "not_requested",
+              pushStatus: settings.inAppEnabled !== false ? "pending" : "not_requested",
+              senderName: "System",
+              sentAt: new Date(),
             },
-            { upsert: true },
           );
-          if (result.upsertedCount) created += 1;
+          if (wasCreated) created += 1;
         }
       }
     }
@@ -6178,25 +6131,26 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
   let delivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: recipients.length, errors: [] };
 
   if (payload.action === "send") {
-    if (!isPushConfigured()) {
-      delivery = {
-        sentCount: 0,
-        successCount: 0,
-        failedCount: recipients.length,
-        noTokenCount: 0,
-        errors: ["Firebase service account is not configured"],
-      };
-    } else {
-      delivery = await sendPushToUsers(recipients, {
-        title: payload.title,
-        body: payload.message,
-        image: payload.image,
-        deepLink: payload.deepLink,
-        category: payload.category,
-        sound: payload.sound,
-        priority: payload.priority,
-      });
-    }
+    const dedupePrefix = `notification-center:${scheduledNotificationId || Date.now()}:${crypto.randomBytes(4).toString("hex")}`;
+    const docs = recipients.map((user) => ({
+      userId: String(user._id || user.id || ""),
+      type: payload.category || "custom",
+      title: payload.title,
+      body: payload.message,
+      dedupeKey: `${dedupePrefix}:${String(user._id || user.id || "")}`,
+      visibleInApp: true,
+      linkUrl: payload.deepLink || "/notifications",
+      imageUrl: payload.image || "",
+      targetGroup: payload.targetType || "all",
+      deliveryMode: "notification",
+      notificationStatus: "created",
+      senderId: String(req.admin?._id || ""),
+      senderName: req.admin?.name || req.admin?.email || "Admin",
+      pushStatus: "pending",
+      sentAt: new Date(),
+    }));
+    const inserted = await insertUserNotifications(docs, { autoPush: true });
+    delivery = inserted.pushDelivery || delivery;
   }
 
   const history = await NotificationHistory.create({
@@ -6495,14 +6449,6 @@ router.post(
     const attachment = await saveNotificationAttachment(req.file);
     const shouldNotify = ["notification", "both", "push", "email_push"].includes(payload.deliveryMode);
     const shouldEmail = ["email", "both", "email_push"].includes(payload.deliveryMode);
-    const shouldPush = ["push", "email_push"].includes(payload.deliveryMode);
-    const tokenCounts = shouldPush
-      ? await PushDeviceToken.aggregate([
-          { $match: { userId: { $in: recipients.map((user) => String(user._id)) }, enabled: true } },
-          { $group: { _id: "$userId", count: { $sum: 1 } } },
-        ])
-      : [];
-    const tokenCountByUser = new Map(tokenCounts.map((item) => [String(item._id), Number(item.count || 0)]));
     const templateKey = notificationTemplateKeyForType(payload.type, payload.templateKey);
     const extraVariables = parseNotificationVariables(payload.variables);
     console.info(`[NOTIFICATION] Email template selected | type=${payload.type} | explicit=${payload.templateKey || "auto"} | resolved=${templateKey}`);
@@ -6512,27 +6458,6 @@ router.post(
     let emailFailed = 0;
     let emailSkipped = 0;
     let pushDelivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, errors: [] };
-
-    if (shouldPush) {
-      if (!isPushConfigured()) {
-        pushDelivery = {
-          sentCount: 0,
-          successCount: 0,
-          failedCount: recipients.filter((user) => tokenCountByUser.get(String(user._id))).length,
-          noTokenCount: recipients.filter((user) => !tokenCountByUser.get(String(user._id))).length,
-          errors: ["Firebase service account is not configured"],
-        };
-      } else {
-        pushDelivery = await sendPushToUsers(recipients, {
-          title: payload.title,
-          body: payload.body,
-          image: attachment.imageUrl,
-          deepLink: payload.linkUrl || notificationLinkForType(payload.type),
-          category: payload.type,
-          priority: "high",
-        });
-      }
-    }
 
     for (const user of recipients) {
       let emailStatus = shouldEmail ? "pending" : "not_requested";
@@ -6581,20 +6506,15 @@ router.post(
         senderName: req.admin?.name || req.admin?.email || "Admin",
         emailStatus,
         emailError,
-        pushStatus: shouldPush
-          ? tokenCountByUser.get(String(user._id))
-            ? pushDelivery.failedCount > 0 && pushDelivery.successCount === 0
-              ? "failed"
-              : "sent"
-            : "no_token"
-          : "not_requested",
-        pushError: shouldPush && tokenCountByUser.get(String(user._id)) && pushDelivery.errors?.length ? pushDelivery.errors[0] : "",
+        pushStatus: shouldNotify ? "pending" : "not_requested",
+        pushError: "",
         templateKey: shouldEmail ? templateKey : "",
         sentAt: new Date(),
       });
     }
 
-    await UserNotification.insertMany(docs, { ordered: false });
+    const inserted = await insertUserNotifications(docs, { autoPush: true });
+    pushDelivery = inserted.pushDelivery || pushDelivery;
     res.status(201).json({
       success: true,
       message: "Notification broadcast created",
@@ -6602,9 +6522,9 @@ router.post(
         totalRecipients: recipients.length,
         notificationCreated: shouldNotify ? recipients.length : 0,
         pushQueued: 0,
-        pushSent: shouldPush ? pushDelivery.successCount : 0,
-        pushFailed: shouldPush ? pushDelivery.failedCount : 0,
-        pushNoToken: shouldPush ? pushDelivery.noTokenCount : 0,
+        pushSent: pushDelivery.successCount || 0,
+        pushFailed: pushDelivery.failedCount || 0,
+        pushNoToken: pushDelivery.noTokenCount || 0,
         emailSent,
         emailSkipped,
         emailFailed,
@@ -7180,13 +7100,20 @@ router.post(
     await ticket.save();
 
     if (payload.sendNotification) {
-      await UserNotification.create({
+      await createUserNotification({
         userId: ticket.userId,
         type: "support",
         title: `Reply for ${ticket.ticketId}`,
         body: payload.message,
         dedupeKey: `support-reply-${ticket.id}-${Date.now()}`,
         visibleInApp: true,
+        linkUrl: "/help-support",
+        deliveryMode: "notification",
+        notificationStatus: "created",
+        pushStatus: "pending",
+        senderId: String(req.admin?._id || ""),
+        senderName: req.admin?.name || req.admin?.email || "Admin",
+        sentAt: new Date(),
       }).catch(() => undefined);
     }
 
