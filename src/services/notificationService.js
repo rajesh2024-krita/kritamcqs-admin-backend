@@ -36,6 +36,31 @@ async function activeTokensForUsers(userIds = []) {
   return { tokenRows, tokensByUser };
 }
 
+async function disableInvalidTokens(tokens = []) {
+  const invalidTokens = [...new Set(tokens.map((token) => String(token || "").trim()).filter(Boolean))];
+  if (!invalidTokens.length) return;
+
+  await PushDeviceToken.updateMany(
+    { token: { $in: invalidTokens } },
+    { $set: { enabled: false, active: false, lastUpdated: new Date() } },
+  );
+}
+
+function isDuplicateKeyBulkError(error) {
+  const writeErrors = error?.writeErrors || error?.result?.result?.writeErrors || [];
+  if (error?.code === 11000) return true;
+  return Array.isArray(writeErrors) && writeErrors.length > 0 && writeErrors.every((item) => item?.code === 11000);
+}
+
+async function insertedDocsFromBulkError(error) {
+  const insertedDocs = Array.isArray(error?.insertedDocs) ? error.insertedDocs.filter(Boolean) : [];
+  if (insertedDocs.length) return insertedDocs;
+
+  const insertedIds = Object.values(error?.result?.insertedIds || error?.insertedIds || {}).filter(Boolean);
+  if (!insertedIds.length) return [];
+  return UserNotification.find({ _id: { $in: insertedIds } });
+}
+
 export async function sendPushForNotifications(notifications = []) {
   const visibleNotifications = notifications.filter((item) => item && item.visibleInApp !== false);
   const result = {
@@ -85,6 +110,7 @@ export async function sendPushForNotifications(notifications = []) {
 
     try {
       const delivery = await sendPushToTokens(tokens, notificationToPayload(notification));
+      await disableInvalidTokens(delivery.invalidTokens || []);
       result.sentCount += delivery.attempted || 0;
       result.successCount += delivery.successCount || 0;
       result.failedCount += delivery.failedCount || 0;
@@ -138,7 +164,21 @@ export async function createUserNotification(doc, options = {}) {
 
 export async function insertUserNotifications(docs = [], options = {}) {
   console.info("[NOTIFICATION CREATED]", { count: docs.length, type: docs[0]?.type || "" });
-  const notifications = docs.length ? await UserNotification.insertMany(docs, { ordered: false, ...(options.insertOptions || {}) }) : [];
+  let notifications = [];
+  if (docs.length) {
+    try {
+      notifications = await UserNotification.insertMany(docs, { ordered: false, ...(options.insertOptions || {}) });
+    } catch (error) {
+      if (!isDuplicateKeyBulkError(error)) throw error;
+      notifications = await insertedDocsFromBulkError(error);
+      console.warn("[NOTIFICATION SAVED]", {
+        count: notifications.length,
+        skippedDuplicates: docs.length - notifications.length,
+        warning: "Duplicate notification dedupeKey skipped",
+      });
+    }
+  }
+
   let pushDelivery = null;
   if (options.autoPush !== false && notifications.length) {
     pushDelivery = await sendPushForNotifications(notifications);
