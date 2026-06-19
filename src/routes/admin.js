@@ -7114,7 +7114,7 @@ router.post(
         senderId: String(req.admin?._id || ""),
         senderName: req.admin?.name || req.admin?.email || "Admin",
         sentAt: new Date(),
-      }).catch(() => undefined);
+      });
     }
 
     if (payload.sendEmail && ticket.userEmail) {
