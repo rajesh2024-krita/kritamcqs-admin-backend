@@ -8786,6 +8786,7 @@ router.post("/auth-settings", asyncHandler(async (req, res) => {
   const payload = {
     emailPasswordEnabled: Boolean(body.emailPasswordEnabled),
     googleEnabled: Boolean(body.googleEnabled),
+    appleEnabled: body.appleEnabled !== false,
     googleClientId: String(body.googleClientId || process.env.GOOGLE_WEB_CLIENT_ID || "").trim(),
     googleAndroidClientId: String(body.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "").trim(),
     googleIosClientId: String(body.googleIosClientId || process.env.GOOGLE_IOS_CLIENT_ID || "").trim(),

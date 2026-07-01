@@ -6,6 +6,8 @@ const userSchema = new Schema(
     email: { type: String, trim: true, lowercase: true, sparse: true, unique: true, index: true },
     passwordHash: { type: String },
     googleId: { type: String, trim: true, sparse: true, unique: true, index: true },
+    firebaseUid: { type: String, trim: true, sparse: true, unique: true, index: true },
+    appleId: { type: String, trim: true, sparse: true, unique: true, index: true },
     authTypes: { type: [String], default: [] },
     name: { type: String, trim: true },
     address: { type: String, default: "" },
