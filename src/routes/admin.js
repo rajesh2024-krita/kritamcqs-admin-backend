@@ -8193,14 +8193,15 @@ async function unsetOtherDefaultListStyles(defaultId) {
 
 const userService = createCrudService({
   model: User,
-  allowedSorts: ["createdAt", "updatedAt", "lastLoginAt", "name", "mobile", "email"],
+  allowedSorts: ["createdAt", "updatedAt", "lastLoginAt", "name", "mobile", "email", "loginProvider"],
   searchFields: ["name", "mobile", "email"],
-  exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete", "isActive", "isBlocked"],
+  exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete", "isActive", "isBlocked", "loginProvider"],
   beforeCreate: async (payload) => {
     const next = {
       ...payload,
       passwordHash: payload.password ? hashPassword(payload.password) : undefined,
       authTypes: payload.password ? ["email"] : payload.authTypes,
+      loginProvider: payload.loginProvider || (payload.password ? "EMAIL" : undefined),
       premiumExpiresAt: payload.premiumExpiresAt || undefined,
     };
     if (!String(next.mobile || "").trim()) delete next.mobile;
@@ -8778,6 +8779,8 @@ router.get("/auth-settings", asyncHandler(async (_req, res) => {
   data.googleIosClientId = data.googleIosClientId || process.env.GOOGLE_IOS_CLIENT_ID || "";
   data.googleAndroidPackageName = data.googleAndroidPackageName || "com.kritamcqs.androidapp";
   data.googleAndroidSha1 = data.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4";
+  data.appleEnabled = data.appleEnabled !== false;
+  data.appleBundleId = data.appleBundleId || process.env.APPLE_BUNDLE_ID || "app.kritamcqs.iosapp";
   sendResponse(res, { data });
 }));
 router.post("/auth-settings", asyncHandler(async (req, res) => {
@@ -8786,12 +8789,14 @@ router.post("/auth-settings", asyncHandler(async (req, res) => {
   const payload = {
     emailPasswordEnabled: Boolean(body.emailPasswordEnabled),
     googleEnabled: Boolean(body.googleEnabled),
+    appleEnabled: body.appleEnabled !== false,
     googleClientId: String(body.googleClientId || process.env.GOOGLE_WEB_CLIENT_ID || "").trim(),
     googleAndroidClientId: String(body.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "").trim(),
     googleIosClientId: String(body.googleIosClientId || process.env.GOOGLE_IOS_CLIENT_ID || "").trim(),
     googleAndroidPackageName: String(body.googleAndroidPackageName || "com.kritamcqs.androidapp").trim(),
     googleAndroidSha1: String(body.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4").trim().toUpperCase(),
     googleCallbackUrl: String(body.googleCallbackUrl || "").trim(),
+    appleBundleId: String(body.appleBundleId || process.env.APPLE_BUNDLE_ID || "app.kritamcqs.iosapp").trim(),
     profileMobileRequired: Boolean(body.profileMobileRequired),
     googleRedirectUrls: Array.isArray(body.googleRedirectUrls)
       ? body.googleRedirectUrls.map((item) => String(item || "").trim()).filter(Boolean)
