@@ -14,6 +14,7 @@ const authSettingsSchema = new Schema(
     googleClientSecret: { type: String, default: "" },
     googleRedirectUrls: { type: [String], default: [] },
     googleCallbackUrl: { type: String, default: "" },
+    appleBundleId: { type: String, default: "app.kritamcqs.iosapp" },
     profileMobileRequired: { type: Boolean, default: false },
     sessionTimeoutMinutes: { type: Number, default: 43200, min: 15 },
     resetOtpExpiryMinutes: { type: Number, default: 10, min: 1, max: 60 },
