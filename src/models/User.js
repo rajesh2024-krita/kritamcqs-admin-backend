@@ -31,6 +31,9 @@ const userSchema = new Schema(
     lastLoginAt: { type: Date },
     isPremium: { type: Boolean, default: false, index: true },
     premiumExpiresAt: { type: Date },
+    premiumPlan: { type: String },
+    premiumExpiry: { type: Date },
+    paymentPlatform: { type: String, enum: ["ios", "android", "web"] },
     lastPurchase: {
       subscriptionId: { type: String },
       planId: { type: String },

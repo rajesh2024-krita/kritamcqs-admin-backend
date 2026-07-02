@@ -57,6 +57,7 @@ import {
   SessionAttempt,
   Subject,
   Subscription,
+  UserSubscription,
   SubscriptionPlan,
   SubscriptionFreeCard,
   SubscriptionStatCard,
@@ -5057,6 +5058,16 @@ const subscriptionListQuerySchema = z.object({
   }),
 });
 
+const appleSubscriptionListQuerySchema = z.object({
+  query: z.object({
+    page: z.coerce.number().int().min(1).default(1),
+    limit: z.coerce.number().int().min(1).max(100).default(10),
+    search: z.string().optional(),
+    status: z.enum(["active", "expired", "cancelled", "failed", "refunded"]).optional(),
+    sortOrder: z.enum(["asc", "desc"]).optional().default("desc"),
+  }),
+});
+
 const manualSubscriptionSchema = z.object({
   body: z.object({
     userId: z.string().min(1),
@@ -5345,6 +5356,77 @@ router.get(
     res.json({
       success: true,
       data,
+      meta: {
+        page,
+        limit,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / limit)),
+      },
+    });
+  }),
+);
+
+router.get(
+  "/apple-subscriptions",
+  validate(appleSubscriptionListQuerySchema),
+  asyncHandler(async (req, res) => {
+    const { page = 1, limit = 10, search = "", status, sortOrder = "desc" } =
+      req.validated.query;
+    const filters = {};
+    if (status) filters.subscriptionStatus = status;
+
+    let matchingUsers = [];
+    if (search) {
+      matchingUsers = await User.find({
+        $or: [
+          { name: new RegExp(search, "i") },
+          { email: new RegExp(search, "i") },
+          { mobile: new RegExp(search, "i") },
+        ],
+      })
+        .select("_id")
+        .lean();
+      filters.$or = [
+        { userId: { $in: matchingUsers.map((user) => String(user._id)) } },
+        { productId: new RegExp(search, "i") },
+        { transactionId: new RegExp(search, "i") },
+        { originalTransactionId: new RegExp(search, "i") },
+        { subscriptionStatus: new RegExp(search, "i") },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+    const [items, total] = await Promise.all([
+      UserSubscription.find(filters)
+        .sort({ createdAt: sortOrder === "asc" ? 1 : -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      UserSubscription.countDocuments(filters),
+    ]);
+    const userIds = [...new Set(items.map((item) => String(item.userId)))];
+    const users = userIds.length
+      ? await User.find({ _id: { $in: userIds } })
+          .select("_id name email mobile isPremium premiumExpiresAt premiumExpiry paymentPlatform")
+          .lean()
+      : [];
+    const userMap = new Map(users.map((user) => [String(user._id), user]));
+
+    res.json({
+      success: true,
+      data: items.map((item) => ({
+        id: String(item._id),
+        ...item,
+        user: userMap.has(String(item.userId))
+          ? {
+              id: String(userMap.get(String(item.userId))._id),
+              name: userMap.get(String(item.userId)).name,
+              email: userMap.get(String(item.userId)).email,
+              mobile: userMap.get(String(item.userId)).mobile,
+              isPremium: Boolean(userMap.get(String(item.userId)).isPremium),
+            }
+          : null,
+      })),
       meta: {
         page,
         limit,

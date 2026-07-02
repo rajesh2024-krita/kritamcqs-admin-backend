@@ -31,6 +31,7 @@ export * from "./SessionAttempt.js";
 export * from "./QuestionAttempt.js";
 export * from "./Mistake.js";
 export * from "./Subscription.js";
+export * from "./UserSubscription.js";
 export * from "./SubscriptionPlan.js";
 export * from "./SubscriptionFreeCard.js";
 export * from "./SubscriptionStatCard.js";
