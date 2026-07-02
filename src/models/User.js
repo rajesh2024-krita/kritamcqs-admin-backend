@@ -11,6 +11,7 @@ const userSchema = new Schema(
     loginProvider: { type: String, enum: ["EMAIL", "GOOGLE", "APPLE"], default: "EMAIL", index: true },
     appleUserId: { type: String, trim: true, sparse: true, unique: true, index: true },
     appleEmail: { type: String, trim: true, lowercase: true },
+    appleAppAccountToken: { type: String, sparse: true, unique: true, index: true },
     isAppleLogin: { type: Boolean, default: false, index: true },
     authTypes: { type: [String], default: [] },
     name: { type: String, trim: true },
