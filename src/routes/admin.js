@@ -5027,6 +5027,11 @@ function mapSubscriptionPlan(plan) {
   return {
     id: plan.planId,
     platform: plan.platform || "android",
+    billingProductId:
+      plan.billingProductId ||
+      (plan.platform === "ios"
+        ? process.env.APPLE_PREMIUM_PRODUCT_ID || "app.kritamcqs.iosapp.premium.6months"
+        : ""),
     name: plan.name,
     price: Number(plan.price || 0),
     strikeOutAmount: Number.isFinite(strikeOutAmount) && strikeOutAmount > 0 ? strikeOutAmount : 0,
@@ -5412,22 +5417,40 @@ router.get(
           .lean()
       : [];
     const userMap = new Map(users.map((user) => [String(user._id), user]));
+    const applePlanIds = [...new Set(items.map((item) => String(item.planId || "")).filter(Boolean))];
+    const appleProductIds = [...new Set(items.map((item) => String(item.productId || "")).filter(Boolean))];
+    const applePlans = await SubscriptionPlan.find({
+      platform: "ios",
+      $or: [
+        { planId: { $in: applePlanIds } },
+        { billingProductId: { $in: appleProductIds } },
+      ],
+    }).select("planId name billingProductId").lean();
+    const applePlanById = new Map(applePlans.map((plan) => [String(plan.planId), plan]));
+    const applePlanByProductId = new Map(applePlans.map((plan) => [String(plan.billingProductId), plan]));
 
     res.json({
       success: true,
-      data: items.map((item) => ({
-        id: String(item._id),
-        ...item,
-        user: userMap.has(String(item.userId))
-          ? {
-              id: String(userMap.get(String(item.userId))._id),
-              name: userMap.get(String(item.userId)).name,
-              email: userMap.get(String(item.userId)).email,
-              mobile: userMap.get(String(item.userId)).mobile,
-              isPremium: Boolean(userMap.get(String(item.userId)).isPremium),
-            }
-          : null,
-      })),
+      data: items.map((item) => {
+        const plan =
+          applePlanById.get(String(item.planId || "")) ||
+          applePlanByProductId.get(String(item.productId || ""));
+        return {
+          id: String(item._id),
+          ...item,
+          planId: item.planId || plan?.planId,
+          planName: plan?.name || item.planId || "iOS Subscription",
+          user: userMap.has(String(item.userId))
+            ? {
+                id: String(userMap.get(String(item.userId))._id),
+                name: userMap.get(String(item.userId)).name,
+                email: userMap.get(String(item.userId)).email,
+                mobile: userMap.get(String(item.userId)).mobile,
+                isPremium: Boolean(userMap.get(String(item.userId)).isPremium),
+              }
+            : null,
+        };
+      }),
       meta: {
         page,
         limit,
@@ -8367,10 +8390,19 @@ const subscriptionPlanService = createCrudService({
     return {};
   },
   beforeCreate: async (payload) => {
+    const platform = payload.platform === "ios" ? "ios" : "android";
+    const billingProductId = platform === "ios" ? String(payload.billingProductId || "").trim() : "";
+    if (platform === "ios" && !billingProductId) {
+      throw new AppError("App Store Product ID is required for iOS plans", 400);
+    }
+    if (billingProductId && await SubscriptionPlan.exists({ platform: "ios", billingProductId })) {
+      throw new AppError("This App Store Product ID is already assigned to another iOS plan", 400);
+    }
     return {
       ...payload,
       planId: String(payload.planId || "").trim(),
-      platform: payload.platform === "ios" ? "ios" : "android",
+      platform,
+      billingProductId,
       name: String(payload.name || "").trim(),
       description: String(payload.description || "").trim(),
       active: payload.status ? payload.status === "active" : payload.active !== false,
@@ -8381,10 +8413,29 @@ const subscriptionPlanService = createCrudService({
     };
   },
   beforeUpdate: async (_existing, payload) => {
+    const platform = payload.platform === "ios" || (!payload.platform && _existing.platform === "ios") ? "ios" : "android";
+    const billingProductId =
+      platform === "ios"
+        ? String(payload.billingProductId ?? _existing.billingProductId ?? "").trim()
+        : "";
+    if (platform === "ios" && !billingProductId) {
+      throw new AppError("App Store Product ID is required for iOS plans", 400);
+    }
+    if (
+      billingProductId &&
+      await SubscriptionPlan.exists({
+        _id: { $ne: _existing._id },
+        platform: "ios",
+        billingProductId,
+      })
+    ) {
+      throw new AppError("This App Store Product ID is already assigned to another iOS plan", 400);
+    }
     return {
       ...payload,
       planId: _existing.planId,
-      ...(payload.platform !== undefined ? { platform: payload.platform === "ios" ? "ios" : "android" } : {}),
+      platform,
+      billingProductId,
       ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
       ...(payload.description !== undefined ? { description: String(payload.description || "").trim() } : {}),
       ...(payload.status !== undefined ? { active: payload.status === "active" } : {}),

@@ -3,6 +3,7 @@ import { Schema, model, models, baseJsonOptions } from "./base.js";
 const userSubscriptionSchema = new Schema(
   {
     userId: { type: String, required: true, index: true },
+    planId: { type: String, trim: true, index: true },
     productId: { type: String, required: true, index: true },
     transactionId: { type: String, required: true, index: true },
     originalTransactionId: { type: String, required: true, unique: true, index: true },
