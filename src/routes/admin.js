@@ -5026,6 +5026,7 @@ function mapSubscriptionPlan(plan) {
   const strikeOutAmount = Number(plan.strikeOutAmount ?? plan.stikeOutAmount ?? plan.strikeoutAmount ?? plan.originalPrice ?? plan.mrp ?? 0);
   return {
     id: plan.planId,
+    platform: plan.platform || "android",
     name: plan.name,
     price: Number(plan.price || 0),
     strikeOutAmount: Number.isFinite(strikeOutAmount) && strikeOutAmount > 0 ? strikeOutAmount : 0,
@@ -8355,13 +8356,21 @@ const couponService = createCrudService({
 
 const subscriptionPlanService = createCrudService({
   model: SubscriptionPlan,
-  allowedSorts: ["createdAt", "updatedAt", "name", "price", "durationMonths", "sortOrder"],
+  allowedSorts: ["createdAt", "updatedAt", "platform", "name", "price", "durationMonths", "sortOrder"],
   searchFields: ["planId", "name", "description", "savings", "features"],
   exactFilters: ["active", "status"],
+  buildCustomFilters: (query) => {
+    if (query.platform === "ios") return { platform: "ios" };
+    if (query.platform === "android") {
+      return { $and: [{ $or: [{ platform: "android" }, { platform: { $exists: false } }] }] };
+    }
+    return {};
+  },
   beforeCreate: async (payload) => {
     return {
       ...payload,
       planId: String(payload.planId || "").trim(),
+      platform: payload.platform === "ios" ? "ios" : "android",
       name: String(payload.name || "").trim(),
       description: String(payload.description || "").trim(),
       active: payload.status ? payload.status === "active" : payload.active !== false,
@@ -8375,6 +8384,7 @@ const subscriptionPlanService = createCrudService({
     return {
       ...payload,
       planId: _existing.planId,
+      ...(payload.platform !== undefined ? { platform: payload.platform === "ios" ? "ios" : "android" } : {}),
       ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
       ...(payload.description !== undefined ? { description: String(payload.description || "").trim() } : {}),
       ...(payload.status !== undefined ? { active: payload.status === "active" } : {}),

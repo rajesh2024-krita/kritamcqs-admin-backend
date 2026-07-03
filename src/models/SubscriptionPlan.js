@@ -3,6 +3,7 @@ import { Schema, model, models, baseJsonOptions } from "./base.js";
 const subscriptionPlanSchema = new Schema(
   {
     planId: { type: String, required: true, unique: true, trim: true, index: true },
+    platform: { type: String, enum: ["android", "ios"], default: "android", required: true, index: true },
     name: { type: String, required: true, trim: true },
     price: { type: Number, required: true, min: 0 },
     strikeOutAmount: { type: Number, min: 0, default: 0 },
