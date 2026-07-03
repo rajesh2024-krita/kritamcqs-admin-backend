@@ -5161,8 +5161,12 @@ async function testRazorpayCredentials(keyId, keySecret) {
 
 router.get(
   "/subscription-plans",
-  asyncHandler(async (_req, res) => {
-    const plans = await SubscriptionPlan.find({}).sort({ sortOrder: 1, createdAt: 1 }).lean();
+  asyncHandler(async (req, res) => {
+    const requestedPlatform = String(req.query.platform || "").toLowerCase();
+    const filter = requestedPlatform
+      ? subscriptionPlanPlatformFilter(requestedPlatform)
+      : {};
+    const plans = await SubscriptionPlan.find(filter).sort({ sortOrder: 1, createdAt: 1 }).lean();
     res.json({ success: true, data: plans.map(mapSubscriptionPlan) });
   }),
 );
@@ -5256,15 +5260,45 @@ async function resolveCoupon(plan, couponCode) {
 }
 
 async function refreshUserPremiumState(userId) {
-  const activeSubscription = await Subscription.findOne({
-    userId,
-    status: { $in: ["active", "manual", "completed"] },
-    endDate: { $gt: new Date() },
-  }).sort({ endDate: -1 });
+  const now = new Date();
+  const [activeAndroid, activeApple] = await Promise.all([
+    Subscription.findOne({
+      userId,
+      $and: [
+        { $or: [{ platform: "android" }, { platform: { $exists: false } }] },
+        { $or: [{ paymentProvider: "razorpay" }, { paymentProvider: { $exists: false } }] },
+      ],
+      status: { $in: ["active", "manual", "completed"] },
+      $or: [{ endDate: { $gt: now } }, { endDate: null }, { endDate: { $exists: false } }],
+    }).sort({ endDate: -1 }),
+    UserSubscription.findOne({
+      userId,
+      subscriptionStatus: { $in: ["active", "failed", "cancelled"] },
+      expiryDate: { $gt: now },
+    }).sort({ expiryDate: -1 }),
+  ]);
+  const activeSubscription = activeApple || activeAndroid;
+  const expiry = activeApple?.expiryDate || activeAndroid?.endDate;
 
+  if (activeSubscription) {
+    await User.findByIdAndUpdate(userId, {
+      $set: {
+        isPremium: true,
+        premiumExpiresAt: expiry,
+        premiumExpiry: expiry,
+        paymentPlatform: activeApple ? "ios" : "android",
+      },
+    });
+    return;
+  }
   await User.findByIdAndUpdate(userId, {
-    isPremium: Boolean(activeSubscription),
-    premiumExpiresAt: activeSubscription?.endDate,
+    $set: { isPremium: false },
+    $unset: {
+      premiumExpiresAt: 1,
+      premiumExpiry: 1,
+      premiumPlan: 1,
+      paymentPlatform: 1,
+    },
   });
 }
 
@@ -5285,7 +5319,12 @@ router.get(
   validate(subscriptionListQuerySchema),
   asyncHandler(async (req, res) => {
     const { page = 1, limit = 10, search = "", status, planId, sortBy = "createdAt", sortOrder = "desc" } = req.validated.query;
-    const filters = {};
+    const filters = {
+      $and: [
+        { $or: [{ platform: "android" }, { platform: { $exists: false } }] },
+        { $or: [{ paymentProvider: "razorpay" }, { paymentProvider: { $exists: false } }] },
+      ],
+    };
 
     if (status) filters.status = status;
     if (planId) filters.planId = planId;
@@ -5325,13 +5364,21 @@ router.get(
     }
 
     const skip = (page - 1) * limit;
-    const [items, total] = await Promise.all([
+    const [items, total, activeTotal] = await Promise.all([
       Subscription.find(filters)
         .sort({ [sortBy]: sortOrder === "asc" ? 1 : -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
       Subscription.countDocuments(filters),
+      Subscription.countDocuments({
+        $and: [
+          { $or: [{ platform: "android" }, { platform: { $exists: false } }] },
+          { $or: [{ paymentProvider: "razorpay" }, { paymentProvider: { $exists: false } }] },
+        ],
+        status: { $in: ["active", "manual", "completed"] },
+        $or: [{ endDate: { $gt: new Date() } }, { endDate: null }, { endDate: { $exists: false } }],
+      }),
     ]);
 
     const missingUserIds = [...new Set(items.map((item) => String(item.userId)).filter((id) => !userMap.has(id)))];
@@ -5342,7 +5389,10 @@ router.get(
 
     const subscriptionPlanIds = [...new Set(items.map((item) => String(item.planId)).filter(Boolean))];
     const plans = subscriptionPlanIds.length
-      ? await SubscriptionPlan.find({ planId: { $in: subscriptionPlanIds } }).select("planId name price strikeOutAmount durationMonths active savings features sortOrder").lean()
+      ? await SubscriptionPlan.find({
+          planId: { $in: subscriptionPlanIds },
+          $or: [{ platform: "android" }, { platform: { $exists: false } }],
+        }).select("planId name price strikeOutAmount durationMonths active savings features sortOrder").lean()
       : [];
     const planMap = new Map(plans.map((item) => [String(item.planId), item]));
 
@@ -5373,6 +5423,7 @@ router.get(
         page,
         limit,
         total,
+        activeTotal,
         totalPages: Math.max(1, Math.ceil(total / limit)),
       },
     });
@@ -5409,13 +5460,17 @@ router.get(
     }
 
     const skip = (page - 1) * limit;
-    const [items, total] = await Promise.all([
+    const [items, total, activeTotal] = await Promise.all([
       UserSubscription.find(filters)
         .sort({ createdAt: sortOrder === "asc" ? 1 : -1 })
         .skip(skip)
         .limit(limit)
         .lean(),
       UserSubscription.countDocuments(filters),
+      UserSubscription.countDocuments({
+        subscriptionStatus: "active",
+        expiryDate: { $gt: new Date() },
+      }),
     ]);
     const userIds = [...new Set(items.map((item) => String(item.userId)))];
     const users = userIds.length
@@ -5432,7 +5487,7 @@ router.get(
         { planId: { $in: applePlanIds } },
         { billingProductId: { $in: appleProductIds } },
       ],
-    }).select("planId name billingProductId").lean();
+    }).select("planId name price durationMonths billingProductId").lean();
     const applePlanById = new Map(applePlans.map((plan) => [String(plan.planId), plan]));
     const applePlanByProductId = new Map(applePlans.map((plan) => [String(plan.billingProductId), plan]));
 
@@ -5440,13 +5495,14 @@ router.get(
       success: true,
       data: items.map((item) => {
         const plan =
-          applePlanById.get(String(item.planId || "")) ||
-          applePlanByProductId.get(String(item.productId || ""));
+          applePlanByProductId.get(String(item.productId || "")) ||
+          applePlanById.get(String(item.planId || ""));
         return {
           id: String(item._id),
           ...item,
-          planId: item.planId || plan?.planId,
+          planId: plan?.planId || item.planId,
           planName: plan?.name || item.planId || "iOS Subscription",
+          plan: plan ? mapSubscriptionPlan(plan) : null,
           user: userMap.has(String(item.userId))
             ? {
                 id: String(userMap.get(String(item.userId))._id),
@@ -5462,6 +5518,7 @@ router.get(
         page,
         limit,
         total,
+        activeTotal,
         totalPages: Math.max(1, Math.ceil(total / limit)),
       },
     });
@@ -5536,6 +5593,50 @@ router.post(
     res.json({
       success: true,
       message: "Subscription updated",
+      data: subscription,
+    });
+  }),
+);
+
+router.post(
+  "/apple-subscriptions/:id/cancel",
+  validate(cancelSubscriptionSchema),
+  asyncHandler(async (req, res) => {
+    const subscription = await UserSubscription.findById(req.params.id);
+    if (!subscription) throw new AppError("iOS subscription not found", 404);
+
+    const cancelledAt = new Date();
+    subscription.subscriptionStatus = req.validated.body.status;
+    subscription.autoRenewStatus = false;
+    subscription.expiryDate = cancelledAt;
+    subscription.adminCancelledAt = cancelledAt;
+    subscription.latestWebhookEvent = {
+      type: "ADMIN_CANCELLED",
+      subtype: "testing",
+      signedDate: cancelledAt,
+    };
+    await subscription.save();
+
+    await Subscription.updateMany(
+      {
+        paymentProvider: "apple",
+        $or: [
+          { appleOriginalTransactionId: subscription.originalTransactionId },
+          { appleTransactionId: subscription.transactionId },
+        ],
+      },
+      {
+        $set: {
+          status: req.validated.body.status,
+          endDate: cancelledAt,
+        },
+      },
+    );
+    await refreshUserPremiumState(subscription.userId);
+
+    res.json({
+      success: true,
+      message: "iOS subscription cancelled for testing",
       data: subscription,
     });
   }),

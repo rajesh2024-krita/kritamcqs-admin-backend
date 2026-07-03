@@ -18,6 +18,7 @@ const userSubscriptionSchema = new Schema(
     autoRenewStatus: { type: Boolean, default: true },
     platform: { type: String, enum: ["ios"], default: "ios", index: true },
     latestWebhookEvent: { type: Schema.Types.Mixed },
+    adminCancelledAt: Date,
     environment: { type: String, enum: ["Production", "Sandbox"] },
   },
   baseJsonOptions,
