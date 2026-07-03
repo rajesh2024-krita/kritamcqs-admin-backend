@@ -5024,14 +5024,21 @@ async function serializeDailyPlans(items) {
 function mapSubscriptionPlan(plan) {
   if (!plan) return null;
   const strikeOutAmount = Number(plan.strikeOutAmount ?? plan.stikeOutAmount ?? plan.strikeoutAmount ?? plan.originalPrice ?? plan.mrp ?? 0);
+  const productId = String(
+    plan.billingProductId ??
+    plan.productId ??
+    plan.iosProductId ??
+    plan.appleProductId ??
+    plan.storeProductId ??
+    plan.identifier ??
+    "",
+  ).trim();
   return {
     id: plan.planId,
+    planId: plan.planId,
     platform: plan.platform || "android",
-    billingProductId:
-      plan.billingProductId ||
-      (plan.platform === "ios"
-        ? process.env.APPLE_PREMIUM_PRODUCT_ID || "app.kritamcqs.iosapp.premium.6months"
-        : ""),
+    productId,
+    billingProductId: productId,
     name: plan.name,
     price: Number(plan.price || 0),
     strikeOutAmount: Number.isFinite(strikeOutAmount) && strikeOutAmount > 0 ? strikeOutAmount : 0,
@@ -8385,6 +8392,24 @@ function subscriptionPlanPlatformFilter(platform) {
   throw new AppError("A valid subscription plan platform is required", 400);
 }
 
+function resolveIosProductId(payload = {}, existing = {}) {
+  return String(
+    payload.billingProductId ??
+    payload.productId ??
+    payload.iosProductId ??
+    payload.appleProductId ??
+    payload.storeProductId ??
+    payload.identifier ??
+    existing.billingProductId ??
+    existing.productId ??
+    existing.iosProductId ??
+    existing.appleProductId ??
+    existing.storeProductId ??
+    existing.identifier ??
+    "",
+  ).trim();
+}
+
 const subscriptionPlanService = createCrudService({
   model: SubscriptionPlan,
   allowedSorts: ["createdAt", "updatedAt", "platform", "name", "price", "durationMonths", "sortOrder"],
@@ -8403,7 +8428,7 @@ const subscriptionPlanService = createCrudService({
   },
   beforeCreate: async (payload) => {
     const platform = payload.platform === "ios" ? "ios" : "android";
-    const billingProductId = platform === "ios" ? String(payload.billingProductId || "").trim() : "";
+    const billingProductId = platform === "ios" ? resolveIosProductId(payload) : "";
     if (platform === "ios" && !billingProductId) {
       throw new AppError("App Store Product ID is required for iOS plans", 400);
     }
@@ -8432,7 +8457,7 @@ const subscriptionPlanService = createCrudService({
     }
     const billingProductId =
       platform === "ios"
-        ? String(payload.billingProductId ?? _existing.billingProductId ?? "").trim()
+        ? resolveIosProductId(payload, _existing)
         : "";
     if (platform === "ios" && !billingProductId) {
       throw new AppError("App Store Product ID is required for iOS plans", 400);
