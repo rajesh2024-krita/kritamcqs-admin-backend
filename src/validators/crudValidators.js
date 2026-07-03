@@ -40,6 +40,7 @@ export const listQuerySchema = z.object({
     isAdmin: z.string().optional(),
     onboardingComplete: z.string().optional(),
     active: z.string().optional(),
+    platform: z.enum(["ios", "android"]).optional(),
     type: z.string().optional(),
   }),
 });
@@ -47,6 +48,7 @@ export const listQuerySchema = z.object({
 export const bulkDeleteSchema = z.object({
   body: z.object({
     ids: z.array(z.string().trim().min(1)).min(1).max(1000),
+    platform: z.enum(["ios", "android"]).optional(),
   }),
 });
 
@@ -349,6 +351,8 @@ export const couponBodySchema = z.object({
 
 export const subscriptionPlanBodySchema = z.object({
   planId: z.string().min(1).max(80),
+  platform: z.enum(["ios", "android"]),
+  billingProductId: z.string().trim().max(255).optional().or(z.literal("")),
   name: z.string().min(2).max(120),
   price: z.coerce.number().min(0),
   strikeOutAmount: z.coerce.number().min(0).optional().default(0),

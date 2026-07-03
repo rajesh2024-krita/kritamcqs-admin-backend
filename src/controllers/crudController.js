@@ -8,7 +8,7 @@ export function createCrudController(service, label) {
     },
 
     async getById(req, res) {
-      const data = await service.getById(req.params.id);
+      const data = await service.getById(req.params.id, { admin: req.admin, req });
       sendResponse(res, { data });
     },
 

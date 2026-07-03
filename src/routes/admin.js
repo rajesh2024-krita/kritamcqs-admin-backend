@@ -8377,17 +8377,29 @@ const couponService = createCrudService({
   },
 });
 
+function subscriptionPlanPlatformFilter(platform) {
+  if (platform === "ios") return { platform: "ios" };
+  if (platform === "android") {
+    return { $and: [{ $or: [{ platform: "android" }, { platform: { $exists: false } }] }] };
+  }
+  throw new AppError("A valid subscription plan platform is required", 400);
+}
+
 const subscriptionPlanService = createCrudService({
   model: SubscriptionPlan,
   allowedSorts: ["createdAt", "updatedAt", "platform", "name", "price", "durationMonths", "sortOrder"],
   searchFields: ["planId", "name", "description", "savings", "features"],
   exactFilters: ["active", "status"],
   buildCustomFilters: (query) => {
-    if (query.platform === "ios") return { platform: "ios" };
-    if (query.platform === "android") {
-      return { $and: [{ $or: [{ platform: "android" }, { platform: { $exists: false } }] }] };
-    }
-    return {};
+    return subscriptionPlanPlatformFilter(query.platform);
+  },
+  buildScopeFilter: (context) => {
+    if (!context?.req) return {};
+    const platform =
+      context.req.validated?.body?.platform ||
+      context.req.query?.platform ||
+      context.req.body?.platform;
+    return subscriptionPlanPlatformFilter(platform);
   },
   beforeCreate: async (payload) => {
     const platform = payload.platform === "ios" ? "ios" : "android";
@@ -8414,6 +8426,10 @@ const subscriptionPlanService = createCrudService({
   },
   beforeUpdate: async (_existing, payload) => {
     const platform = payload.platform === "ios" || (!payload.platform && _existing.platform === "ios") ? "ios" : "android";
+    const existingPlatform = _existing.platform === "ios" ? "ios" : "android";
+    if (platform !== existingPlatform) {
+      throw new AppError("A subscription plan cannot be moved to another platform", 409);
+    }
     const billingProductId =
       platform === "ios"
         ? String(payload.billingProductId ?? _existing.billingProductId ?? "").trim()

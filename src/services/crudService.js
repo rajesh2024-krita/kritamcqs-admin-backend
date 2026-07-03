@@ -22,6 +22,7 @@ export function createCrudService(config) {
     afterUpdate,
     afterDelete,
     buildCustomFilters,
+    buildScopeFilter,
   } = config;
 
   return {
@@ -53,9 +54,10 @@ export function createCrudService(config) {
       return { items, filters };
     },
 
-    async getById(id) {
+    async getById(id, context = {}) {
       assertObjectId(id);
-      const item = await model.findById(id).populate(populate);
+      const scopeFilter = buildScopeFilter ? buildScopeFilter(context) || {} : {};
+      const item = await model.findOne({ _id: id, ...scopeFilter }).populate(populate);
       if (!item) throw new AppError(`${model.modelName} not found`, 404);
       return item;
     },
@@ -70,7 +72,8 @@ export function createCrudService(config) {
 
     async update(id, payload, context = {}) {
       assertObjectId(id);
-      const existing = await model.findById(id);
+      const scopeFilter = buildScopeFilter ? buildScopeFilter(context) || {} : {};
+      const existing = await model.findOne({ _id: id, ...scopeFilter });
       if (!existing) throw new AppError(`${model.modelName} not found`, 404);
       const previous = existing.toObject({ depopulate: true });
       const input = beforeUpdate ? await beforeUpdate(existing, payload, context) : payload;
@@ -83,7 +86,8 @@ export function createCrudService(config) {
 
     async remove(id, context = {}) {
       assertObjectId(id);
-      const existing = await model.findById(id);
+      const scopeFilter = buildScopeFilter ? buildScopeFilter(context) || {} : {};
+      const existing = await model.findOne({ _id: id, ...scopeFilter });
       if (!existing) throw new AppError(`${model.modelName} not found`, 404);
       const previous = existing.toObject({ depopulate: true });
       if (beforeDelete) await beforeDelete(existing, context);
