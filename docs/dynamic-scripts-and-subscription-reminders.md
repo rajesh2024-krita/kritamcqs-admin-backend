@@ -15,6 +15,7 @@ Returns enabled scripts matching the requested platform or `All`, sorted by prio
 ### POST `/api/subscription-reminders/track`
 
 Authenticated app user endpoint. Creates or refreshes a pending reminder schedule.
+When the active reminder configuration has `immediateReminderEnabled` enabled, this endpoint sends reminder #1 immediately and schedules the next reminder using `initialDelay`.
 
 Body:
 
@@ -56,4 +57,4 @@ All admin APIs require the existing admin bearer token.
 - `GET /api/admin/subscription-reminder/logs`
 - `GET /api/admin/subscription-reminder/logs/user/:userId`
 
-The subscription reminder scheduler runs every minute from the app backend process. The admin backend only manages configuration and reporting for the admin panel.
+The subscription reminder scheduler runs every minute from the app backend process. Immediate cancellation reminders are also sent by the app backend during `/api/subscription-reminders/track`. The admin backend only manages configuration and reporting for the admin panel.

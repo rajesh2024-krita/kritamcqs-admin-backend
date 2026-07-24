@@ -11,6 +11,7 @@ const reminderConfigurationSchema = new Schema(
     reminderName: { type: String, required: true, trim: true, maxlength: 160 },
     status: { type: String, enum: reminderStatusValues, default: "enabled", index: true },
     channels: { type: String, enum: reminderChannelValues, default: "Both" },
+    immediateReminderEnabled: { type: Boolean, default: true },
     initialDelay: { type: Number, min: 0, default: 30 },
     repeatInterval: { type: Number, min: 1, default: 24 },
     delayUnit: { type: String, enum: reminderDelayUnitValues, default: "Hours" },

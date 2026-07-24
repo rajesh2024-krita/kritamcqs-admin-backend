@@ -34,6 +34,7 @@ function configPayload(body = {}, existing = {}) {
     reminderName: body.reminderName !== undefined ? String(body.reminderName || "").trim() : existing.reminderName,
     status: body.status !== undefined ? String(body.status || "enabled") : existing.status || "enabled",
     channels: body.channels !== undefined ? String(body.channels || "Both") : existing.channels || "Both",
+    immediateReminderEnabled: body.immediateReminderEnabled !== undefined ? Boolean(body.immediateReminderEnabled) : existing.immediateReminderEnabled !== false,
     initialDelay: body.initialDelay !== undefined ? Number(body.initialDelay || 0) : Number(existing.initialDelay || 30),
     repeatInterval: body.repeatInterval !== undefined ? Number(body.repeatInterval || 1) : Number(existing.repeatInterval || 24),
     delayUnit: body.delayUnit !== undefined ? String(body.delayUnit || "Hours") : existing.delayUnit || "Hours",
