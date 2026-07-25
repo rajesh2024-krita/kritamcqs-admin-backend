@@ -37,6 +37,7 @@ import {
   LearningSession,
   LearningLevel,
   ListStyle,
+  MicrosoftClarityLog,
   Mistake,
   MockPatternBlueprint,
   MockTest,
@@ -3706,6 +3707,93 @@ router.delete("/app-usage/logs", requireMainAdmin, asyncHandler(async (req, res)
     AppUsageSession.deleteMany(sessionFilter),
   ]);
   res.json({ success: true, message: "App usage logs deleted", data: { eventsDeleted: events.deletedCount, sessionsDeleted: sessions.deletedCount } });
+}));
+
+router.get("/microsoft-clarity/status", asyncHandler(async (_req, res) => {
+  const latest = await MicrosoftClarityLog.findOne({}).sort({ timestamp: -1 }).lean();
+  const since = new Date(Date.now() - 5 * 60 * 1000);
+  const [connectedDevices, activeSessions, failedInitializations, waitingDevices] = await Promise.all([
+    MicrosoftClarityLog.distinct("deviceId", { status: { $in: ["Connected", "Recording", "Uploading"] }, timestamp: { $gte: since }, deviceId: { $ne: "" } }),
+    MicrosoftClarityLog.distinct("sessionId", { status: { $in: ["Connected", "Recording", "Uploading", "Waiting for Data"] }, timestamp: { $gte: since }, sessionId: { $ne: "" } }),
+    MicrosoftClarityLog.countDocuments({ status: { $in: ["Initialization Failed", "Plugin Missing", "Project ID Invalid", "Internet Unavailable", "Native Error"] }, timestamp: { $gte: since } }),
+    MicrosoftClarityLog.distinct("deviceId", { status: "Waiting for Data", timestamp: { $gte: since }, deviceId: { $ne: "" } }),
+  ]);
+  res.json({
+    success: true,
+    data: {
+      currentStatus: latest?.status || "Disabled",
+      latest: latest ? { ...latest, id: String(latest._id), _id: undefined } : null,
+      connectedDevices: connectedDevices.length,
+      activeSessions: activeSessions.length,
+      failedInitializations,
+      waitingDevices: waitingDevices.length,
+      lastUploadTime: latest?.lastUploadAt || latest?.timestamp || null,
+      heartbeat: latest?.lastHeartbeatAt || latest?.timestamp || null,
+    },
+  });
+}));
+
+router.get("/microsoft-clarity/logs", asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+  const filter = {};
+  const level = String(req.query.level || "all").toLowerCase();
+  const status = String(req.query.status || "all").trim();
+  const search = String(req.query.search || "").trim();
+  if (["success", "warning", "error", "info"].includes(level)) filter.level = level;
+  if (status && status !== "all") filter.status = status;
+  if (search) {
+    const pattern = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    filter.$or = [{ message: pattern }, { deviceId: pattern }, { projectId: pattern }, { platform: pattern }, { errorMessage: pattern }];
+  }
+  const [items, total] = await Promise.all([
+    MicrosoftClarityLog.find(filter).sort({ timestamp: -1 }).skip((page - 1) * limit).limit(limit).lean(),
+    MicrosoftClarityLog.countDocuments(filter),
+  ]);
+  res.json({
+    success: true,
+    data: items.map((item) => ({ ...item, id: String(item._id), _id: undefined })),
+    meta: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) },
+  });
+}));
+
+router.get("/microsoft-clarity/logs/export", asyncHandler(async (req, res) => {
+  const format = String(req.query.format || "csv").toLowerCase();
+  const rows = await MicrosoftClarityLog.find({}).sort({ timestamp: -1 }).limit(20000).lean();
+  const flatRows = rows.map((row) => ({
+    timestamp: row.timestamp,
+    level: row.level,
+    status: row.status,
+    message: row.message,
+    deviceId: row.deviceId,
+    platform: row.platform,
+    appVersion: row.appVersion,
+    projectId: row.projectId,
+    sessionId: row.sessionId,
+    sdkVersion: row.sdkVersion,
+    pluginVersion: row.pluginVersion,
+    capacitorVersion: row.capacitorVersion,
+    errorMessage: row.errorMessage,
+  }));
+  if (format === "xlsx" || format === "excel") {
+    const worksheet = XLSX.utils.json_to_sheet(flatRows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "clarity-logs");
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", "attachment; filename=microsoft-clarity-logs.xlsx");
+    return res.send(buffer);
+  }
+  const columns = Object.keys(flatRows[0] || { empty: "" });
+  const csv = [columns.join(","), ...flatRows.map((row) => columns.map((column) => JSON.stringify(row[column] ?? "")).join(","))].join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", "attachment; filename=microsoft-clarity-logs.csv");
+  res.send(csv);
+}));
+
+router.delete("/microsoft-clarity/logs", requireMainAdmin, asyncHandler(async (_req, res) => {
+  const result = await MicrosoftClarityLog.deleteMany({});
+  res.json({ success: true, message: "Microsoft Clarity logs cleared", data: { deleted: result.deletedCount } });
 }));
 
 router.post("/daily-test/settings", asyncHandler(async (req, res) => {

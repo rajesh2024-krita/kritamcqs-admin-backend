@@ -11,6 +11,7 @@ import {
   ExplanationPreviewTemplate,
   InvoiceSettings,
   ListStyle,
+  MicrosoftClarityLog,
   MicrosoftClaritySettings,
   OfferTimerSettings,
   PolicyPage,
@@ -76,6 +77,19 @@ const pushTokenSchema = z.object({
 });
 
 const clarityLogLevels = ["None", "Error", "Warning", "Info", "Verbose"];
+const clarityStatuses = [
+  "Initializing",
+  "Connected",
+  "Waiting for Data",
+  "Uploading",
+  "Recording",
+  "Disabled",
+  "Initialization Failed",
+  "Plugin Missing",
+  "Project ID Invalid",
+  "Internet Unavailable",
+  "Native Error",
+];
 
 const microsoftClaritySettingsSchema = z.object({
   enabled: z.boolean().optional().default(false),
@@ -96,6 +110,27 @@ const microsoftClaritySettingsSchema = z.object({
       message: "Clarity Project ID can contain only letters, numbers, hyphens, and underscores",
     });
   }
+});
+
+const microsoftClarityLogSchema = z.object({
+  deviceId: z.string().trim().max(180).optional().default(""),
+  platform: z.string().trim().max(80).optional().default(""),
+  appVersion: z.string().trim().max(80).optional().default(""),
+  projectId: z.string().trim().max(100).optional().default(""),
+  status: z.enum(clarityStatuses).optional().default("Initializing"),
+  level: z.enum(["success", "warning", "error", "info"]).optional().default("info"),
+  message: z.string().trim().max(2000).optional().default(""),
+  sessionId: z.string().trim().max(180).optional().default(""),
+  sdkVersion: z.string().trim().max(80).optional().default(""),
+  pluginVersion: z.string().trim().max(80).optional().default(""),
+  capacitorVersion: z.string().trim().max(80).optional().default(""),
+  sdkStatus: z.string().trim().max(120).optional().default(""),
+  errorMessage: z.string().trim().max(4000).optional().default(""),
+  stack: z.string().trim().max(8000).optional().default(""),
+  metadata: z.record(z.unknown()).optional().default({}),
+  timestamp: z.string().optional(),
+  lastHeartbeatAt: z.string().optional(),
+  lastUploadAt: z.string().optional(),
 });
 
 function mapMicrosoftClaritySettings(settings) {
@@ -329,6 +364,22 @@ router.get("/app-settings", asyncHandler(async (_req, res) => {
 router.get("/settings/microsoft-clarity", asyncHandler(async (_req, res) => {
   const settings = await getOrCreateMicrosoftClaritySettings();
   res.json(mapMicrosoftClaritySettings(settings));
+}));
+
+router.get("/microsoft-clarity/config", asyncHandler(async (_req, res) => {
+  const settings = await getOrCreateMicrosoftClaritySettings();
+  res.json(mapMicrosoftClaritySettings(settings));
+}));
+
+router.post("/microsoft-clarity/log", asyncHandler(async (req, res) => {
+  const payload = microsoftClarityLogSchema.parse(req.body || {});
+  const log = await MicrosoftClarityLog.create({
+    ...payload,
+    timestamp: payload.timestamp ? new Date(payload.timestamp) : new Date(),
+    lastHeartbeatAt: payload.lastHeartbeatAt ? new Date(payload.lastHeartbeatAt) : undefined,
+    lastUploadAt: payload.lastUploadAt ? new Date(payload.lastUploadAt) : undefined,
+  });
+  res.status(201).json({ success: true, data: { id: String(log._id) } });
 }));
 
 router.put("/settings/microsoft-clarity", requireAdmin, asyncHandler(async (req, res) => {
