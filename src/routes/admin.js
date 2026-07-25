@@ -8,6 +8,8 @@ import {
   Chapter,
   ChapterPerformance,
   AppNavigationEvent,
+  AppUsageEvent,
+  AppUsageSession,
   AppNotificationSettings,
   AppUsageSettings,
   AuthSettings,
@@ -3386,31 +3388,112 @@ router.post("/uploads/app-images", upload.array("images", 50), asyncHandler(asyn
 router.get("/app-usage/settings", asyncHandler(async (_req, res) => {
   const settings = await AppUsageSettings.findOneAndUpdate(
     { key: "default" },
-    { $setOnInsert: { key: "default", enabled: false } },
+    { $setOnInsert: { key: "default", enabled: false, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   res.json({ success: true, data: settings });
 }));
 
 router.post("/app-usage/settings", asyncHandler(async (req, res) => {
+  const allowedRetentionDays = [7, 15, 30, 60, 90, 180, 365];
+  const retentionDays = allowedRetentionDays.includes(Number(req.body?.retentionDays)) ? Number(req.body.retentionDays) : 90;
+  const sessionTimeoutMinutes = Math.max(5, Math.min(240, Number(req.body?.sessionTimeoutMinutes || 30)));
   const settings = await AppUsageSettings.findOneAndUpdate(
     { key: "default" },
-    { key: "default", enabled: Boolean(req.body?.enabled) },
+    {
+      key: "default",
+      enabled: Boolean(req.body?.enabled),
+      automaticCleanupEnabled: Boolean(req.body?.automaticCleanupEnabled),
+      retentionDays,
+      sessionTimeoutMinutes,
+    },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   res.json({ success: true, data: settings, message: settings.enabled ? "App usage tracking enabled" : "App usage tracking disabled" });
 }));
 
+function appUsageDateFilter(query) {
+  const days = Math.max(1, Math.min(365, Number(query.days || 7)));
+  const from = query.from ? new Date(String(query.from)) : new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const to = query.to ? new Date(String(query.to)) : new Date();
+  return {
+    from: Number.isNaN(from.getTime()) ? new Date(Date.now() - days * 24 * 60 * 60 * 1000) : from,
+    to: Number.isNaN(to.getTime()) ? new Date() : to,
+    days,
+  };
+}
+
+function appUsageFilter(query, dateField = "timestamp") {
+  const { from, to } = appUsageDateFilter(query);
+  const filter = { [dateField]: { $gte: from, $lte: to } };
+  const platform = String(query.platform || "all").trim().toLowerCase();
+  const plan = String(query.plan || "all").trim();
+  const eventType = String(query.eventType || "all").trim();
+  const screen = String(query.screen || "").trim();
+  const userId = String(query.userId || "").trim();
+  const appVersion = String(query.appVersion || "").trim();
+  const deviceModel = String(query.deviceModel || "").trim();
+  if (platform && platform !== "all") filter.platform = platform;
+  if (plan === "Free" || plan === "Premium") filter.userType = plan;
+  if (eventType && eventType !== "all") filter.eventType = eventType;
+  if (screen) filter.screen = new RegExp(screen.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  if (userId) filter.userId = userId;
+  if (appVersion) filter.appVersion = appVersion;
+  if (deviceModel) filter.deviceModel = new RegExp(deviceModel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  return filter;
+}
+
+function formatAppUsageSession(row) {
+  return {
+    id: String(row._id || row.id || ""),
+    sessionId: row.sessionId,
+    userId: row.userId,
+    userName: row.userName,
+    email: row.email,
+    userType: row.userType,
+    platform: row.platform,
+    appVersion: row.appVersion,
+    deviceModel: row.deviceModel,
+    osVersion: row.osVersion,
+    startedAt: row.startedAt,
+    endedAt: row.endedAt,
+    durationSeconds: Number(row.durationSeconds || 0),
+    entryScreen: row.entryScreen,
+    exitScreen: row.exitScreen,
+    screenViews: Number(row.screenViews || 0),
+    clicks: Number(row.clicks || 0),
+    lastActiveAt: row.lastActiveAt,
+  };
+}
+
 router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
-  const days = Math.max(1, Math.min(90, Number(req.query.days || 7)));
-  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const [settings, pages, recent] = await Promise.all([
-    AppUsageSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default", enabled: false } }, { upsert: true, new: true }),
-    AppNavigationEvent.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+  const { from, to } = appUsageDateFilter(req.query);
+  const eventFilter = appUsageFilter(req.query);
+  const sessionFilter = appUsageFilter(req.query, "startedAt");
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const [settings, totals, pages, clicks, dailyActive, hourly, platform, recent, users] = await Promise.all([
+    AppUsageSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default", enabled: false, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } }, { upsert: true, new: true }),
+    AppUsageEvent.aggregate([
+      { $match: eventFilter },
       {
         $group: {
-          _id: "$path",
+          _id: null,
+          activeUsers: { $addToSet: "$userId" },
+          screenViews: { $sum: { $cond: [{ $eq: ["$eventType", "ScreenView"] }, 1, 0] } },
+          clicks: { $sum: { $cond: [{ $regexMatch: { input: "$eventType", regex: /click/i } }, 1, 0] } },
+          premiumUsers: { $addToSet: { $cond: [{ $eq: ["$userType", "Premium"] }, "$userId", null] } },
+          freeUsers: { $addToSet: { $cond: [{ $eq: ["$userType", "Free"] }, "$userId", null] } },
+          androidUsers: { $addToSet: { $cond: [{ $eq: ["$platform", "android"] }, "$userId", null] } },
+          iosUsers: { $addToSet: { $cond: [{ $eq: ["$platform", "ios"] }, "$userId", null] } },
+        },
+      },
+    ]),
+    AppUsageEvent.aggregate([
+      { $match: { ...eventFilter, eventType: "ScreenView" } },
+      {
+        $group: {
+          _id: "$screen",
           visits: { $sum: 1 },
           totalSeconds: { $sum: "$durationSeconds" },
           averageSeconds: { $avg: "$durationSeconds" },
@@ -3420,12 +3503,59 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
       { $sort: { totalSeconds: -1, visits: -1 } },
       { $limit: 50 },
     ]),
-    AppNavigationEvent.find({ createdAt: { $gte: since } }).sort({ createdAt: -1 }).limit(100).lean(),
+    AppUsageEvent.aggregate([
+      { $match: { ...eventFilter, eventType: { $regex: /click/i } } },
+      { $group: { _id: { componentName: "$componentName", componentType: "$componentType", screen: "$screen" }, count: { $sum: 1 }, lastClickedAt: { $max: "$timestamp" } } },
+      { $sort: { count: -1, lastClickedAt: -1 } },
+      { $limit: 50 },
+    ]),
+    AppUsageEvent.aggregate([
+      { $match: eventFilter },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, users: { $addToSet: "$userId" }, events: { $sum: 1 } } },
+      { $sort: { _id: 1 } },
+    ]),
+    AppUsageEvent.aggregate([
+      { $match: eventFilter },
+      { $group: { _id: { $hour: "$timestamp" }, events: { $sum: 1 }, users: { $addToSet: "$userId" } } },
+      { $sort: { _id: 1 } },
+    ]),
+    AppUsageEvent.aggregate([
+      { $match: eventFilter },
+      { $group: { _id: "$platform", events: { $sum: 1 }, users: { $addToSet: "$userId" } } },
+      { $sort: { events: -1 } },
+    ]),
+    AppUsageEvent.find(eventFilter).sort({ timestamp: -1 }).limit(100).lean(),
+    AppUsageSession.aggregate([
+      { $match: sessionFilter },
+      { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+      { $sort: { lastActive: -1 } },
+      { $limit: 100 },
+    ]),
   ]);
+  const sessionTotals = await AppUsageSession.aggregate([
+    { $match: sessionFilter },
+    { $group: { _id: null, sessions: { $sum: 1 }, averageSessionDuration: { $avg: "$durationSeconds" }, todayUsers: { $addToSet: { $cond: [{ $gte: ["$lastActiveAt", todayStart] }, "$userId", null] } } } },
+  ]);
+  const totalRow = totals[0] || {};
+  const sessionRow = sessionTotals[0] || {};
+  const countSet = (items = []) => items.filter(Boolean).length;
   res.json({
     success: true,
     data: {
       enabled: Boolean(settings.enabled),
+      settings,
+      summary: {
+        todaysActiveUsers: countSet(sessionRow.todayUsers),
+        totalSessions: Number(sessionRow.sessions || 0),
+        averageSessionDuration: Math.round(Number(sessionRow.averageSessionDuration || 0)),
+        totalScreenViews: Number(totalRow.screenViews || 0),
+        totalClicks: Number(totalRow.clicks || 0),
+        premiumUsers: countSet(totalRow.premiumUsers),
+        freeUsers: countSet(totalRow.freeUsers),
+        androidUsers: countSet(totalRow.androidUsers),
+        iosUsers: countSet(totalRow.iosUsers),
+        activeUsers: countSet(totalRow.activeUsers),
+      },
       pages: pages.map((item) => ({
         path: item._id,
         visits: item.visits,
@@ -3433,9 +3563,149 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
         averageSeconds: Math.round(Number(item.averageSeconds || 0)),
         users: (item.users || []).filter(Boolean).length,
       })),
+      clicks: clicks.map((item) => ({
+        componentName: item._id.componentName || "Unknown",
+        componentType: item._id.componentType || "Component",
+        screen: item._id.screen || "",
+        count: item.count,
+        lastClickedAt: item.lastClickedAt,
+      })),
+      dailyActive: dailyActive.map((item) => ({ date: item._id, users: countSet(item.users), events: item.events })),
+      hourly: hourly.map((item) => ({ hour: item._id, users: countSet(item.users), events: item.events })),
+      platform: platform.map((item) => ({ platform: item._id || "unknown", users: countSet(item.users), events: item.events })),
+      users,
       recent: recent.map((item) => ({ ...item, id: String(item._id), _id: undefined })),
+      range: { from, to },
     },
   });
+}));
+
+router.get("/app-usage/users", asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+  const search = String(req.query.search || "").trim();
+  const filter = appUsageFilter(req.query, "startedAt");
+  if (search) {
+    filter.$or = [
+      { userName: new RegExp(search, "i") },
+      { email: new RegExp(search, "i") },
+      { userId: search },
+    ];
+  }
+  const pipeline = [
+    { $match: filter },
+    { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+    { $sort: { lastActive: -1 } },
+  ];
+  const [items, totalRows] = await Promise.all([
+    AppUsageSession.aggregate([...pipeline, { $skip: (page - 1) * limit }, { $limit: limit }]),
+    AppUsageSession.aggregate([...pipeline, { $count: "total" }]),
+  ]);
+  const total = Number(totalRows[0]?.total || 0);
+  res.json({ success: true, data: items, meta: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } });
+}));
+
+router.get("/app-usage/users/:userId/timeline", asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || "");
+  const date = String(req.query.date || "").trim();
+  const filter = { userId };
+  if (date) {
+    const start = new Date(`${date}T00:00:00.000Z`);
+    const end = new Date(`${date}T23:59:59.999Z`);
+    filter.timestamp = { $gte: start, $lte: end };
+  }
+  const [dates, events] = await Promise.all([
+    AppUsageEvent.aggregate([
+      { $match: { userId } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, events: { $sum: 1 }, lastActive: { $max: "$timestamp" } } },
+      { $sort: { _id: -1 } },
+      { $limit: 120 },
+    ]),
+    date ? AppUsageEvent.find(filter).sort({ timestamp: 1 }).limit(1000).lean() : [],
+  ]);
+  res.json({ success: true, data: { dates: dates.map((item) => ({ date: item._id, events: item.events, lastActive: item.lastActive })), events: events.map((item) => ({ ...item, id: String(item._id), _id: undefined })) } });
+}));
+
+router.get("/app-usage/sessions/:sessionId", asyncHandler(async (req, res) => {
+  const sessionId = String(req.params.sessionId || "");
+  const [session, events] = await Promise.all([
+    AppUsageSession.findOne({ sessionId }).lean(),
+    AppUsageEvent.find({ sessionId }).sort({ timestamp: 1 }).limit(2000).lean(),
+  ]);
+  if (!session) throw new AppError("Session not found", 404);
+  res.json({ success: true, data: { session: formatAppUsageSession(session), events: events.map((item) => ({ ...item, id: String(item._id), _id: undefined })) } });
+}));
+
+router.get("/app-usage/export", asyncHandler(async (req, res) => {
+  const format = String(req.query.format || "csv").toLowerCase();
+  const dataset = String(req.query.dataset || "events").toLowerCase();
+  const filter = dataset === "sessions" ? appUsageFilter(req.query, "startedAt") : appUsageFilter(req.query);
+  const rows = dataset === "sessions"
+    ? await AppUsageSession.find(filter).sort({ startedAt: -1 }).limit(10000).lean()
+    : await AppUsageEvent.find(filter).sort({ timestamp: -1 }).limit(20000).lean();
+  const flatRows = rows.map((row) => dataset === "sessions" ? formatAppUsageSession(row) : {
+    eventId: row.eventId,
+    sessionId: row.sessionId,
+    userId: row.userId,
+    userName: row.userName,
+    email: row.email,
+    userType: row.userType,
+    platform: row.platform,
+    screen: row.screen,
+    eventType: row.eventType,
+    componentName: row.componentName,
+    componentType: row.componentType,
+    timestamp: row.timestamp,
+    durationSeconds: row.durationSeconds,
+  });
+  if (format === "xlsx" || format === "excel") {
+    const worksheet = XLSX.utils.json_to_sheet(flatRows);
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, dataset);
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename=app-usage-${dataset}.xlsx`);
+    return res.send(buffer);
+  }
+  if (format === "pdf") {
+    const columns = Object.keys(flatRows[0] || { empty: "" });
+    const rowsHtml = flatRows.slice(0, 1000).map((row) => `<tr>${columns.map((column) => `<td>${escapeHtml(String(row[column] ?? ""))}</td>`).join("")}</tr>`).join("");
+    const html = `<!doctype html><html><head><meta charset="utf-8"/><style>body{font-family:Arial,sans-serif;font-size:11px;color:#111}h1{font-size:18px}table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:6px;text-align:left;vertical-align:top}th{background:#f1f5f9}</style></head><body><h1>App Usage ${escapeHtml(dataset)}</h1><table><thead><tr>${columns.map((column) => `<th>${escapeHtml(column)}</th>`).join("")}</tr></thead><tbody>${rowsHtml}</tbody></table></body></html>`;
+    const browser = await puppeteer.launch({ headless: "new", args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    try {
+      const page = await browser.newPage();
+      await page.setContent(html, { waitUntil: "networkidle0" });
+      const pdf = await page.pdf({ format: "A4", printBackground: true, margin: { top: "16mm", right: "10mm", bottom: "16mm", left: "10mm" } });
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename=app-usage-${dataset}.pdf`);
+      return res.send(pdf);
+    } finally {
+      await browser.close().catch(() => undefined);
+    }
+  }
+  const columns = Object.keys(flatRows[0] || { empty: "" });
+  const csv = [columns.join(","), ...flatRows.map((row) => columns.map((column) => JSON.stringify(row[column] ?? "")).join(","))].join("\n");
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename=app-usage-${dataset}.csv`);
+  res.send(csv);
+}));
+
+router.delete("/app-usage/logs", requireMainAdmin, asyncHandler(async (req, res) => {
+  const filter = appUsageFilter(req.body || {});
+  const sessionFilter = appUsageFilter(req.body || {}, "startedAt");
+  if (req.body?.deleteEverything === true) {
+    delete filter.timestamp;
+    delete sessionFilter.startedAt;
+  }
+  if (req.body?.userId) {
+    filter.userId = String(req.body.userId);
+    sessionFilter.userId = String(req.body.userId);
+  }
+  const [events, sessions] = await Promise.all([
+    AppUsageEvent.deleteMany(filter),
+    AppUsageSession.deleteMany(sessionFilter),
+  ]);
+  res.json({ success: true, message: "App usage logs deleted", data: { eventsDeleted: events.deletedCount, sessionsDeleted: sessions.deletedCount } });
 }));
 
 router.post("/daily-test/settings", asyncHandler(async (req, res) => {

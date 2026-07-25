@@ -62,6 +62,8 @@ export * from "./SubscriptionPageTemplate.js";
 export * from "./DashboardCarouselBanner.js";
 export * from "./ExplanationPreviewTemplate.js";
 export * from "./AppUsageSettings.js";
+export * from "./AppUsageSession.js";
+export * from "./AppUsageEvent.js";
 export * from "./AppNavigationEvent.js";
 export * from "./WebsiteContent.js";
 export * from "./PolicyPage.js";
