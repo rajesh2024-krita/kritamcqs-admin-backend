@@ -3712,10 +3712,26 @@ router.delete("/app-usage/logs", requireMainAdmin, asyncHandler(async (req, res)
 router.get("/microsoft-clarity/status", asyncHandler(async (_req, res) => {
   const latest = await MicrosoftClarityLog.findOne({}).sort({ timestamp: -1 }).lean();
   const since = new Date(Date.now() - 5 * 60 * 1000);
+  const failureStatuses = [
+    "Configuration API Failed",
+    "Cordova Not Ready",
+    "Device Not Ready",
+    "Initialization Failed",
+    "Plugin Not Loaded",
+    "Plugin Missing",
+    "Project ID Invalid",
+    "Internet Unavailable",
+    "Native Error",
+    "SDK Initialization Failed",
+    "Session Not Created",
+    "Upload Blocked",
+    "Upload Failed",
+  ];
+  const latestMetadata = latest?.metadata || {};
   const [connectedDevices, activeSessions, failedInitializations, waitingDevices] = await Promise.all([
     MicrosoftClarityLog.distinct("deviceId", { status: { $in: ["Connected", "Recording", "Uploading"] }, timestamp: { $gte: since }, deviceId: { $ne: "" } }),
-    MicrosoftClarityLog.distinct("sessionId", { status: { $in: ["Connected", "Recording", "Uploading", "Waiting for Data"] }, timestamp: { $gte: since }, sessionId: { $ne: "" } }),
-    MicrosoftClarityLog.countDocuments({ status: { $in: ["Initialization Failed", "Plugin Missing", "Project ID Invalid", "Internet Unavailable", "Native Error"] }, timestamp: { $gte: since } }),
+    MicrosoftClarityLog.distinct("sessionId", { status: { $in: ["Connected", "Recording", "Uploading"] }, timestamp: { $gte: since }, sessionId: { $ne: "" } }),
+    MicrosoftClarityLog.countDocuments({ status: { $in: failureStatuses }, timestamp: { $gte: since } }),
     MicrosoftClarityLog.distinct("deviceId", { status: "Waiting for Data", timestamp: { $gte: since }, deviceId: { $ne: "" } }),
   ]);
   res.json({
@@ -3729,6 +3745,23 @@ router.get("/microsoft-clarity/status", asyncHandler(async (_req, res) => {
       waitingDevices: waitingDevices.length,
       lastUploadTime: latest?.lastUploadAt || latest?.timestamp || null,
       heartbeat: latest?.lastHeartbeatAt || latest?.timestamp || null,
+      liveDebug: {
+        pluginLoaded: Boolean(latestMetadata.pluginLoaded),
+        pluginSource: latestMetadata.pluginSource || "",
+        deviceReady: Boolean(latestMetadata.deviceReady),
+        cordovaLoaded: Boolean(latestMetadata.cordovaLoaded),
+        sdkInitialized: Boolean(latestMetadata.initialized),
+        currentSession: latest?.sessionId || latestMetadata.currentSessionId || "",
+        sessionUrl: latestMetadata.sessionUrl || "",
+        uploadStatus: latestMetadata.uploadStatus || latest?.status || "Unknown",
+        lastApiCall: latestMetadata.lastApiCall || "",
+        lastNativeEvent: latestMetadata.lastNativeResponse || null,
+        lastError: latest?.errorMessage || latestMetadata.lastError || "",
+        retryCount: latestMetadata.retryCount || latestMetadata.retryAttempt || 0,
+        connectionType: latestMetadata.connectionType || "unknown",
+        online: latestMetadata.online,
+        availableMethods: latestMetadata.availableMethods || {},
+      },
     },
   });
 }));
