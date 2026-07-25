@@ -11,6 +11,7 @@ import {
   ExplanationPreviewTemplate,
   InvoiceSettings,
   ListStyle,
+  MicrosoftClaritySettings,
   OfferTimerSettings,
   PolicyPage,
   PushDeviceToken,
@@ -23,6 +24,7 @@ import {
   WebsiteSettings,
 } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
+import { requireAdmin } from "../middlewares/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { sendEmail } from "../utils/simpleEmail.js";
 import { DEFAULT_TEMPLATES, EMAIL_TEMPLATE_KEYS } from "../utils/templatedEmail.js";
@@ -72,6 +74,45 @@ const pushTokenSchema = z.object({
   appVersion: z.string().trim().max(80).optional().default(""),
   deviceId: z.string().trim().max(160).optional().default(""),
 });
+
+const clarityLogLevels = ["None", "Error", "Warning", "Info", "Verbose"];
+
+const microsoftClaritySettingsSchema = z.object({
+  enabled: z.boolean().optional().default(false),
+  projectId: z.string().trim().max(80).optional().default(""),
+  logLevel: z.enum(clarityLogLevels).optional().default("None"),
+}).superRefine((value, ctx) => {
+  if (value.enabled && !value.projectId) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["projectId"],
+      message: "Clarity Project ID is required when Clarity is enabled",
+    });
+  }
+  if (value.projectId && !/^[a-zA-Z0-9_-]+$/.test(value.projectId)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["projectId"],
+      message: "Clarity Project ID can contain only letters, numbers, hyphens, and underscores",
+    });
+  }
+});
+
+function mapMicrosoftClaritySettings(settings) {
+  return {
+    enabled: Boolean(settings?.enabled),
+    projectId: settings?.projectId || "",
+    logLevel: clarityLogLevels.includes(settings?.logLevel) ? settings.logLevel : "None",
+  };
+}
+
+async function getOrCreateMicrosoftClaritySettings() {
+  return MicrosoftClaritySettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default", enabled: false, projectId: "", logLevel: "None" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
 
 async function requireAppUser(req, _res, next) {
   try {
@@ -282,6 +323,31 @@ router.get("/app-settings", asyncHandler(async (_req, res) => {
     appName: settings.companyName || "Krita NEET JEE",
     logoUrl: settings.logoUrl || "",
     updatedAt: settings.updatedAt,
+  });
+}));
+
+router.get("/settings/microsoft-clarity", asyncHandler(async (_req, res) => {
+  const settings = await getOrCreateMicrosoftClaritySettings();
+  res.json(mapMicrosoftClaritySettings(settings));
+}));
+
+router.put("/settings/microsoft-clarity", requireAdmin, asyncHandler(async (req, res) => {
+  const payload = microsoftClaritySettingsSchema.parse(req.body || {});
+  const settings = await MicrosoftClaritySettings.findOneAndUpdate(
+    { key: "default" },
+    {
+      key: "default",
+      enabled: payload.enabled,
+      projectId: payload.projectId,
+      logLevel: payload.logLevel,
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+
+  res.json({
+    success: true,
+    message: "Microsoft Clarity settings saved",
+    data: mapMicrosoftClaritySettings(settings),
   });
 }));
 

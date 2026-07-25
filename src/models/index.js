@@ -72,6 +72,7 @@ export * from "./OfferTimerSettings.js";
 export * from "./AppNotificationSettings.js";
 export * from "./PushDeviceToken.js";
 export * from "./ThirdPartyScript.js";
+export * from "./MicrosoftClaritySettings.js";
 export * from "./ReminderConfiguration.js";
 export * from "./SubscriptionReminder.js";
 export * from "./ReminderLog.js";
