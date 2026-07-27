@@ -3452,6 +3452,7 @@ function formatAppUsageSession(row) {
     userName: row.userName,
     email: row.email,
     userType: row.userType,
+    loginMethod: row.loginMethod,
     platform: row.platform,
     appVersion: row.appVersion,
     deviceModel: row.deviceModel,
@@ -3528,7 +3529,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
     AppUsageEvent.find(eventFilter).sort({ timestamp: -1 }).limit(100).lean(),
     AppUsageSession.aggregate([
       { $match: sessionFilter },
-      { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+      { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
       { $sort: { lastActive: -1 } },
       { $limit: 100 },
     ]),
@@ -3595,7 +3596,7 @@ router.get("/app-usage/users", asyncHandler(async (req, res) => {
   }
   const pipeline = [
     { $match: filter },
-    { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+    { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
     { $sort: { lastActive: -1 } },
   ];
   const [items, totalRows] = await Promise.all([
@@ -3651,6 +3652,7 @@ router.get("/app-usage/export", asyncHandler(async (req, res) => {
     userName: row.userName,
     email: row.email,
     userType: row.userType,
+    loginMethod: row.loginMethod,
     platform: row.platform,
     screen: row.screen,
     eventType: row.eventType,

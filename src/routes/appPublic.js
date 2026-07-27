@@ -186,6 +186,10 @@ const appUsageBulkSchema = z.object({
   events: z.array(appUsageEventSchema).min(1).max(250),
 });
 
+function isDuplicateBulkWriteError(error) {
+  return error?.code === 11000 || (Array.isArray(error?.writeErrors) && error.writeErrors.every((writeError) => writeError.code === 11000));
+}
+
 function mapAppUsageSettings(settings) {
   return {
     enabled: Boolean(settings?.enabled),
@@ -237,16 +241,20 @@ async function persistAppUsageEvents(rawEvents) {
     osVersion: event.osVersion,
   }));
 
-  await AppUsageEvent.bulkWrite(
-    events.map((event) => ({
-      updateOne: {
-        filter: { eventId: event.eventId },
-        update: { $setOnInsert: event },
-        upsert: true,
-      },
-    })),
-    { ordered: false },
-  );
+  try {
+    await AppUsageEvent.bulkWrite(
+      events.map((event) => ({
+        updateOne: {
+          filter: { eventId: event.eventId },
+          update: { $setOnInsert: event },
+          upsert: true,
+        },
+      })),
+      { ordered: false },
+    );
+  } catch (error) {
+    if (!isDuplicateBulkWriteError(error)) throw error;
+  }
 
   const bySession = new Map();
   events.forEach((event) => bySession.set(event.sessionId, [...(bySession.get(event.sessionId) || []), event]));
