@@ -3,6 +3,9 @@ import mongoose from "mongoose";
 import { z } from "zod";
 import {
   Chapter,
+  AppUsageEvent,
+  AppUsageSession,
+  AppUsageSettings,
   CmsMenuItem,
   CmsPage,
   ContactMessage,
@@ -140,6 +143,156 @@ const microsoftClarityLogSchema = z.object({
   lastHeartbeatAt: z.string().optional(),
   lastUploadAt: z.string().optional(),
 });
+
+const appUsageEventSchema = z.object({
+  eventId: z.string().trim().min(8).max(120),
+  sessionId: z.string().trim().min(8).max(120),
+  userId: z.string().trim().max(120).optional().default(""),
+  userName: z.string().trim().max(160).optional().default(""),
+  email: z.string().trim().max(180).optional().default(""),
+  userType: z.enum(["Free", "Premium"]).optional().default("Free"),
+  loginMethod: z.string().trim().max(80).optional().default(""),
+  eventType: z.string().trim().min(2).max(80),
+  screen: z.string().trim().max(160).optional().default(""),
+  previousScreen: z.string().trim().max(160).optional().default(""),
+  nextScreen: z.string().trim().max(160).optional().default(""),
+  componentName: z.string().trim().max(160).optional().default(""),
+  componentType: z.string().trim().max(80).optional().default(""),
+  action: z.string().trim().max(160).optional().default(""),
+  timestamp: z.string().optional(),
+  enterTime: z.string().optional(),
+  exitTime: z.string().optional(),
+  durationSeconds: z.coerce.number().min(0).max(24 * 60 * 60).optional().default(0),
+  coordinates: z.object({
+    x: z.coerce.number().optional(),
+    y: z.coerce.number().optional(),
+  }).optional(),
+  metadata: z.record(z.unknown()).optional().default({}),
+  deviceId: z.string().trim().max(160).optional().default(""),
+  platform: z.string().trim().max(40).optional().default("unknown"),
+  appVersion: z.string().trim().max(80).optional().default(""),
+  deviceModel: z.string().trim().max(160).optional().default(""),
+  osVersion: z.string().trim().max(80).optional().default(""),
+  device: z.object({
+    deviceId: z.string().trim().max(160).optional().default(""),
+    platform: z.string().trim().max(40).optional().default("unknown"),
+    appVersion: z.string().trim().max(80).optional().default(""),
+    deviceModel: z.string().trim().max(160).optional().default(""),
+    osVersion: z.string().trim().max(80).optional().default(""),
+  }).optional(),
+});
+
+const appUsageBulkSchema = z.object({
+  events: z.array(appUsageEventSchema).min(1).max(250),
+});
+
+function mapAppUsageSettings(settings) {
+  return {
+    enabled: Boolean(settings?.enabled),
+    automaticCleanupEnabled: Boolean(settings?.automaticCleanupEnabled),
+    retentionDays: Number(settings?.retentionDays || 90),
+    sessionTimeoutMinutes: Number(settings?.sessionTimeoutMinutes || 30),
+  };
+}
+
+async function persistAppUsageEvents(rawEvents) {
+  const parsedEvents = rawEvents.map((event) => {
+    const parsed = appUsageEventSchema.parse(event);
+    const device = parsed.device || {};
+    return {
+      ...parsed,
+      deviceId: parsed.deviceId || device.deviceId || "",
+      platform: String(parsed.platform || device.platform || "unknown").toLowerCase(),
+      appVersion: parsed.appVersion || device.appVersion || "",
+      deviceModel: parsed.deviceModel || device.deviceModel || "",
+      osVersion: parsed.osVersion || device.osVersion || "",
+    };
+  });
+  const now = new Date();
+  const events = parsedEvents.map((event) => ({
+    userId: event.userId,
+    userName: event.userName,
+    email: event.email,
+    userType: event.userType,
+    loginMethod: event.loginMethod,
+    eventId: event.eventId,
+    sessionId: event.sessionId,
+    eventType: event.eventType,
+    screen: event.screen,
+    previousScreen: event.previousScreen,
+    nextScreen: event.nextScreen,
+    componentName: event.componentName,
+    componentType: event.componentType,
+    action: event.action,
+    timestamp: event.timestamp ? new Date(event.timestamp) : now,
+    enterTime: event.enterTime ? new Date(event.enterTime) : undefined,
+    exitTime: event.exitTime ? new Date(event.exitTime) : undefined,
+    durationSeconds: Math.round(Number(event.durationSeconds || 0)),
+    coordinates: event.coordinates,
+    metadata: event.metadata,
+    deviceId: event.deviceId,
+    platform: event.platform,
+    appVersion: event.appVersion,
+    deviceModel: event.deviceModel,
+    osVersion: event.osVersion,
+  }));
+
+  await AppUsageEvent.bulkWrite(
+    events.map((event) => ({
+      updateOne: {
+        filter: { eventId: event.eventId },
+        update: { $setOnInsert: event },
+        upsert: true,
+      },
+    })),
+    { ordered: false },
+  );
+
+  const bySession = new Map();
+  events.forEach((event) => bySession.set(event.sessionId, [...(bySession.get(event.sessionId) || []), event]));
+  await Promise.all([...bySession.entries()].map(async ([sessionId, sessionEvents]) => {
+    const ordered = [...sessionEvents].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    const first = ordered[0];
+    const last = ordered[ordered.length - 1];
+    const screenEvents = ordered.filter((event) => event.eventType === "ScreenView");
+    const clickEvents = ordered.filter((event) => event.eventType.toLowerCase().includes("click"));
+    const durationSeconds = ordered.reduce((sum, event) => sum + Number(event.durationSeconds || 0), 0);
+    await AppUsageSession.findOneAndUpdate(
+      { sessionId },
+      {
+        $setOnInsert: {
+          sessionId,
+          userId: first.userId,
+          userName: first.userName,
+          email: first.email,
+          userType: first.userType,
+          loginMethod: first.loginMethod,
+          deviceId: first.deviceId,
+          platform: first.platform,
+          appVersion: first.appVersion,
+          deviceModel: first.deviceModel,
+          osVersion: first.osVersion,
+          startedAt: first.timestamp,
+          entryScreen: first.screen,
+        },
+        $set: {
+          endedAt: last.timestamp,
+          exitScreen: last.screen,
+          lastActiveAt: last.timestamp,
+        },
+        $inc: {
+          durationSeconds,
+          foregroundSeconds: durationSeconds,
+          screenViews: screenEvents.length,
+          clicks: clickEvents.length,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
+  }));
+
+  return { accepted: events.length };
+}
 
 function mapMicrosoftClaritySettings(settings) {
   return {
@@ -388,6 +541,30 @@ router.post("/microsoft-clarity/log", asyncHandler(async (req, res) => {
     lastUploadAt: payload.lastUploadAt ? new Date(payload.lastUploadAt) : undefined,
   });
   res.status(201).json({ success: true, data: { id: String(log._id) } });
+}));
+
+router.get("/app-usage/settings", asyncHandler(async (_req, res) => {
+  const settings = await AppUsageSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  res.json(mapAppUsageSettings(settings));
+}));
+
+router.post("/app-usage/bulk", asyncHandler(async (req, res) => {
+  const settings = await AppUsageSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  if (!settings.enabled) {
+    res.json({ skipped: true, enabled: false, accepted: 0 });
+    return;
+  }
+  const payload = appUsageBulkSchema.parse(req.body || {});
+  const result = await persistAppUsageEvents(payload.events);
+  res.status(201).json({ success: true, ...result, enabled: true });
 }));
 
 router.put("/settings/microsoft-clarity", requireAdmin, asyncHandler(async (req, res) => {

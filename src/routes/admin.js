@@ -3389,7 +3389,7 @@ router.post("/uploads/app-images", upload.array("images", 50), asyncHandler(asyn
 router.get("/app-usage/settings", asyncHandler(async (_req, res) => {
   const settings = await AppUsageSettings.findOneAndUpdate(
     { key: "default" },
-    { $setOnInsert: { key: "default", enabled: false, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
+    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   res.json({ success: true, data: settings });
@@ -3474,7 +3474,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
   const [settings, totals, pages, clicks, dailyActive, hourly, platform, recent, users] = await Promise.all([
-    AppUsageSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default", enabled: false, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } }, { upsert: true, new: true }),
+    AppUsageSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } }, { upsert: true, new: true }),
     AppUsageEvent.aggregate([
       { $match: eventFilter },
       {
