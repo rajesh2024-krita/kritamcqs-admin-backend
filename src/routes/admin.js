@@ -3514,7 +3514,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
     AppUsageEvent.aggregate([
       { $match: eventFilter },
       { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, users: { $addToSet: "$userId" }, events: { $sum: 1 } } },
-      { $sort: { _id: 1 } },
+      { $sort: { _id: -1 } },
     ]),
     AppUsageEvent.aggregate([
       { $match: eventFilter },
@@ -3529,6 +3529,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
     AppUsageEvent.find(eventFilter).sort({ timestamp: -1 }).limit(100).lean(),
     AppUsageSession.aggregate([
       { $match: sessionFilter },
+      { $sort: { startedAt: 1, lastActiveAt: 1 } },
       { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
       { $sort: { lastActive: -1 } },
       { $limit: 100 },
@@ -3596,6 +3597,7 @@ router.get("/app-usage/users", asyncHandler(async (req, res) => {
   }
   const pipeline = [
     { $match: filter },
+    { $sort: { startedAt: 1, lastActiveAt: 1 } },
     { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
     { $sort: { lastActive: -1 } },
   ];
@@ -3604,7 +3606,8 @@ router.get("/app-usage/users", asyncHandler(async (req, res) => {
     AppUsageSession.aggregate([...pipeline, { $count: "total" }]),
   ]);
   const total = Number(totalRows[0]?.total || 0);
-  res.json({ success: true, data: items, meta: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } });
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  res.json({ success: true, data: items, meta: { page, limit, total, pages: totalPages, totalPages } });
 }));
 
 router.get("/app-usage/users/:userId/timeline", asyncHandler(async (req, res) => {
@@ -3623,7 +3626,7 @@ router.get("/app-usage/users/:userId/timeline", asyncHandler(async (req, res) =>
       { $sort: { _id: -1 } },
       { $limit: 120 },
     ]),
-    date ? AppUsageEvent.find(filter).sort({ timestamp: 1 }).limit(1000).lean() : [],
+    date ? AppUsageEvent.find(filter).sort({ timestamp: -1 }).limit(1000).lean() : [],
   ]);
   res.json({ success: true, data: { dates: dates.map((item) => ({ date: item._id, events: item.events, lastActive: item.lastActive })), events: events.map((item) => ({ ...item, id: String(item._id), _id: undefined })) } });
 }));
@@ -8798,11 +8801,69 @@ async function unsetOtherDefaultListStyles(defaultId) {
   await ListStyle.updateMany({ _id: { $ne: defaultId }, isDefault: true }, { $set: { isDefault: false } });
 }
 
+function buildUserProviderFilter(query, filters = {}) {
+  const provider = String(query.loginProvider || "").trim().toUpperCase();
+  if (!provider) return {};
+
+  const existingSearch = Array.isArray(filters.$or) ? filters.$or : null;
+  delete filters.loginProvider;
+  delete filters.$or;
+
+  const combineWithSearch = (providerFilter) => {
+    if (!existingSearch) return providerFilter;
+    return { $and: [{ $or: existingSearch }, providerFilter] };
+  };
+
+  if (provider === "GOOGLE") {
+    return combineWithSearch({
+      $or: [
+        { loginProvider: "GOOGLE" },
+        { googleId: { $exists: true, $nin: ["", null] } },
+        { authTypes: "google" },
+      ],
+    });
+  }
+
+  if (provider === "APPLE") {
+    return combineWithSearch({
+      $or: [
+        { loginProvider: "APPLE" },
+        { isAppleLogin: true },
+        { appleId: { $exists: true, $nin: ["", null] } },
+        { appleUserId: { $exists: true, $nin: ["", null] } },
+        { authTypes: "apple" },
+      ],
+    });
+  }
+
+  if (provider === "EMAIL") {
+    return combineWithSearch({
+      $and: [
+        {
+          $or: [
+            { loginProvider: "EMAIL" },
+            { authTypes: "email" },
+            { passwordHash: { $exists: true, $nin: ["", null] } },
+          ],
+        },
+        { googleId: { $in: ["", null] } },
+        { appleId: { $in: ["", null] } },
+        { appleUserId: { $in: ["", null] } },
+        { isAppleLogin: { $ne: true } },
+        { authTypes: { $nin: ["google", "apple"] } },
+      ],
+    });
+  }
+
+  return existingSearch ? { $or: existingSearch } : {};
+}
+
 const userService = createCrudService({
   model: User,
   allowedSorts: ["createdAt", "updatedAt", "lastLoginAt", "name", "mobile", "email", "loginProvider"],
   searchFields: ["name", "mobile", "email"],
   exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete", "isActive", "isBlocked", "loginProvider"],
+  buildCustomFilters: buildUserProviderFilter,
   beforeCreate: async (payload) => {
     const next = {
       ...payload,
