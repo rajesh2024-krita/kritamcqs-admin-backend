@@ -9093,13 +9093,15 @@ function buildUserProviderFilter(query, filters = {}) {
     if (!existingSearch) return providerFilter;
     return { $and: [{ $or: existingSearch }, providerFilter] };
   };
+  const exactProvider = (value) => ({ loginProvider: new RegExp(`^${value}$`, "i") });
+  const authType = (value) => ({ authTypes: new RegExp(`^${value}$`, "i") });
 
   if (provider === "GOOGLE") {
     return combineWithSearch({
       $or: [
-        { loginProvider: "GOOGLE" },
+        exactProvider("GOOGLE"),
         { googleId: { $exists: true, $nin: ["", null] } },
-        { authTypes: "google" },
+        authType("google"),
       ],
     });
   }
@@ -9107,11 +9109,11 @@ function buildUserProviderFilter(query, filters = {}) {
   if (provider === "APPLE") {
     return combineWithSearch({
       $or: [
-        { loginProvider: "APPLE" },
+        exactProvider("APPLE"),
         { isAppleLogin: true },
         { appleId: { $exists: true, $nin: ["", null] } },
         { appleUserId: { $exists: true, $nin: ["", null] } },
-        { authTypes: "apple" },
+        authType("apple"),
       ],
     });
   }
@@ -9121,29 +9123,38 @@ function buildUserProviderFilter(query, filters = {}) {
       $and: [
         {
           $or: [
-            { loginProvider: "EMAIL" },
-            { authTypes: "email" },
+            exactProvider("EMAIL"),
+            authType("email"),
             { passwordHash: { $exists: true, $nin: ["", null] } },
+            { email: { $exists: true, $nin: ["", null] } },
           ],
         },
         { googleId: { $in: ["", null] } },
         { appleId: { $in: ["", null] } },
         { appleUserId: { $in: ["", null] } },
+        { facebookId: { $in: ["", null] } },
         { isAppleLogin: { $ne: true } },
-        { authTypes: { $nin: ["google", "apple"] } },
+        { authTypes: { $nin: ["google", "GOOGLE", "apple", "APPLE", "facebook", "FACEBOOK", "guest", "GUEST", "phone", "PHONE"] } },
       ],
     });
   }
 
   if (provider === "PHONE") {
     return combineWithSearch({
-      $and: [
-        { mobile: { $exists: true, $nin: ["", null] } },
-        { authTypes: { $nin: ["google", "apple", "facebook", "guest"] } },
-        { googleId: { $in: ["", null] } },
-        { appleId: { $in: ["", null] } },
-        { appleUserId: { $in: ["", null] } },
-        { isAppleLogin: { $ne: true } },
+      $or: [
+        exactProvider("PHONE"),
+        authType("phone"),
+        {
+          $and: [
+            { mobile: { $exists: true, $nin: ["", null] } },
+            { email: { $in: ["", null] } },
+            { authTypes: { $nin: ["google", "GOOGLE", "apple", "APPLE", "facebook", "FACEBOOK", "guest", "GUEST"] } },
+            { googleId: { $in: ["", null] } },
+            { appleId: { $in: ["", null] } },
+            { appleUserId: { $in: ["", null] } },
+            { isAppleLogin: { $ne: true } },
+          ],
+        },
       ],
     });
   }
@@ -9151,8 +9162,9 @@ function buildUserProviderFilter(query, filters = {}) {
   if (provider === "GUEST") {
     return combineWithSearch({
       $or: [
-        { loginProvider: "GUEST" },
-        { authTypes: "guest" },
+        exactProvider("GUEST"),
+        authType("guest"),
+        { isGuest: true },
         {
           $and: [
             { email: { $in: ["", null] } },
@@ -9170,8 +9182,8 @@ function buildUserProviderFilter(query, filters = {}) {
   if (provider === "FACEBOOK") {
     return combineWithSearch({
       $or: [
-        { loginProvider: "FACEBOOK" },
-        { authTypes: "facebook" },
+        exactProvider("FACEBOOK"),
+        authType("facebook"),
         { facebookId: { $exists: true, $nin: ["", null] } },
       ],
     });

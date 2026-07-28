@@ -8,7 +8,7 @@ const userSchema = new Schema(
     googleId: { type: String, trim: true, sparse: true, unique: true, index: true },
     firebaseUid: { type: String, trim: true, sparse: true, unique: true, index: true },
     appleId: { type: String, trim: true, sparse: true, unique: true, index: true },
-    loginProvider: { type: String, enum: ["EMAIL", "GOOGLE", "APPLE"], default: "EMAIL", index: true },
+    loginProvider: { type: String, enum: ["EMAIL", "GOOGLE", "APPLE", "PHONE", "GUEST", "FACEBOOK"], default: "EMAIL", index: true },
     appleUserId: { type: String, trim: true, sparse: true, unique: true, index: true },
     appleEmail: { type: String, trim: true, lowercase: true },
     appleAppAccountToken: { type: String, sparse: true, unique: true, index: true },
