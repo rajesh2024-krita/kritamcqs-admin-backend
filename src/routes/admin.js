@@ -3389,23 +3389,27 @@ router.post("/uploads/app-images", upload.array("images", 50), asyncHandler(asyn
 router.get("/app-usage/settings", asyncHandler(async (_req, res) => {
   const settings = await AppUsageSettings.findOneAndUpdate(
     { key: "default" },
-    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
+    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, retentionNeverDelete: false, sessionTimeoutMinutes: 30 } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   res.json({ success: true, data: settings });
 }));
 
 router.post("/app-usage/settings", asyncHandler(async (req, res) => {
-  const allowedRetentionDays = [7, 15, 30, 60, 90, 180, 365];
-  const retentionDays = allowedRetentionDays.includes(Number(req.body?.retentionDays)) ? Number(req.body.retentionDays) : 90;
+  const allowedRetentionDays = [1, 2, 7, 15, 30, 60, 90, 180, 365];
+  const retentionNeverDelete = req.body?.retentionNeverDelete === true || String(req.body?.retentionDays || "").toLowerCase() === "never";
+  const retentionDays = retentionNeverDelete
+    ? 365
+    : allowedRetentionDays.includes(Number(req.body?.retentionDays)) ? Number(req.body.retentionDays) : 90;
   const sessionTimeoutMinutes = Math.max(5, Math.min(240, Number(req.body?.sessionTimeoutMinutes || 30)));
   const settings = await AppUsageSettings.findOneAndUpdate(
     { key: "default" },
     {
       key: "default",
       enabled: Boolean(req.body?.enabled),
-      automaticCleanupEnabled: Boolean(req.body?.automaticCleanupEnabled),
+      automaticCleanupEnabled: retentionNeverDelete ? false : Boolean(req.body?.automaticCleanupEnabled),
       retentionDays,
+      retentionNeverDelete,
       sessionTimeoutMinutes,
     },
     { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -3444,6 +3448,26 @@ function appUsageFilter(query, dateField = "timestamp") {
   return filter;
 }
 
+function appUsagePageOptions(query, allowedSorts, defaultSortBy) {
+  const page = Math.max(1, Number(query.page || 1));
+  const limit = Math.min(100, Math.max(1, Number(query.limit || 25)));
+  const sortBy = allowedSorts.includes(String(query.sortBy || "")) ? String(query.sortBy) : defaultSortBy;
+  const sortOrder = String(query.sortOrder || "desc").toLowerCase() === "asc" ? 1 : -1;
+  return { page, limit, skip: (page - 1) * limit, sort: { [sortBy]: sortOrder }, sortBy, sortOrder };
+}
+
+function appUsageSearchFilter(search, fields) {
+  const value = String(search || "").trim();
+  if (!value) return {};
+  const safe = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return { $or: fields.map((field) => ({ [field]: { $regex: safe, $options: "i" } })) };
+}
+
+function appUsageMeta(total, page, limit) {
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  return { page, limit, total, pages: totalPages, totalPages };
+}
+
 function formatAppUsageSession(row) {
   return {
     id: String(row._id || row.id || ""),
@@ -3474,8 +3498,8 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
   const sessionFilter = appUsageFilter(req.query, "startedAt");
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const [settings, totals, pages, clicks, dailyActive, hourly, platform, recent, users] = await Promise.all([
-    AppUsageSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } }, { upsert: true, new: true }),
+  const [settings, totals, pages, clicks, dailyActive, hourly, platform, recent, users, newUsers] = await Promise.all([
+    AppUsageSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, retentionNeverDelete: false, sessionTimeoutMinutes: 30 } }, { upsert: true, new: true }),
     AppUsageEvent.aggregate([
       { $match: eventFilter },
       {
@@ -3534,6 +3558,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
       { $sort: { lastActive: -1 } },
       { $limit: 100 },
     ]),
+    User.countDocuments({ isAdmin: { $ne: true }, createdAt: { $gte: from, $lte: to } }),
   ]);
   const sessionTotals = await AppUsageSession.aggregate([
     { $match: sessionFilter },
@@ -3558,6 +3583,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
         androidUsers: countSet(totalRow.androidUsers),
         iosUsers: countSet(totalRow.iosUsers),
         activeUsers: countSet(totalRow.activeUsers),
+        newUsers,
       },
       pages: pages.map((item) => ({
         path: item._id,
@@ -3584,30 +3610,82 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
 }));
 
 router.get("/app-usage/users", asyncHandler(async (req, res) => {
-  const page = Math.max(1, Number(req.query.page || 1));
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
-  const search = String(req.query.search || "").trim();
+  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["lastActive", "totalSessions", "averageSessionDuration", "userName", "email"], "lastActive");
   const filter = appUsageFilter(req.query, "startedAt");
-  if (search) {
-    filter.$or = [
-      { userName: new RegExp(search, "i") },
-      { email: new RegExp(search, "i") },
-      { userId: search },
-    ];
-  }
+  Object.assign(filter, appUsageSearchFilter(req.query.search, ["userName", "email", "userId", "loginMethod", "platform", "userType"]));
   const pipeline = [
     { $match: filter },
     { $sort: { startedAt: 1, lastActiveAt: 1 } },
     { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
-    { $sort: { lastActive: -1 } },
+    { $sort: sort },
   ];
   const [items, totalRows] = await Promise.all([
-    AppUsageSession.aggregate([...pipeline, { $skip: (page - 1) * limit }, { $limit: limit }]),
+    AppUsageSession.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
     AppUsageSession.aggregate([...pipeline, { $count: "total" }]),
   ]);
   const total = Number(totalRows[0]?.total || 0);
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-  res.json({ success: true, data: items, meta: { page, limit, total, pages: totalPages, totalPages } });
+  res.json({ success: true, data: items, meta: appUsageMeta(total, page, limit) });
+}));
+
+router.get("/app-usage/sessions", asyncHandler(async (req, res) => {
+  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["startedAt", "lastActiveAt", "durationSeconds", "screenViews", "clicks", "userName", "platform"], "lastActiveAt");
+  const filter = appUsageFilter(req.query, "startedAt");
+  Object.assign(filter, appUsageSearchFilter(req.query.search, ["userName", "email", "userId", "sessionId", "entryScreen", "exitScreen", "deviceModel", "appVersion"]));
+  const [items, total] = await Promise.all([
+    AppUsageSession.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+    AppUsageSession.countDocuments(filter),
+  ]);
+  res.json({ success: true, data: items.map(formatAppUsageSession), meta: appUsageMeta(total, page, limit) });
+}));
+
+router.get("/app-usage/events", asyncHandler(async (req, res) => {
+  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["timestamp", "eventType", "screen", "componentName", "platform", "userName"], "timestamp");
+  const filter = appUsageFilter(req.query);
+  Object.assign(filter, appUsageSearchFilter(req.query.search, ["userName", "email", "userId", "sessionId", "screen", "eventType", "componentName", "componentType", "deviceModel"]));
+  const [items, total] = await Promise.all([
+    AppUsageEvent.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+    AppUsageEvent.countDocuments(filter),
+  ]);
+  res.json({ success: true, data: items.map((item) => ({ ...item, id: String(item._id), _id: undefined })), meta: appUsageMeta(total, page, limit) });
+}));
+
+router.get("/app-usage/screens", asyncHandler(async (req, res) => {
+  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["screen", "visits", "users", "totalSeconds", "averageSeconds", "lastSeen"], "lastSeen");
+  const filter = { ...appUsageFilter(req.query), eventType: "ScreenView" };
+  const pipeline = [
+    { $match: filter },
+    { $group: { _id: "$screen", visits: { $sum: 1 }, totalSeconds: { $sum: "$durationSeconds" }, averageSeconds: { $avg: "$durationSeconds" }, users: { $addToSet: "$userId" }, lastSeen: { $max: "$timestamp" } } },
+    { $project: { screen: "$_id", visits: 1, totalSeconds: 1, averageSeconds: 1, users: { $size: { $filter: { input: "$users", as: "user", cond: { $ne: ["$$user", null] } } } }, lastSeen: 1 } },
+  ];
+  const search = String(req.query.search || "").trim();
+  if (search) {
+    pipeline.push({ $match: { screen: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" } } });
+  }
+  const [items, totalRows] = await Promise.all([
+    AppUsageEvent.aggregate([...pipeline, { $sort: sort }, { $skip: skip }, { $limit: limit }]),
+    AppUsageEvent.aggregate([...pipeline, { $count: "total" }]),
+  ]);
+  res.json({ success: true, data: items.map((item) => ({ ...item, totalSeconds: Math.round(Number(item.totalSeconds || 0)), averageSeconds: Math.round(Number(item.averageSeconds || 0)) })), meta: appUsageMeta(Number(totalRows[0]?.total || 0), page, limit) });
+}));
+
+router.get("/app-usage/devices", asyncHandler(async (req, res) => {
+  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["deviceModel", "platform", "appVersion", "users", "sessions", "lastActive"], "lastActive");
+  const filter = appUsageFilter(req.query, "startedAt");
+  const pipeline = [
+    { $match: filter },
+    { $group: { _id: { deviceModel: "$deviceModel", platform: "$platform", appVersion: "$appVersion", osVersion: "$osVersion" }, users: { $addToSet: "$userId" }, sessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+    { $project: { deviceModel: "$_id.deviceModel", platform: "$_id.platform", appVersion: "$_id.appVersion", osVersion: "$_id.osVersion", users: { $size: { $filter: { input: "$users", as: "user", cond: { $ne: ["$$user", null] } } } }, sessions: 1, lastActive: 1, averageSessionDuration: 1 } },
+  ];
+  const search = String(req.query.search || "").trim();
+  if (search) {
+    const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    pipeline.push({ $match: { $or: [{ deviceModel: { $regex: safe, $options: "i" } }, { platform: { $regex: safe, $options: "i" } }, { appVersion: { $regex: safe, $options: "i" } }, { osVersion: { $regex: safe, $options: "i" } }] } });
+  }
+  const [items, totalRows] = await Promise.all([
+    AppUsageSession.aggregate([...pipeline, { $sort: sort }, { $skip: skip }, { $limit: limit }]),
+    AppUsageSession.aggregate([...pipeline, { $count: "total" }]),
+  ]);
+  res.json({ success: true, data: items.map((item) => ({ ...item, averageSessionDuration: Math.round(Number(item.averageSessionDuration || 0)) })), meta: appUsageMeta(Number(totalRows[0]?.total || 0), page, limit) });
 }));
 
 router.get("/app-usage/users/:userId/timeline", asyncHandler(async (req, res) => {
@@ -8802,10 +8880,11 @@ async function unsetOtherDefaultListStyles(defaultId) {
 }
 
 function buildUserProviderFilter(query, filters = {}) {
-  const provider = String(query.loginProvider || "").trim().toUpperCase();
+  const provider = String(query.provider || query.loginProvider || "").trim().toUpperCase();
   if (!provider) return {};
 
   const existingSearch = Array.isArray(filters.$or) ? filters.$or : null;
+  delete filters.provider;
   delete filters.loginProvider;
   delete filters.$or;
 
@@ -8855,6 +8934,48 @@ function buildUserProviderFilter(query, filters = {}) {
     });
   }
 
+  if (provider === "PHONE") {
+    return combineWithSearch({
+      $and: [
+        { mobile: { $exists: true, $nin: ["", null] } },
+        { authTypes: { $nin: ["google", "apple", "facebook", "guest"] } },
+        { googleId: { $in: ["", null] } },
+        { appleId: { $in: ["", null] } },
+        { appleUserId: { $in: ["", null] } },
+        { isAppleLogin: { $ne: true } },
+      ],
+    });
+  }
+
+  if (provider === "GUEST") {
+    return combineWithSearch({
+      $or: [
+        { loginProvider: "GUEST" },
+        { authTypes: "guest" },
+        {
+          $and: [
+            { email: { $in: ["", null] } },
+            { mobile: { $in: ["", null] } },
+            { googleId: { $in: ["", null] } },
+            { appleId: { $in: ["", null] } },
+            { appleUserId: { $in: ["", null] } },
+            { passwordHash: { $in: ["", null] } },
+          ],
+        },
+      ],
+    });
+  }
+
+  if (provider === "FACEBOOK") {
+    return combineWithSearch({
+      $or: [
+        { loginProvider: "FACEBOOK" },
+        { authTypes: "facebook" },
+        { facebookId: { $exists: true, $nin: ["", null] } },
+      ],
+    });
+  }
+
   return existingSearch ? { $or: existingSearch } : {};
 }
 
@@ -8862,7 +8983,7 @@ const userService = createCrudService({
   model: User,
   allowedSorts: ["createdAt", "updatedAt", "lastLoginAt", "name", "mobile", "email", "loginProvider"],
   searchFields: ["name", "mobile", "email"],
-  exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete", "isActive", "isBlocked", "loginProvider"],
+  exactFilters: ["examMode", "isPremium", "isAdmin", "onboardingComplete", "isActive", "isBlocked"],
   buildCustomFilters: buildUserProviderFilter,
   beforeCreate: async (payload) => {
     const next = {

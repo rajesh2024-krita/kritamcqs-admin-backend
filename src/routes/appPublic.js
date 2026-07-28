@@ -195,6 +195,7 @@ function mapAppUsageSettings(settings) {
     enabled: Boolean(settings?.enabled),
     automaticCleanupEnabled: Boolean(settings?.automaticCleanupEnabled),
     retentionDays: Number(settings?.retentionDays || 90),
+    retentionNeverDelete: Boolean(settings?.retentionNeverDelete),
     sessionTimeoutMinutes: Number(settings?.sessionTimeoutMinutes || 30),
   };
 }
@@ -554,7 +555,7 @@ router.post("/microsoft-clarity/log", asyncHandler(async (req, res) => {
 router.get("/app-usage/settings", asyncHandler(async (_req, res) => {
   const settings = await AppUsageSettings.findOneAndUpdate(
     { key: "default" },
-    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
+    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, retentionNeverDelete: false, sessionTimeoutMinutes: 30 } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   res.json(mapAppUsageSettings(settings));
@@ -563,7 +564,7 @@ router.get("/app-usage/settings", asyncHandler(async (_req, res) => {
 router.post("/app-usage/bulk", asyncHandler(async (req, res) => {
   const settings = await AppUsageSettings.findOneAndUpdate(
     { key: "default" },
-    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, sessionTimeoutMinutes: 30 } },
+    { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, retentionNeverDelete: false, sessionTimeoutMinutes: 30 } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   if (!settings.enabled) {
