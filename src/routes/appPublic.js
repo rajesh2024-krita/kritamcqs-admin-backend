@@ -200,7 +200,20 @@ function mapAppUsageSettings(settings) {
   };
 }
 
-async function persistAppUsageEvents(rawEvents) {
+function requestIpAddress(req) {
+  const forwarded = String(req?.headers?.["x-forwarded-for"] || "").split(",")[0].trim();
+  return forwarded || req?.ip || req?.socket?.remoteAddress || "";
+}
+
+function sessionStatusFromEvents(events) {
+  const text = events.map((event) => `${event.eventType || ""} ${event.action || ""}`).join(" ");
+  if (/crash/i.test(text)) return "Crashed";
+  if (/sessionend|app close|logout|background/i.test(text)) return "Completed";
+  return "Active";
+}
+
+async function persistAppUsageEvents(rawEvents, req) {
+  const ipAddress = requestIpAddress(req);
   const parsedEvents = rawEvents.map((event) => {
     const parsed = appUsageEventSchema.parse(event);
     const device = parsed.device || {};
@@ -240,6 +253,7 @@ async function persistAppUsageEvents(rawEvents) {
     appVersion: event.appVersion,
     deviceModel: event.deviceModel,
     osVersion: event.osVersion,
+    ipAddress,
   }));
 
   try {
@@ -266,6 +280,7 @@ async function persistAppUsageEvents(rawEvents) {
     const screenEvents = ordered.filter((event) => event.eventType === "ScreenView");
     const clickEvents = ordered.filter((event) => event.eventType.toLowerCase().includes("click"));
     const durationSeconds = ordered.reduce((sum, event) => sum + Number(event.durationSeconds || 0), 0);
+    const status = sessionStatusFromEvents(ordered);
     await AppUsageSession.findOneAndUpdate(
       { sessionId },
       {
@@ -281,6 +296,7 @@ async function persistAppUsageEvents(rawEvents) {
           appVersion: first.appVersion,
           deviceModel: first.deviceModel,
           osVersion: first.osVersion,
+          ipAddress: first.ipAddress,
           startedAt: first.timestamp,
           entryScreen: first.screen,
         },
@@ -288,6 +304,8 @@ async function persistAppUsageEvents(rawEvents) {
           endedAt: last.timestamp,
           exitScreen: last.screen,
           lastActiveAt: last.timestamp,
+          ipAddress: first.ipAddress,
+          status,
         },
         $inc: {
           durationSeconds,
@@ -572,7 +590,7 @@ router.post("/app-usage/bulk", asyncHandler(async (req, res) => {
     return;
   }
   const payload = appUsageBulkSchema.parse(req.body || {});
-  const result = await persistAppUsageEvents(payload.events);
+  const result = await persistAppUsageEvents(payload.events, req);
   res.status(201).json({ success: true, ...result, enabled: true });
 }));
 

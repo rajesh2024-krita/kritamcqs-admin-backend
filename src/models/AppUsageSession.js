@@ -13,6 +13,8 @@ const appUsageSessionSchema = new Schema(
     appVersion: { type: String, trim: true, default: "", index: true },
     deviceModel: { type: String, trim: true, default: "", index: true },
     osVersion: { type: String, trim: true, default: "" },
+    ipAddress: { type: String, trim: true, default: "" },
+    status: { type: String, enum: ["Active", "Completed", "Force Closed", "Crashed"], default: "Active", index: true },
     startedAt: { type: Date, required: true, index: true },
     endedAt: { type: Date, index: true },
     durationSeconds: { type: Number, default: 0, min: 0 },

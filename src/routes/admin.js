@@ -3438,6 +3438,8 @@ function appUsageFilter(query, dateField = "timestamp") {
   const userId = String(query.userId || "").trim();
   const appVersion = String(query.appVersion || "").trim();
   const deviceModel = String(query.deviceModel || "").trim();
+  const loginProvider = String(query.loginProvider || query.provider || "all").trim();
+  const sessionStatus = String(query.sessionStatus || "all").trim();
   if (platform && platform !== "all") filter.platform = platform;
   if (plan === "Free" || plan === "Premium") filter.userType = plan;
   if (eventType && eventType !== "all") filter.eventType = eventType;
@@ -3445,6 +3447,11 @@ function appUsageFilter(query, dateField = "timestamp") {
   if (userId) filter.userId = userId;
   if (appVersion) filter.appVersion = appVersion;
   if (deviceModel) filter.deviceModel = new RegExp(deviceModel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  if (loginProvider && loginProvider !== "all") filter.loginMethod = new RegExp(`^${loginProvider.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+  if (dateField !== "timestamp" && sessionStatus && sessionStatus !== "all") {
+    const statusMap = { active: "Active", completed: "Completed", force_closed: "Force Closed", crashed: "Crashed" };
+    filter.status = statusMap[sessionStatus.toLowerCase().replace(/\s+/g, "_")] || sessionStatus;
+  }
   return filter;
 }
 
@@ -3481,6 +3488,8 @@ function formatAppUsageSession(row) {
     appVersion: row.appVersion,
     deviceModel: row.deviceModel,
     osVersion: row.osVersion,
+    ipAddress: row.ipAddress,
+    status: deriveAppUsageSessionStatus(row),
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     durationSeconds: Number(row.durationSeconds || 0),
@@ -3490,6 +3499,70 @@ function formatAppUsageSession(row) {
     clicks: Number(row.clicks || 0),
     lastActiveAt: row.lastActiveAt,
   };
+}
+
+function deriveAppUsageSessionStatus(row) {
+  if (["Completed", "Force Closed", "Crashed", "Active"].includes(row.status)) return row.status;
+  const lastActive = row.lastActiveAt ? new Date(row.lastActiveAt).getTime() : 0;
+  if (row.endedAt && row.durationSeconds > 0) return "Completed";
+  if (lastActive && Date.now() - lastActive > 45 * 60 * 1000) return "Force Closed";
+  return "Active";
+}
+
+function appUsageActivityRange(query) {
+  const range = String(query.range || "").toLowerCase();
+  const now = new Date();
+  const startOfToday = new Date(now);
+  startOfToday.setHours(0, 0, 0, 0);
+  if (range === "today") return { from: startOfToday, to: now };
+  if (range === "yesterday") {
+    const from = new Date(startOfToday);
+    from.setDate(from.getDate() - 1);
+    const to = new Date(startOfToday.getTime() - 1);
+    return { from, to };
+  }
+  if (range === "last30") return { from: new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000), to: now };
+  if (range === "custom") return appUsageDateFilter(query);
+  return { from: new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000), to: now };
+}
+
+function dayCountBetween(from, to) {
+  const start = new Date(from);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(to);
+  end.setHours(0, 0, 0, 0);
+  return Math.max(1, Math.floor((end.getTime() - start.getTime()) / (24 * 60 * 60 * 1000)) + 1);
+}
+
+function buildSessionJourney(session, events) {
+  const ordered = [...events].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+  const flow = [];
+  const screens = [];
+  ordered.forEach((event, index) => {
+    const name = event.eventType === "Navigation" ? event.screen || event.nextScreen : event.screen;
+    if (name && flow[flow.length - 1] !== name) flow.push(name);
+    if (event.eventType === "ScreenView") {
+      const entry = event.enterTime || event.timestamp;
+      const exit = event.exitTime || ordered[index + 1]?.timestamp || session.endedAt || session.lastActiveAt;
+      screens.push({
+        screenName: event.screen || "Unknown",
+        entryTime: entry,
+        exitTime: exit,
+        durationSeconds: Number(event.durationSeconds || 0),
+        actions: [],
+      });
+    } else if (screens.length && !["SessionStart", "AppOpen", "Foreground", "Background", "SessionEnd"].includes(event.eventType)) {
+      screens[screens.length - 1].actions.push({
+        eventType: event.eventType,
+        action: event.action,
+        componentName: event.componentName,
+        componentType: event.componentType,
+        timestamp: event.timestamp,
+      });
+    }
+  });
+  if (!flow.length && session.entryScreen) flow.push(session.entryScreen);
+  return { navigationFlow: flow, screens };
 }
 
 router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
@@ -3686,6 +3759,134 @@ router.get("/app-usage/devices", asyncHandler(async (req, res) => {
     AppUsageSession.aggregate([...pipeline, { $count: "total" }]),
   ]);
   res.json({ success: true, data: items.map((item) => ({ ...item, averageSessionDuration: Math.round(Number(item.averageSessionDuration || 0)) })), meta: appUsageMeta(Number(totalRows[0]?.total || 0), page, limit) });
+}));
+
+router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) => {
+  const userId = String(req.params.userId || "").trim();
+  if (!userId) throw new AppError("User is required", 400);
+  const { from, to } = appUsageActivityRange(req.query);
+  const { page, limit, skip } = appUsagePageOptions(req.query, ["startedAt"], "startedAt");
+  const sessionFilter = {
+    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString(), userId }, "startedAt"),
+    userId,
+  };
+  const eventFilter = {
+    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString(), userId }),
+    userId,
+  };
+  delete eventFilter.status;
+
+  const search = String(req.query.search || "").trim();
+  if (search) {
+    const eventSearch = appUsageSearchFilter(search, ["screen", "eventType", "action", "componentName", "componentType", "sessionId"]);
+    const sessionSearch = appUsageSearchFilter(search, ["entryScreen", "exitScreen", "sessionId", "deviceModel", "appVersion", "platform", "loginMethod"]);
+    const matchingEventSessionIds = await AppUsageEvent.distinct("sessionId", { ...eventFilter, ...eventSearch });
+    const existingOr = sessionSearch.$or || [];
+    sessionFilter.$or = [...existingOr, { sessionId: { $in: matchingEventSessionIds } }];
+  }
+
+  const [summaryRows, sessionCountRows, mostVisitedScreens, sessionsPerDay, userRecord, sessions, total] = await Promise.all([
+    AppUsageSession.aggregate([
+      { $match: sessionFilter },
+      {
+        $group: {
+          _id: null,
+          totalSessions: { $sum: 1 },
+          totalTimeSpent: { $sum: "$durationSeconds" },
+          averageSessionDuration: { $avg: "$durationSeconds" },
+          longestSession: { $max: "$durationSeconds" },
+          shortestSession: { $min: "$durationSeconds" },
+          lastActiveDateTime: { $max: "$lastActiveAt" },
+          firstLoginDate: { $min: "$startedAt" },
+          totalScreenViews: { $sum: "$screenViews" },
+          activeDays: { $addToSet: { $dateToString: { format: "%Y-%m-%d", date: "$startedAt" } } },
+        },
+      },
+    ]),
+    AppUsageEvent.aggregate([
+      { $match: { ...eventFilter, eventType: { $in: ["AppOpen", "SessionStart", "Foreground"] } } },
+      { $group: { _id: null, totalAppOpens: { $sum: 1 } } },
+    ]),
+    AppUsageEvent.aggregate([
+      { $match: { ...eventFilter, eventType: "ScreenView", screen: { $ne: "" } } },
+      { $group: { _id: "$screen", views: { $sum: 1 }, totalSeconds: { $sum: "$durationSeconds" } } },
+      { $sort: { views: -1, totalSeconds: -1 } },
+      { $limit: 8 },
+    ]),
+    AppUsageSession.aggregate([
+      { $match: sessionFilter },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$startedAt" } }, sessions: { $sum: 1 }, totalSeconds: { $sum: "$durationSeconds" } } },
+      { $sort: { _id: 1 } },
+    ]),
+    User.findById(mongoose.isValidObjectId(userId) ? userId : null).select("name email createdAt loginProvider provider").lean().catch(() => null),
+    AppUsageSession.find(sessionFilter).sort({ startedAt: 1 }).skip(skip).limit(limit).lean(),
+    AppUsageSession.countDocuments(sessionFilter),
+  ]);
+
+  const sessionIds = sessions.map((session) => session.sessionId);
+  const events = sessionIds.length
+    ? await AppUsageEvent.find({ sessionId: { $in: sessionIds } }).sort({ timestamp: 1 }).limit(limit * 500).lean()
+    : [];
+  const eventsBySession = events.reduce((map, event) => {
+    map.set(event.sessionId, [...(map.get(event.sessionId) || []), event]);
+    return map;
+  }, new Map());
+
+  const sessionItems = sessions.map((session) => {
+    const sessionEvents = eventsBySession.get(session.sessionId) || [];
+    return {
+      ...formatAppUsageSession(session),
+      ...buildSessionJourney(session, sessionEvents),
+      events: sessionEvents.map((event) => ({
+        id: String(event._id),
+        eventType: event.eventType,
+        screen: event.screen,
+        action: event.action,
+        componentName: event.componentName,
+        componentType: event.componentType,
+        timestamp: event.timestamp,
+      })),
+    };
+  });
+  const sessionsByDay = sessionItems.reduce((days, session) => {
+    const date = session.startedAt ? new Date(session.startedAt).toISOString().slice(0, 10) : "Unknown";
+    const current = days.find((item) => item.date === date);
+    if (current) current.sessions.push(session);
+    else days.push({ date, sessions: [session] });
+    return days;
+  }, []);
+
+  const summary = summaryRows[0] || {};
+  const activeDays = (summary.activeDays || []).filter(Boolean).length;
+  res.json({
+    success: true,
+    data: {
+      user: {
+        id: userId,
+        name: userRecord?.name || sessions[0]?.userName || "",
+        email: userRecord?.email || sessions[0]?.email || "",
+        loginProvider: userRecord?.loginProvider || userRecord?.provider || sessions[0]?.loginMethod || "",
+      },
+      range: { from, to },
+      summary: {
+        totalSessions: Number(summary.totalSessions || 0),
+        totalTimeSpent: Math.round(Number(summary.totalTimeSpent || 0)),
+        averageSessionDuration: Math.round(Number(summary.averageSessionDuration || 0)),
+        longestSession: Math.round(Number(summary.longestSession || 0)),
+        shortestSession: Math.round(Number(summary.shortestSession || 0)),
+        lastActiveDateTime: summary.lastActiveDateTime || null,
+        firstLoginDate: userRecord?.createdAt || summary.firstLoginDate || null,
+        totalAppOpens: Number(sessionCountRows[0]?.totalAppOpens || summary.totalSessions || 0),
+        totalScreenViews: Number(summary.totalScreenViews || 0),
+        mostVisitedScreens: mostVisitedScreens.map((item) => ({ screen: item._id, views: item.views, totalSeconds: Math.round(Number(item.totalSeconds || 0)) })),
+        sessionCountPerDay: sessionsPerDay.map((item) => ({ date: item._id, sessions: item.sessions, totalSeconds: Math.round(Number(item.totalSeconds || 0)) })),
+        activeDays,
+        inactiveDays: Math.max(0, dayCountBetween(from, to) - activeDays),
+      },
+      sessionsByDay,
+    },
+    meta: appUsageMeta(total, page, limit),
+  });
 }));
 
 router.get("/app-usage/users/:userId/timeline", asyncHandler(async (req, res) => {

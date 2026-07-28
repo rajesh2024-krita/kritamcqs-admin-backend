@@ -14,6 +14,7 @@ const appUsageEventSchema = new Schema(
     appVersion: { type: String, trim: true, default: "", index: true },
     deviceModel: { type: String, trim: true, default: "", index: true },
     osVersion: { type: String, trim: true, default: "" },
+    ipAddress: { type: String, trim: true, default: "" },
     eventType: { type: String, required: true, trim: true, index: true },
     screen: { type: String, trim: true, default: "", index: true },
     previousScreen: { type: String, trim: true, default: "" },
