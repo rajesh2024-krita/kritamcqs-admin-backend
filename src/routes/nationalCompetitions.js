@@ -8,7 +8,14 @@ import {
   NationalCompetitionRegistration,
   NationalCompetitionReward,
   NationalLeaderboardEntry,
+  Chapter,
+  Difficulty,
+  Question,
+  QuestionType,
+  Subject,
+  Topic,
   User,
+  Year,
 } from "../models/index.js";
 import { requireAdmin, requireModulePermission } from "../middlewares/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
@@ -18,26 +25,87 @@ import { competitionSummary, refreshAdminLeaderboards, slugifyCompetition } from
 export const nationalCompetitionsAdminRouter = Router();
 nationalCompetitionsAdminRouter.use(requireAdmin);
 
-function sanitizeCompetitionPayload(body = {}, adminId = "") {
+function arrayFromInput(value) {
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  return String(value || "").split(/\r?\n|,/).map((item) => item.trim()).filter(Boolean);
+}
+
+function buildQuestionPoolFilter(filters = {}) {
+  const query = {};
+  const search = String(filters.search || "").trim();
+  const exactFields = ["subjectId", "chapterId", "topicId", "yearId", "difficultyId", "questionTypeId", "difficulty", "responseType", "questionStatus", "reviewStatus"];
+  exactFields.forEach((field) => {
+    if (filters[field]) query[field] = String(filters[field]);
+  });
+  if (filters.examType && filters.examType !== "BOTH") {
+    query.$or = [
+      { examMode: String(filters.examType) },
+      { exam: String(filters.examType) === "JEE" ? { $in: ["JEE_MAIN", "JEE_ADVANCED"] } : String(filters.examType) },
+    ];
+  }
+  if (filters.visibleOnly !== false) query.isVisibleToUsers = true;
+  if (search) {
+    query.$and = [
+      ...(query.$and || []),
+      {
+        $or: [
+          { question: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
+          { conceptTags: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") },
+        ],
+      },
+    ];
+  }
+  return query;
+}
+
+async function selectAutomaticQuestions(selection = {}, fallbackExamType = "BOTH") {
+  const filters = { ...(selection.filters || {}), examType: selection.filters?.examType || fallbackExamType };
+  const targetCount = Math.max(1, Number(selection.targetCount || 0));
+  const query = buildQuestionPoolFilter(filters);
+  const questions = await Question.find(query)
+    .select("_id")
+    .sort({ reviewStatus: 1, questionStatus: 1, updatedAt: -1, createdAt: -1 })
+    .limit(targetCount);
+  if (questions.length < targetCount) {
+    throw new AppError(`Only ${questions.length} questions matched automatic filters. Required ${targetCount}.`, 400);
+  }
+  return questions.map((item) => String(item._id));
+}
+
+async function sanitizeCompetitionPayload(body = {}, adminId = "") {
   const title = String(body.title || "").trim();
   if (!title) throw new AppError("Competition title is required", 400);
   const startsAt = new Date(body.startsAt || Date.now() + 86400000);
   const durationMinutes = Math.max(1, Number(body.durationMinutes || 180));
+  const examType = ["NEET", "JEE", "BOTH"].includes(body.examType) ? body.examType : "BOTH";
+  const selectionMode = body.questionSelection?.mode === "automatic" ? "automatic" : "manual";
+  const selectionFilters = body.questionSelection?.filters || {};
+  const manualQuestionIds = arrayFromInput(body.questionIds);
+  const automaticTargetCount = Math.max(1, Number(body.questionSelection?.targetCount || body.totalQuestions || 180));
+  const questionIds = selectionMode === "automatic"
+    ? await selectAutomaticQuestions({ filters: selectionFilters, targetCount: automaticTargetCount }, examType)
+    : manualQuestionIds;
   return {
     title,
     slug: slugifyCompetition(body.slug || title),
     description: String(body.description || ""),
-    examType: ["NEET", "JEE", "BOTH"].includes(body.examType) ? body.examType : "BOTH",
+    examType,
     status: body.status || "draft",
     registrationOpensAt: new Date(body.registrationOpensAt || Date.now()),
     registrationClosesAt: new Date(body.registrationClosesAt || startsAt.getTime() - 3600000),
     startsAt,
     endsAt: new Date(body.endsAt || startsAt.getTime() + durationMinutes * 60000),
     durationMinutes,
-    totalQuestions: Math.max(1, Number(body.totalQuestions || body.questionIds?.length || 180)),
+    totalQuestions: Math.max(1, Number(body.totalQuestions || questionIds.length || 180)),
     marksPerQuestion: Number(body.marksPerQuestion || 4),
     negativeMarks: Number(body.negativeMarks || 1),
-    questionIds: Array.isArray(body.questionIds) ? body.questionIds.map(String).filter(Boolean) : [],
+    questionIds,
+    questionSelection: {
+      mode: selectionMode,
+      filters: selectionFilters,
+      targetCount: selectionMode === "automatic" ? automaticTargetCount : questionIds.length,
+      lastGeneratedAt: selectionMode === "automatic" ? new Date() : undefined,
+    },
     rules: Array.isArray(body.rules) ? body.rules.map(String).filter(Boolean) : [],
     rewardsSummary: String(body.rewardsSummary || ""),
     terms: String(body.terms || ""),
@@ -80,6 +148,47 @@ async function audit(req, action, competitionId, metadata = {}) {
 }
 
 nationalCompetitionsAdminRouter.get(
+  "/national-competitions/question-pool/meta",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (_req, res) => {
+    const [subjects, chapters, topics, years, difficulties, questionTypes] = await Promise.all([
+      Subject.find({}).select("_id name examType examMode").sort({ name: 1 }).limit(1000),
+      Chapter.find({}).select("_id name subjectId").sort({ name: 1 }).limit(2000),
+      Topic.find({}).select("_id name chapterId").sort({ name: 1 }).limit(3000),
+      Year.find({}).select("_id year label name examType").sort({ year: -1 }).limit(500),
+      Difficulty.find({}).select("_id name key label").sort({ sortOrder: 1, name: 1 }),
+      QuestionType.find({}).select("_id name key label responseType").sort({ name: 1 }),
+    ]);
+    res.json({ success: true, data: { subjects, chapters, topics, years, difficulties, questionTypes } });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/question-pool",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const page = Math.max(1, Number(req.query.page || 1));
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const filter = buildQuestionPoolFilter(req.query);
+    const [items, total] = await Promise.all([
+      Question.find(filter)
+        .populate("subjectId", "name")
+        .populate("chapterId", "name")
+        .populate("topicId", "name")
+        .populate("yearId", "year label name")
+        .populate("difficultyId", "name key")
+        .populate("questionTypeId", "name key label")
+        .select("_id question subjectId chapterId topicId yearId difficulty difficultyId questionTypeId responseType exam examMode questionStatus reviewStatus isVisibleToUsers updatedAt")
+        .sort({ updatedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+      Question.countDocuments(filter),
+    ]);
+    res.json({ success: true, data: items, meta: { page, limit, total, pages: Math.max(1, Math.ceil(total / limit)) } });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
   "/national-competitions/dashboard",
   requireModulePermission("national-competitions", "view"),
   asyncHandler(async (_req, res) => {
@@ -115,7 +224,7 @@ nationalCompetitionsAdminRouter.post(
   "/national-competitions",
   requireModulePermission("national-competitions", "create"),
   asyncHandler(async (req, res) => {
-    const payload = sanitizeCompetitionPayload(req.body, String(req.admin?._id || ""));
+    const payload = await sanitizeCompetitionPayload(req.body, String(req.admin?._id || ""));
     payload.createdBy = String(req.admin?._id || "");
     const item = await NationalCompetition.create(payload);
     await audit(req, "competition_create", String(item._id), { title: item.title });
@@ -142,7 +251,7 @@ nationalCompetitionsAdminRouter.put(
   "/national-competitions/:id",
   requireModulePermission("national-competitions", "edit"),
   asyncHandler(async (req, res) => {
-    const payload = sanitizeCompetitionPayload(req.body, String(req.admin?._id || ""));
+    const payload = await sanitizeCompetitionPayload(req.body, String(req.admin?._id || ""));
     const item = await NationalCompetition.findByIdAndUpdate(req.params.id, payload, { new: true });
     if (!item) throw new AppError("Competition not found", 404);
     await audit(req, "competition_update", String(item._id));

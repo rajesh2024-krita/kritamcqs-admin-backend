@@ -21,6 +21,12 @@ const nationalCompetitionSchema = new Schema(
     marksPerQuestion: { type: Number, default: 4 },
     negativeMarks: { type: Number, default: 1 },
     questionIds: { type: [String], default: [] },
+    questionSelection: {
+      mode: { type: String, enum: ["manual", "automatic"], default: "manual" },
+      filters: { type: Schema.Types.Mixed, default: {} },
+      targetCount: { type: Number, default: 0 },
+      lastGeneratedAt: { type: Date },
+    },
     rules: { type: [String], default: [] },
     rewardsSummary: { type: String, default: "" },
     terms: { type: String, default: "" },
