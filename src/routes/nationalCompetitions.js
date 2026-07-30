@@ -131,6 +131,21 @@ async function sanitizeCompetitionPayload(body = {}, adminId = "") {
       autosaveIntervalSeconds: Math.max(5, Number(body.security?.autosaveIntervalSeconds || 20)),
     },
     notificationEvents: Array.isArray(body.notificationEvents) ? body.notificationEvents.map(String).filter(Boolean) : [],
+    isPublished: Boolean(body.isPublished),
+    isEnabled: Boolean(body.isEnabled),
+    banner: {
+      enabled: body.banner?.enabled !== false,
+      testName: String(body.banner?.testName || title).trim(),
+      backgroundImageUrl: String(body.banner?.backgroundImageUrl || "").trim(),
+      backgroundColor: String(body.banner?.backgroundColor || "#4f21d8").trim(),
+      overlayColor: String(body.banner?.overlayColor || "rgba(42,19,143,0.42)").trim(),
+      textColor: String(body.banner?.textColor || "#ffffff").trim(),
+      countdownEnabled: body.banner?.countdownEnabled !== false,
+      ctaText: String(body.banner?.ctaText || "View Details").trim(),
+      buttonColor: String(body.banner?.buttonColor || "#ffffff").trim(),
+      buttonTextColor: String(body.banner?.buttonTextColor || "#3b159f").trim(),
+      buttonAction: ["register", "view_details", "join_test"].includes(body.banner?.buttonAction) ? body.banner.buttonAction : "view_details",
+    },
     isActive: body.isActive !== false,
     updatedBy: adminId,
   };
@@ -225,6 +240,9 @@ nationalCompetitionsAdminRouter.post(
   requireModulePermission("national-competitions", "create"),
   asyncHandler(async (req, res) => {
     const payload = await sanitizeCompetitionPayload(req.body, String(req.admin?._id || ""));
+    payload.status = "draft";
+    payload.isPublished = false;
+    payload.isEnabled = false;
     payload.createdBy = String(req.admin?._id || "");
     const item = await NationalCompetition.create(payload);
     await audit(req, "competition_create", String(item._id), { title: item.title });
@@ -263,10 +281,47 @@ nationalCompetitionsAdminRouter.patch(
   "/national-competitions/:id/status",
   requireModulePermission("national-competitions", "edit"),
   asyncHandler(async (req, res) => {
-    const item = await NationalCompetition.findByIdAndUpdate(req.params.id, { status: req.body.status, archivedAt: req.body.status === "archived" ? new Date() : undefined }, { new: true });
+    const statusPatch = {};
+    const action = String(req.body.action || "").toLowerCase();
+    if (action === "publish") {
+      statusPatch.status = "scheduled";
+      statusPatch.isPublished = true;
+    } else if (action === "enable") {
+      statusPatch.isEnabled = true;
+      statusPatch.isActive = true;
+    } else if (action === "disable") {
+      statusPatch.isEnabled = false;
+      statusPatch.isActive = false;
+    } else {
+      statusPatch.status = req.body.status;
+      if (req.body.status === "draft") {
+        statusPatch.isPublished = false;
+        statusPatch.isEnabled = false;
+      }
+      if (req.body.status === "archived") statusPatch.archivedAt = new Date();
+    }
+    const item = await NationalCompetition.findByIdAndUpdate(req.params.id, statusPatch, { new: true });
     if (!item) throw new AppError("Competition not found", 404);
-    await audit(req, "competition_status", String(item._id), { status: req.body.status });
+    await audit(req, "competition_status", String(item._id), { ...statusPatch, action });
     res.json({ success: true, data: item });
+  }),
+);
+
+nationalCompetitionsAdminRouter.delete(
+  "/national-competitions/:id",
+  requireModulePermission("national-competitions", "delete"),
+  asyncHandler(async (req, res) => {
+    const item = await NationalCompetition.findByIdAndDelete(req.params.id);
+    if (!item) throw new AppError("Competition not found", 404);
+    await Promise.all([
+      NationalCompetitionRegistration.deleteMany({ competitionId: req.params.id }),
+      NationalCompetitionAttempt.deleteMany({ competitionId: req.params.id }),
+      NationalLeaderboardEntry.deleteMany({ competitionId: req.params.id }),
+      NationalCompetitionReward.deleteMany({ competitionId: req.params.id }),
+      NationalCompetitionNotification.deleteMany({ competitionId: req.params.id }),
+      audit(req, "competition_delete", req.params.id, { title: item.title }),
+    ]);
+    res.json({ success: true, data: { id: req.params.id } });
   }),
 );
 
@@ -281,6 +336,51 @@ nationalCompetitionsAdminRouter.get(
     const users = await User.find({ _id: { $in: registrations.map((item) => item.userId) } }).select("_id name email mobile isPremium").lean();
     const userMap = new Map(users.map((user) => [String(user._id), user]));
     res.json({ success: true, data: registrations.map((item) => ({ registration: item, user: userMap.get(String(item.userId)) || null })) });
+  }),
+);
+
+nationalCompetitionsAdminRouter.delete(
+  "/national-competitions/participants/:registrationId",
+  requireModulePermission("national-competitions", "delete"),
+  asyncHandler(async (req, res) => {
+    const item = await NationalCompetitionRegistration.findByIdAndDelete(req.params.registrationId);
+    if (!item) throw new AppError("Registration not found", 404);
+    await audit(req, "participant_delete", item.competitionId, { registrationId: req.params.registrationId });
+    res.json({ success: true, data: { id: req.params.registrationId } });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/attempts",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const attempts = await NationalCompetitionAttempt.find({ competitionId: req.params.id }).sort({ updatedAt: -1 }).limit(500);
+    res.json({ success: true, data: attempts });
+  }),
+);
+
+nationalCompetitionsAdminRouter.patch(
+  "/national-competitions/attempts/:attemptId",
+  requireModulePermission("national-competitions", "edit"),
+  asyncHandler(async (req, res) => {
+    const payload = {};
+    if (req.body.status) payload.status = req.body.status;
+    if (Array.isArray(req.body.suspiciousFlags)) payload.suspiciousFlags = req.body.suspiciousFlags.map(String);
+    const item = await NationalCompetitionAttempt.findByIdAndUpdate(req.params.attemptId, payload, { new: true });
+    if (!item) throw new AppError("Attempt not found", 404);
+    await audit(req, "attempt_update", item.competitionId, { attemptId: req.params.attemptId, payload });
+    res.json({ success: true, data: item });
+  }),
+);
+
+nationalCompetitionsAdminRouter.delete(
+  "/national-competitions/attempts/:attemptId",
+  requireModulePermission("national-competitions", "delete"),
+  asyncHandler(async (req, res) => {
+    const item = await NationalCompetitionAttempt.findByIdAndDelete(req.params.attemptId);
+    if (!item) throw new AppError("Attempt not found", 404);
+    await audit(req, "attempt_delete", item.competitionId, { attemptId: req.params.attemptId });
+    res.json({ success: true, data: { id: req.params.attemptId } });
   }),
 );
 
@@ -391,6 +491,28 @@ nationalCompetitionsAdminRouter.patch(
   }),
 );
 
+nationalCompetitionsAdminRouter.put(
+  "/national-competitions/rewards/:rewardId",
+  requireModulePermission("national-competitions", "edit"),
+  asyncHandler(async (req, res) => {
+    const reward = await NationalCompetitionReward.findByIdAndUpdate(req.params.rewardId, req.body, { new: true });
+    if (!reward) throw new AppError("Reward not found", 404);
+    await audit(req, "reward_update", reward.competitionId, { rewardId: req.params.rewardId });
+    res.json({ success: true, data: reward });
+  }),
+);
+
+nationalCompetitionsAdminRouter.delete(
+  "/national-competitions/rewards/:rewardId",
+  requireModulePermission("national-competitions", "delete"),
+  asyncHandler(async (req, res) => {
+    const reward = await NationalCompetitionReward.findByIdAndDelete(req.params.rewardId);
+    if (!reward) throw new AppError("Reward not found", 404);
+    await audit(req, "reward_delete", reward.competitionId, { rewardId: req.params.rewardId });
+    res.json({ success: true, data: { id: req.params.rewardId } });
+  }),
+);
+
 nationalCompetitionsAdminRouter.get(
   "/national-competitions/:id/notifications",
   requireModulePermission("national-competitions", "view"),
@@ -407,6 +529,28 @@ nationalCompetitionsAdminRouter.post(
     const item = await NationalCompetitionNotification.create({ ...req.body, competitionId: req.params.id });
     await audit(req, "notification_create", req.params.id, { notificationId: String(item._id) });
     res.status(201).json({ success: true, data: item });
+  }),
+);
+
+nationalCompetitionsAdminRouter.put(
+  "/national-competitions/notifications/:notificationId",
+  requireModulePermission("national-competitions", "edit"),
+  asyncHandler(async (req, res) => {
+    const item = await NationalCompetitionNotification.findByIdAndUpdate(req.params.notificationId, req.body, { new: true });
+    if (!item) throw new AppError("Notification not found", 404);
+    await audit(req, "notification_update", item.competitionId, { notificationId: req.params.notificationId });
+    res.json({ success: true, data: item });
+  }),
+);
+
+nationalCompetitionsAdminRouter.delete(
+  "/national-competitions/notifications/:notificationId",
+  requireModulePermission("national-competitions", "delete"),
+  asyncHandler(async (req, res) => {
+    const item = await NationalCompetitionNotification.findByIdAndDelete(req.params.notificationId);
+    if (!item) throw new AppError("Notification not found", 404);
+    await audit(req, "notification_delete", item.competitionId, { notificationId: req.params.notificationId });
+    res.json({ success: true, data: { id: req.params.notificationId } });
   }),
 );
 

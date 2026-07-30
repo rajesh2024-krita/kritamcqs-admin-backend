@@ -3571,7 +3571,11 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
   const sessionFilter = appUsageFilter(req.query, "startedAt");
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
-  const [settings, totals, pages, clicks, dailyActive, hourly, platform, recent, users, newUsers] = await Promise.all([
+  const userFilter = { isAdmin: { $ne: true } };
+  const plan = String(req.query.plan || "all").trim();
+  if (plan === "Free") userFilter.isPremium = { $ne: true };
+  if (plan === "Premium") userFilter.isPremium = true;
+  const [settings, totals, pages, clicks, dailyActive, hourly, platform, recent, users, newUsers, totalUsers, premiumUserCount, freeUserCount] = await Promise.all([
     AppUsageSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default", enabled: true, automaticCleanupEnabled: false, retentionDays: 90, retentionNeverDelete: false, sessionTimeoutMinutes: 30 } }, { upsert: true, new: true }),
     AppUsageEvent.aggregate([
       { $match: eventFilter },
@@ -3631,7 +3635,10 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
       { $sort: { lastActive: -1 } },
       { $limit: 100 },
     ]),
-    User.countDocuments({ isAdmin: { $ne: true }, createdAt: { $gte: from, $lte: to } }),
+    User.countDocuments({ ...userFilter, createdAt: { $gte: from, $lte: to } }),
+    User.countDocuments(userFilter),
+    User.countDocuments({ isAdmin: { $ne: true }, isPremium: true }),
+    User.countDocuments({ isAdmin: { $ne: true }, isPremium: { $ne: true } }),
   ]);
   const sessionTotals = await AppUsageSession.aggregate([
     { $match: sessionFilter },
@@ -3651,11 +3658,12 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
         averageSessionDuration: Math.round(Number(sessionRow.averageSessionDuration || 0)),
         totalScreenViews: Number(totalRow.screenViews || 0),
         totalClicks: Number(totalRow.clicks || 0),
-        premiumUsers: countSet(totalRow.premiumUsers),
-        freeUsers: countSet(totalRow.freeUsers),
+        premiumUsers: premiumUserCount,
+        freeUsers: freeUserCount,
         androidUsers: countSet(totalRow.androidUsers),
         iosUsers: countSet(totalRow.iosUsers),
         activeUsers: countSet(totalRow.activeUsers),
+        totalUsers,
         newUsers,
       },
       pages: pages.map((item) => ({
@@ -3684,12 +3692,56 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
 
 router.get("/app-usage/users", asyncHandler(async (req, res) => {
   const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["lastActive", "totalSessions", "averageSessionDuration", "userName", "email"], "lastActive");
-  const filter = appUsageFilter(req.query, "startedAt");
-  Object.assign(filter, appUsageSearchFilter(req.query.search, ["userName", "email", "userId", "loginMethod", "platform", "userType"]));
+  const sessionFilter = appUsageFilter(req.query, "startedAt");
+  delete sessionFilter.userId;
+  delete sessionFilter.userType;
+  delete sessionFilter.eventType;
+  delete sessionFilter.screen;
+  const userMatch = { isAdmin: { $ne: true } };
+  const plan = String(req.query.plan || "all").trim();
+  if (plan === "Free") userMatch.isPremium = { $ne: true };
+  if (plan === "Premium") userMatch.isPremium = true;
+  const search = String(req.query.search || "").trim();
+  if (search) {
+    const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    userMatch.$or = [
+      { name: { $regex: safe, $options: "i" } },
+      { email: { $regex: safe, $options: "i" } },
+      { mobile: { $regex: safe, $options: "i" } },
+      { loginProvider: { $regex: safe, $options: "i" } },
+      { provider: { $regex: safe, $options: "i" } },
+    ];
+  }
   const pipeline = [
-    { $match: filter },
-    { $sort: { startedAt: 1, lastActiveAt: 1 } },
-    { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+    { $match: userMatch },
+    { $addFields: { usageUserId: { $toString: "$_id" } } },
+    {
+      $lookup: {
+        from: AppUsageSession.collection.name,
+        let: { usageUserId: "$usageUserId" },
+        pipeline: [
+          { $match: { ...sessionFilter, $expr: { $eq: ["$userId", "$$usageUserId"] } } },
+          { $sort: { startedAt: 1, lastActiveAt: 1 } },
+        ],
+        as: "usageSessions",
+      },
+    },
+    { $addFields: { latestUsageSession: { $arrayElemAt: ["$usageSessions", -1] } } },
+    {
+      $project: {
+        _id: "$usageUserId",
+        userId: "$usageUserId",
+        userName: { $ifNull: ["$name", ""] },
+        email: { $ifNull: ["$email", ""] },
+        mobile: { $ifNull: ["$mobile", ""] },
+        platform: { $ifNull: ["$latestUsageSession.platform", "-"] },
+        userType: { $cond: [{ $eq: ["$isPremium", true] }, "Premium", "Free"] },
+        loginMethod: { $ifNull: ["$latestUsageSession.loginMethod", { $ifNull: ["$loginProvider", { $ifNull: ["$provider", ""] }] }] },
+        totalSessions: { $size: "$usageSessions" },
+        lastActive: { $max: "$usageSessions.lastActiveAt" },
+        averageSessionDuration: { $ifNull: [{ $avg: "$usageSessions.durationSeconds" }, 0] },
+      },
+    },
     { $sort: sort },
   ];
   const [items, totalRows] = await Promise.all([

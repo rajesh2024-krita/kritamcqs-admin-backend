@@ -55,6 +55,21 @@ const nationalCompetitionSchema = new Schema(
       autosaveIntervalSeconds: { type: Number, default: 20, min: 5 },
     },
     notificationEvents: { type: [String], default: [] },
+    isPublished: { type: Boolean, default: false, index: true },
+    isEnabled: { type: Boolean, default: false, index: true },
+    banner: {
+      enabled: { type: Boolean, default: true },
+      testName: { type: String, default: "" },
+      backgroundImageUrl: { type: String, default: "" },
+      backgroundColor: { type: String, default: "#4f21d8" },
+      overlayColor: { type: String, default: "rgba(42,19,143,0.42)" },
+      textColor: { type: String, default: "#ffffff" },
+      countdownEnabled: { type: Boolean, default: true },
+      ctaText: { type: String, default: "View Details" },
+      buttonColor: { type: String, default: "#ffffff" },
+      buttonTextColor: { type: String, default: "#3b159f" },
+      buttonAction: { type: String, enum: ["register", "view_details", "join_test"], default: "view_details" },
+    },
     isActive: { type: Boolean, default: true, index: true },
     archivedAt: { type: Date },
     createdBy: { type: String, default: "" },
@@ -64,6 +79,6 @@ const nationalCompetitionSchema = new Schema(
 );
 
 nationalCompetitionSchema.index({ status: 1, startsAt: 1 });
-nationalCompetitionSchema.index({ examType: 1, isActive: 1, startsAt: 1 });
+nationalCompetitionSchema.index({ examType: 1, isActive: 1, isPublished: 1, isEnabled: 1, startsAt: 1 });
 
 export const NationalCompetition = models.NationalCompetition || model("NationalCompetition", nationalCompetitionSchema);
