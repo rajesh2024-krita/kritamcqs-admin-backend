@@ -230,7 +230,7 @@ async function persistAppUsageEvents(rawEvents, req) {
   const events = parsedEvents.map((event) => ({
     userId: event.userId,
     userName: event.userName,
-    email: event.email,
+    email: String(event.email || "").trim().toLowerCase(),
     userType: event.userType,
     loginMethod: event.loginMethod,
     eventId: event.eventId,
@@ -274,9 +274,11 @@ async function persistAppUsageEvents(rawEvents, req) {
   const bySession = new Map();
   events.forEach((event) => bySession.set(event.sessionId, [...(bySession.get(event.sessionId) || []), event]));
   await Promise.all([...bySession.entries()].map(async ([sessionId, sessionEvents]) => {
-    const ordered = [...sessionEvents].sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
+    const storedEvents = await AppUsageEvent.find({ sessionId }).sort({ timestamp: 1 }).lean();
+    const ordered = [...(storedEvents.length ? storedEvents : sessionEvents)].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     const first = ordered[0];
     const last = ordered[ordered.length - 1];
+    const latestUserEvent = [...ordered].reverse().find((event) => event.email || event.userId || event.userName) || first;
     const screenEvents = ordered.filter((event) => event.eventType === "ScreenView");
     const clickEvents = ordered.filter((event) => event.eventType.toLowerCase().includes("click"));
     const durationSeconds = ordered.reduce((sum, event) => sum + Number(event.durationSeconds || 0), 0);
@@ -284,13 +286,13 @@ async function persistAppUsageEvents(rawEvents, req) {
     await AppUsageSession.findOneAndUpdate(
       { sessionId },
       {
-        $setOnInsert: {
+        $set: {
           sessionId,
-          userId: first.userId,
-          userName: first.userName,
-          email: first.email,
-          userType: first.userType,
-          loginMethod: first.loginMethod,
+          userId: latestUserEvent.userId || first.userId,
+          userName: latestUserEvent.userName || first.userName,
+          email: String(latestUserEvent.email || first.email || "").trim().toLowerCase(),
+          userType: latestUserEvent.userType || first.userType,
+          loginMethod: latestUserEvent.loginMethod || first.loginMethod,
           deviceId: first.deviceId,
           platform: first.platform,
           appVersion: first.appVersion,
@@ -299,15 +301,11 @@ async function persistAppUsageEvents(rawEvents, req) {
           ipAddress: first.ipAddress,
           startedAt: first.timestamp,
           entryScreen: first.screen,
-        },
-        $set: {
           endedAt: last.timestamp,
           exitScreen: last.screen,
           lastActiveAt: last.timestamp,
           ipAddress: first.ipAddress,
           status,
-        },
-        $inc: {
           durationSeconds,
           foregroundSeconds: durationSeconds,
           screenViews: screenEvents.length,

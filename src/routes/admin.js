@@ -3470,6 +3470,19 @@ function appUsageSearchFilter(search, fields) {
   return { $or: fields.map((field) => ({ [field]: { $regex: safe, $options: "i" } })) };
 }
 
+function appUsageIdentityExpression() {
+  return { $ifNull: [{ $cond: [{ $ne: ["$email", ""] }, "$email", null] }, "$userId"] };
+}
+
+function appUsageIdentityFilter(identifier) {
+  const value = String(identifier || "").trim();
+  if (!value) return {};
+  const normalizedEmail = value.toLowerCase();
+  return value.includes("@")
+    ? { email: normalizedEmail }
+    : { $or: [{ userId: value }, { email: normalizedEmail }] };
+}
+
 function appUsageMeta(total, page, limit) {
   const totalPages = Math.max(1, Math.ceil(total / limit));
   return { page, limit, total, pages: totalPages, totalPages };
@@ -3582,13 +3595,13 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
       {
         $group: {
           _id: null,
-          activeUsers: { $addToSet: "$userId" },
+          activeUsers: { $addToSet: appUsageIdentityExpression() },
           screenViews: { $sum: { $cond: [{ $eq: ["$eventType", "ScreenView"] }, 1, 0] } },
           clicks: { $sum: { $cond: [{ $regexMatch: { input: "$eventType", regex: /click/i } }, 1, 0] } },
-          premiumUsers: { $addToSet: { $cond: [{ $eq: ["$userType", "Premium"] }, "$userId", null] } },
-          freeUsers: { $addToSet: { $cond: [{ $eq: ["$userType", "Free"] }, "$userId", null] } },
-          androidUsers: { $addToSet: { $cond: [{ $eq: ["$platform", "android"] }, "$userId", null] } },
-          iosUsers: { $addToSet: { $cond: [{ $eq: ["$platform", "ios"] }, "$userId", null] } },
+          premiumUsers: { $addToSet: { $cond: [{ $eq: ["$userType", "Premium"] }, appUsageIdentityExpression(), null] } },
+          freeUsers: { $addToSet: { $cond: [{ $eq: ["$userType", "Free"] }, appUsageIdentityExpression(), null] } },
+          androidUsers: { $addToSet: { $cond: [{ $eq: ["$platform", "android"] }, appUsageIdentityExpression(), null] } },
+          iosUsers: { $addToSet: { $cond: [{ $eq: ["$platform", "ios"] }, appUsageIdentityExpression(), null] } },
         },
       },
     ]),
@@ -3600,7 +3613,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
           visits: { $sum: 1 },
           totalSeconds: { $sum: "$durationSeconds" },
           averageSeconds: { $avg: "$durationSeconds" },
-          users: { $addToSet: "$userId" },
+          users: { $addToSet: appUsageIdentityExpression() },
         },
       },
       { $sort: { totalSeconds: -1, visits: -1 } },
@@ -3614,24 +3627,24 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
     ]),
     AppUsageEvent.aggregate([
       { $match: eventFilter },
-      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, users: { $addToSet: "$userId" }, events: { $sum: 1 } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, users: { $addToSet: appUsageIdentityExpression() }, events: { $sum: 1 } } },
       { $sort: { _id: -1 } },
     ]),
     AppUsageEvent.aggregate([
       { $match: eventFilter },
-      { $group: { _id: { $hour: "$timestamp" }, events: { $sum: 1 }, users: { $addToSet: "$userId" } } },
+      { $group: { _id: { $hour: "$timestamp" }, events: { $sum: 1 }, users: { $addToSet: appUsageIdentityExpression() } } },
       { $sort: { _id: 1 } },
     ]),
     AppUsageEvent.aggregate([
       { $match: eventFilter },
-      { $group: { _id: "$platform", events: { $sum: 1 }, users: { $addToSet: "$userId" } } },
+      { $group: { _id: "$platform", events: { $sum: 1 }, users: { $addToSet: appUsageIdentityExpression() } } },
       { $sort: { events: -1 } },
     ]),
     AppUsageEvent.find(eventFilter).sort({ timestamp: -1 }).limit(100).lean(),
     AppUsageSession.aggregate([
       { $match: sessionFilter },
       { $sort: { startedAt: 1, lastActiveAt: 1 } },
-      { $group: { _id: "$userId", userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+      { $group: { _id: appUsageIdentityExpression(), userId: { $last: "$userId" }, userName: { $last: "$userName" }, email: { $last: "$email" }, platform: { $last: "$platform" }, userType: { $last: "$userType" }, loginMethod: { $last: "$loginMethod" }, totalSessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
       { $sort: { lastActive: -1 } },
       { $limit: 100 },
     ]),
@@ -3642,7 +3655,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
   ]);
   const sessionTotals = await AppUsageSession.aggregate([
     { $match: sessionFilter },
-    { $group: { _id: null, sessions: { $sum: 1 }, averageSessionDuration: { $avg: "$durationSeconds" }, todayUsers: { $addToSet: { $cond: [{ $gte: ["$lastActiveAt", todayStart] }, "$userId", null] } } } },
+    { $group: { _id: null, sessions: { $sum: 1 }, averageSessionDuration: { $avg: "$durationSeconds" }, todayUsers: { $addToSet: { $cond: [{ $gte: ["$lastActiveAt", todayStart] }, appUsageIdentityExpression(), null] } } } },
   ]);
   const totalRow = totals[0] || {};
   const sessionRow = sessionTotals[0] || {};
@@ -3691,58 +3704,67 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
 }));
 
 router.get("/app-usage/users", asyncHandler(async (req, res) => {
-  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["lastActive", "totalSessions", "averageSessionDuration", "userName", "email"], "lastActive");
+  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["lastActive", "totalSessions", "averageSessionDuration", "userName", "email", "totalTimeSpent"], "lastActive");
   const sessionFilter = appUsageFilter(req.query, "lastActiveAt");
   delete sessionFilter.userId;
   delete sessionFilter.userType;
   delete sessionFilter.eventType;
   delete sessionFilter.screen;
-  const userMatch = { isAdmin: { $ne: true } };
   const plan = String(req.query.plan || "all").trim();
-  if (plan === "Free") userMatch.isPremium = { $ne: true };
-  if (plan === "Premium") userMatch.isPremium = true;
+  if (plan === "Free" || plan === "Premium") sessionFilter.userType = plan;
   const search = String(req.query.search || "").trim();
-  if (search) {
-    const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    userMatch.$or = [
-      { name: { $regex: safe, $options: "i" } },
-      { email: { $regex: safe, $options: "i" } },
-      { mobile: { $regex: safe, $options: "i" } },
-      { loginProvider: { $regex: safe, $options: "i" } },
-      { provider: { $regex: safe, $options: "i" } },
-    ];
-  }
+  const searchFilter = appUsageSearchFilter(search, ["userName", "email", "userId", "loginMethod", "platform", "deviceModel", "appVersion"]);
   const pipeline = [
-    { $match: userMatch },
-    { $addFields: { usageUserId: { $toString: "$_id" } } },
-    {
-      $lookup: {
-        from: AppUsageSession.collection.name,
-        let: { usageUserId: "$usageUserId" },
-        pipeline: [
-          { $match: { ...sessionFilter, $expr: { $eq: ["$userId", "$$usageUserId"] } } },
-          { $sort: { startedAt: 1, lastActiveAt: 1 } },
-        ],
-        as: "usageSessions",
-      },
-    },
-    { $addFields: { latestUsageSession: { $arrayElemAt: ["$usageSessions", -1] } } },
+    { $match: { ...sessionFilter, ...searchFilter } },
+    { $sort: { startedAt: 1, lastActiveAt: 1 } },
+    { $group: {
+      _id: appUsageIdentityExpression(),
+      userId: { $last: "$userId" },
+      userName: { $last: "$userName" },
+      email: { $last: "$email" },
+      platform: { $last: "$platform" },
+      appVersion: { $last: "$appVersion" },
+      deviceModel: { $last: "$deviceModel" },
+      userType: { $last: "$userType" },
+      loginMethod: { $last: "$loginMethod" },
+      totalSessions: { $sum: 1 },
+      totalTimeSpent: { $sum: "$durationSeconds" },
+      firstSessionAt: { $min: "$startedAt" },
+      lastSessionAt: { $max: "$startedAt" },
+      lastActive: { $max: "$lastActiveAt" },
+      averageSessionDuration: { $avg: "$durationSeconds" },
+    } },
+    { $lookup: { from: User.collection.name, localField: "email", foreignField: "email", as: "userRecord" } },
+    { $addFields: { userRecord: { $arrayElemAt: ["$userRecord", 0] } } },
     {
       $project: {
-        _id: "$usageUserId",
-        userId: "$usageUserId",
-        userName: { $ifNull: ["$name", ""] },
-        email: { $ifNull: ["$email", ""] },
-        mobile: { $ifNull: ["$mobile", ""] },
-        platform: { $ifNull: ["$latestUsageSession.platform", "-"] },
-        userType: { $cond: [{ $eq: ["$isPremium", true] }, "Premium", "Free"] },
-        loginMethod: { $ifNull: ["$latestUsageSession.loginMethod", { $ifNull: ["$loginProvider", { $ifNull: ["$provider", ""] }] }] },
-        totalSessions: { $size: "$usageSessions" },
-        lastActive: { $max: "$usageSessions.lastActiveAt" },
-        averageSessionDuration: { $ifNull: [{ $avg: "$usageSessions.durationSeconds" }, 0] },
+        _id: "$_id",
+        id: "$_id",
+        userId: 1,
+        userName: { $ifNull: ["$userRecord.name", "$userName"] },
+        email: 1,
+        mobile: { $ifNull: ["$userRecord.mobile", ""] },
+        platform: { $ifNull: ["$platform", "-"] },
+        appVersion: 1,
+        deviceModel: 1,
+        userType: 1,
+        loginMethod: { $ifNull: ["$loginMethod", { $ifNull: ["$userRecord.loginProvider", { $ifNull: ["$userRecord.provider", ""] }] }] },
+        createdAt: "$userRecord.createdAt",
+        userStatus: {
+          $cond: [
+            { $and: ["$userRecord.createdAt", { $lte: [{ $abs: { $subtract: ["$firstSessionAt", "$userRecord.createdAt"] } }, 24 * 60 * 60 * 1000] }] },
+            "New User",
+            "Existing User",
+          ],
+        },
+        totalSessions: 1,
+        totalTimeSpent: 1,
+        firstSessionAt: 1,
+        lastLogin: "$lastSessionAt",
+        lastActive: 1,
+        averageSessionDuration: { $ifNull: ["$averageSessionDuration", 0] },
       },
     },
-    { $match: { totalSessions: { $gt: 0 } } },
     { $sort: sort },
   ];
   const [items, totalRows] = await Promise.all([
@@ -3815,17 +3837,18 @@ router.get("/app-usage/devices", asyncHandler(async (req, res) => {
 }));
 
 router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) => {
-  const userId = String(req.params.userId || "").trim();
-  if (!userId) throw new AppError("User is required", 400);
+  const identity = decodeURIComponent(String(req.params.userId || "")).trim();
+  if (!identity) throw new AppError("User is required", 400);
   const { from, to } = appUsageActivityRange(req.query);
   const { page, limit, skip } = appUsagePageOptions(req.query, ["startedAt", "lastActiveAt"], "lastActiveAt");
+  const identityFilter = appUsageIdentityFilter(identity);
   const sessionFilter = {
-    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString(), userId }, "lastActiveAt"),
-    userId,
+    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString() }, "lastActiveAt"),
+    ...identityFilter,
   };
   const eventFilter = {
-    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString(), userId }),
-    userId,
+    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString() }),
+    ...identityFilter,
   };
   delete eventFilter.status;
 
@@ -3838,7 +3861,7 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
     sessionFilter.$or = [...existingOr, { sessionId: { $in: matchingEventSessionIds } }];
   }
 
-  const [summaryRows, sessionCountRows, mostVisitedScreens, sessionsPerDay, userRecord, sessions, total] = await Promise.all([
+  const [summaryRows, sessionCountRows, mostVisitedScreens, mostClickedFeatures, sessionsPerDay, userRecord, firstSession, sessions, total] = await Promise.all([
     AppUsageSession.aggregate([
       { $match: sessionFilter },
       {
@@ -3851,6 +3874,7 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
           shortestSession: { $min: "$durationSeconds" },
           lastActiveDateTime: { $max: "$lastActiveAt" },
           firstLoginDate: { $min: "$startedAt" },
+          lastLoginDate: { $max: "$startedAt" },
           totalScreenViews: { $sum: "$screenViews" },
           activeDays: { $addToSet: { $dateToString: { format: "%Y-%m-%d", date: "$startedAt" } } },
         },
@@ -3866,12 +3890,21 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
       { $sort: { views: -1, totalSeconds: -1 } },
       { $limit: 8 },
     ]),
+    AppUsageEvent.aggregate([
+      { $match: { ...eventFilter, eventType: { $regex: /click/i }, componentName: { $ne: "" } } },
+      { $group: { _id: { componentName: "$componentName", componentType: "$componentType", screen: "$screen" }, clicks: { $sum: 1 }, lastClickedAt: { $max: "$timestamp" } } },
+      { $sort: { clicks: -1, lastClickedAt: -1 } },
+      { $limit: 8 },
+    ]),
     AppUsageSession.aggregate([
       { $match: sessionFilter },
       { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$startedAt" } }, sessions: { $sum: 1 }, totalSeconds: { $sum: "$durationSeconds" } } },
       { $sort: { _id: 1 } },
     ]),
-    User.findById(mongoose.isValidObjectId(userId) ? userId : null).select("name email createdAt loginProvider provider").lean().catch(() => null),
+    identity.includes("@")
+      ? User.findOne({ email: identity.toLowerCase() }).select("name email createdAt loginProvider provider").lean().catch(() => null)
+      : User.findById(mongoose.isValidObjectId(identity) ? identity : null).select("name email createdAt loginProvider provider").lean().catch(() => null),
+    AppUsageSession.findOne(identityFilter).sort({ startedAt: 1 }).lean(),
     AppUsageSession.find(sessionFilter).sort({ lastActiveAt: -1, startedAt: -1 }).skip(skip).limit(limit).lean(),
     AppUsageSession.countDocuments(sessionFilter),
   ]);
@@ -3911,14 +3944,20 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
 
   const summary = summaryRows[0] || {};
   const activeDays = (summary.activeDays || []).filter(Boolean).length;
+  const createdAt = userRecord?.createdAt || null;
+  const firstSeenAt = firstSession?.startedAt || summary.firstLoginDate || null;
+  const userStatus = createdAt && firstSeenAt && Math.abs(new Date(firstSeenAt).getTime() - new Date(createdAt).getTime()) <= 24 * 60 * 60 * 1000
+    ? "New User"
+    : "Existing User";
   res.json({
     success: true,
     data: {
       user: {
-        id: userId,
+        id: identity,
         name: userRecord?.name || sessions[0]?.userName || "",
         email: userRecord?.email || sessions[0]?.email || "",
         loginProvider: userRecord?.loginProvider || userRecord?.provider || sessions[0]?.loginMethod || "",
+        userStatus,
       },
       range: { from, to },
       summary: {
@@ -3929,9 +3968,17 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
         shortestSession: Math.round(Number(summary.shortestSession || 0)),
         lastActiveDateTime: summary.lastActiveDateTime || null,
         firstLoginDate: userRecord?.createdAt || summary.firstLoginDate || null,
+        lastLogin: summary.lastLoginDate || null,
         totalAppOpens: Number(sessionCountRows[0]?.totalAppOpens || summary.totalSessions || 0),
         totalScreenViews: Number(summary.totalScreenViews || 0),
         mostVisitedScreens: mostVisitedScreens.map((item) => ({ screen: item._id, views: item.views, totalSeconds: Math.round(Number(item.totalSeconds || 0)) })),
+        mostClickedFeatures: mostClickedFeatures.map((item) => ({
+          componentName: item._id.componentName || "Unknown",
+          componentType: item._id.componentType || "Component",
+          screen: item._id.screen || "",
+          clicks: item.clicks,
+          lastClickedAt: item.lastClickedAt,
+        })),
         sessionCountPerDay: sessionsPerDay.map((item) => ({ date: item._id, sessions: item.sessions, totalSeconds: Math.round(Number(item.totalSeconds || 0)) })),
         activeDays,
         inactiveDays: Math.max(0, dayCountBetween(from, to) - activeDays),
@@ -3943,9 +3990,10 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
 }));
 
 router.get("/app-usage/users/:userId/timeline", asyncHandler(async (req, res) => {
-  const userId = String(req.params.userId || "");
+  const userId = decodeURIComponent(String(req.params.userId || ""));
   const date = String(req.query.date || "").trim();
-  const filter = { userId };
+  const identityFilter = appUsageIdentityFilter(userId);
+  const filter = { ...identityFilter };
   if (date) {
     const start = new Date(`${date}T00:00:00.000Z`);
     const end = new Date(`${date}T23:59:59.999Z`);
@@ -3953,7 +4001,7 @@ router.get("/app-usage/users/:userId/timeline", asyncHandler(async (req, res) =>
   }
   const [dates, events] = await Promise.all([
     AppUsageEvent.aggregate([
-      { $match: { userId } },
+      { $match: identityFilter },
       { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$timestamp" } }, events: { $sum: 1 }, lastActive: { $max: "$timestamp" } } },
       { $sort: { _id: -1 } },
       { $limit: 120 },

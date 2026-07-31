@@ -36,6 +36,7 @@ const appUsageEventSchema = new Schema(
 );
 
 appUsageEventSchema.index({ userId: 1, timestamp: -1 });
+appUsageEventSchema.index({ email: 1, timestamp: -1 });
 appUsageEventSchema.index({ sessionId: 1, timestamp: 1 });
 appUsageEventSchema.index({ platform: 1, timestamp: -1 });
 appUsageEventSchema.index({ screen: 1, eventType: 1, timestamp: -1 });

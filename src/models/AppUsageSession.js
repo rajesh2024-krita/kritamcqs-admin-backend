@@ -30,6 +30,7 @@ const appUsageSessionSchema = new Schema(
 );
 
 appUsageSessionSchema.index({ userId: 1, startedAt: -1 });
+appUsageSessionSchema.index({ email: 1, startedAt: -1 });
 appUsageSessionSchema.index({ platform: 1, startedAt: -1 });
 
 export const AppUsageSession = models.AppUsageSession || model("AppUsageSession", appUsageSessionSchema);
