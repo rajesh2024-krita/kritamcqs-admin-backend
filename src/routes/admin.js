@@ -3692,7 +3692,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
 
 router.get("/app-usage/users", asyncHandler(async (req, res) => {
   const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["lastActive", "totalSessions", "averageSessionDuration", "userName", "email"], "lastActive");
-  const sessionFilter = appUsageFilter(req.query, "startedAt");
+  const sessionFilter = appUsageFilter(req.query, "lastActiveAt");
   delete sessionFilter.userId;
   delete sessionFilter.userType;
   delete sessionFilter.eventType;
@@ -3742,11 +3742,12 @@ router.get("/app-usage/users", asyncHandler(async (req, res) => {
         averageSessionDuration: { $ifNull: [{ $avg: "$usageSessions.durationSeconds" }, 0] },
       },
     },
+    { $match: { totalSessions: { $gt: 0 } } },
     { $sort: sort },
   ];
   const [items, totalRows] = await Promise.all([
-    AppUsageSession.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
-    AppUsageSession.aggregate([...pipeline, { $count: "total" }]),
+    User.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
+    User.aggregate([...pipeline, { $count: "total" }]),
   ]);
   const total = Number(totalRows[0]?.total || 0);
   res.json({ success: true, data: items, meta: appUsageMeta(total, page, limit) });
@@ -3817,9 +3818,9 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
   const userId = String(req.params.userId || "").trim();
   if (!userId) throw new AppError("User is required", 400);
   const { from, to } = appUsageActivityRange(req.query);
-  const { page, limit, skip } = appUsagePageOptions(req.query, ["startedAt"], "startedAt");
+  const { page, limit, skip } = appUsagePageOptions(req.query, ["startedAt", "lastActiveAt"], "lastActiveAt");
   const sessionFilter = {
-    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString(), userId }, "startedAt"),
+    ...appUsageFilter({ ...req.query, from: from.toISOString(), to: to.toISOString(), userId }, "lastActiveAt"),
     userId,
   };
   const eventFilter = {
@@ -3871,7 +3872,7 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
       { $sort: { _id: 1 } },
     ]),
     User.findById(mongoose.isValidObjectId(userId) ? userId : null).select("name email createdAt loginProvider provider").lean().catch(() => null),
-    AppUsageSession.find(sessionFilter).sort({ startedAt: 1 }).skip(skip).limit(limit).lean(),
+    AppUsageSession.find(sessionFilter).sort({ lastActiveAt: -1, startedAt: -1 }).skip(skip).limit(limit).lean(),
     AppUsageSession.countDocuments(sessionFilter),
   ]);
 
