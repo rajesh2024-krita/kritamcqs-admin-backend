@@ -9952,7 +9952,9 @@ router.get("/auth-settings", asyncHandler(async (_req, res) => {
   data.googleClientId = data.googleClientId || process.env.GOOGLE_WEB_CLIENT_ID || "";
   data.googleAndroidClientId = data.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "";
   data.googleIosClientId = data.googleIosClientId || process.env.GOOGLE_IOS_CLIENT_ID || "";
-  data.googleAndroidPackageName = data.googleAndroidPackageName || "com.kritamcqs.androidapp";
+  data.googleAndroidPackageName = !data.googleAndroidPackageName || data.googleAndroidPackageName === "com.kritamcqs.androidapp"
+    ? "app.kritamcqs.androidapp"
+    : data.googleAndroidPackageName;
   data.googleAndroidSha1 = data.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4";
   data.appleEnabled = data.appleEnabled !== false;
   data.appleBundleId = data.appleBundleId || process.env.APPLE_BUNDLE_ID || "app.kritamcqs.iosapp";
@@ -9968,7 +9970,9 @@ router.post("/auth-settings", asyncHandler(async (req, res) => {
     googleClientId: String(body.googleClientId || process.env.GOOGLE_WEB_CLIENT_ID || "").trim(),
     googleAndroidClientId: String(body.googleAndroidClientId || process.env.GOOGLE_ANDROID_CLIENT_ID || "").trim(),
     googleIosClientId: String(body.googleIosClientId || process.env.GOOGLE_IOS_CLIENT_ID || "").trim(),
-    googleAndroidPackageName: String(body.googleAndroidPackageName || "com.kritamcqs.androidapp").trim(),
+    googleAndroidPackageName: String(body.googleAndroidPackageName || "app.kritamcqs.androidapp").trim() === "com.kritamcqs.androidapp"
+      ? "app.kritamcqs.androidapp"
+      : String(body.googleAndroidPackageName || "app.kritamcqs.androidapp").trim(),
     googleAndroidSha1: String(body.googleAndroidSha1 || "CE:34:23:0A:77:79:E5:01:09:10:2C:3C:A9:9C:B3:BF:7B:FD:AF:C4").trim().toUpperCase(),
     googleCallbackUrl: String(body.googleCallbackUrl || "").trim(),
     appleBundleId: String(body.appleBundleId || process.env.APPLE_BUNDLE_ID || "app.kritamcqs.iosapp").trim(),
