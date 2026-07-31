@@ -3437,7 +3437,10 @@ function appUsageFilter(query, dateField = "timestamp") {
   const screen = String(query.screen || "").trim();
   const userId = String(query.userId || "").trim();
   const appVersion = String(query.appVersion || "").trim();
+  const androidVersion = String(query.androidVersion || "").trim();
+  const deviceBrand = String(query.deviceBrand || "").trim();
   const deviceModel = String(query.deviceModel || "").trim();
+  const networkType = String(query.networkType || "").trim();
   const loginProvider = String(query.loginProvider || query.provider || "all").trim();
   const sessionStatus = String(query.sessionStatus || "all").trim();
   if (platform && platform !== "all") filter.platform = platform;
@@ -3446,7 +3449,10 @@ function appUsageFilter(query, dateField = "timestamp") {
   if (screen) filter.screen = new RegExp(screen.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
   if (userId) filter.userId = userId;
   if (appVersion) filter.appVersion = appVersion;
+  if (androidVersion) filter.androidVersion = new RegExp(androidVersion.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  if (deviceBrand) filter.deviceBrand = new RegExp(deviceBrand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
   if (deviceModel) filter.deviceModel = new RegExp(deviceModel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+  if (networkType) filter.networkType = new RegExp(networkType.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
   if (loginProvider && loginProvider !== "all") filter.loginMethod = new RegExp(`^${loginProvider.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
   if (dateField !== "timestamp" && sessionStatus && sessionStatus !== "all") {
     const statusMap = { active: "Active", completed: "Completed", force_closed: "Force Closed", crashed: "Crashed" };
@@ -3495,17 +3501,30 @@ function formatAppUsageSession(row) {
     userId: row.userId,
     userName: row.userName,
     email: row.email,
+    mobile: row.mobile,
     userType: row.userType,
     loginMethod: row.loginMethod,
+    deviceId: row.deviceId,
     platform: row.platform,
     appVersion: row.appVersion,
+    deviceBrand: row.deviceBrand,
     deviceModel: row.deviceModel,
     osVersion: row.osVersion,
+    androidVersion: row.androidVersion,
+    screenResolution: row.screenResolution,
+    networkType: row.networkType,
+    ramGb: row.ramGb,
+    batteryLevel: row.batteryLevel,
+    batteryCharging: row.batteryCharging,
+    rootedDevice: row.rootedDevice,
+    isVirtualDevice: row.isVirtualDevice,
     ipAddress: row.ipAddress,
     status: deriveAppUsageSessionStatus(row),
     startedAt: row.startedAt,
     endedAt: row.endedAt,
     durationSeconds: Number(row.durationSeconds || 0),
+    foregroundSeconds: Number(row.foregroundSeconds || 0),
+    backgroundSeconds: Number(row.backgroundSeconds || 0),
     entryScreen: row.entryScreen,
     exitScreen: row.exitScreen,
     screenViews: Number(row.screenViews || 0),
@@ -3584,6 +3603,9 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
   const sessionFilter = appUsageFilter(req.query, "startedAt");
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
+  const monthStart = new Date(todayStart);
+  monthStart.setDate(1);
+  const onlineSince = new Date(Date.now() - 5 * 60 * 1000);
   const userFilter = { isAdmin: { $ne: true } };
   const plan = String(req.query.plan || "all").trim();
   if (plan === "Free") userFilter.isPremium = { $ne: true };
@@ -3655,7 +3677,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
   ]);
   const sessionTotals = await AppUsageSession.aggregate([
     { $match: sessionFilter },
-    { $group: { _id: null, sessions: { $sum: 1 }, averageSessionDuration: { $avg: "$durationSeconds" }, todayUsers: { $addToSet: { $cond: [{ $gte: ["$lastActiveAt", todayStart] }, appUsageIdentityExpression(), null] } } } },
+    { $group: { _id: null, sessions: { $sum: 1 }, averageSessionDuration: { $avg: "$durationSeconds" }, todayUsers: { $addToSet: { $cond: [{ $gte: ["$lastActiveAt", todayStart] }, appUsageIdentityExpression(), null] } }, monthlyUsers: { $addToSet: { $cond: [{ $gte: ["$lastActiveAt", monthStart] }, appUsageIdentityExpression(), null] } }, onlineUsers: { $addToSet: { $cond: [{ $gte: ["$lastActiveAt", onlineSince] }, appUsageIdentityExpression(), null] } } } },
   ]);
   const totalRow = totals[0] || {};
   const sessionRow = sessionTotals[0] || {};
@@ -3667,6 +3689,8 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
       settings,
       summary: {
         todaysActiveUsers: countSet(sessionRow.todayUsers),
+        monthlyActiveUsers: countSet(sessionRow.monthlyUsers),
+        onlineUsers: countSet(sessionRow.onlineUsers),
         totalSessions: Number(sessionRow.sessions || 0),
         averageSessionDuration: Math.round(Number(sessionRow.averageSessionDuration || 0)),
         totalScreenViews: Number(totalRow.screenViews || 0),
@@ -3678,6 +3702,7 @@ router.get("/app-usage/analytics", asyncHandler(async (req, res) => {
         activeUsers: countSet(totalRow.activeUsers),
         totalUsers,
         newUsers,
+        returningUsers: Math.max(0, totalUsers - newUsers),
       },
       pages: pages.map((item) => ({
         path: item._id,
@@ -3724,7 +3749,11 @@ router.get("/app-usage/users", asyncHandler(async (req, res) => {
       email: { $last: "$email" },
       platform: { $last: "$platform" },
       appVersion: { $last: "$appVersion" },
+      deviceBrand: { $last: "$deviceBrand" },
       deviceModel: { $last: "$deviceModel" },
+      osVersion: { $last: "$osVersion" },
+      androidVersion: { $last: "$androidVersion" },
+      networkType: { $last: "$networkType" },
       userType: { $last: "$userType" },
       loginMethod: { $last: "$loginMethod" },
       totalSessions: { $sum: 1 },
@@ -3746,7 +3775,11 @@ router.get("/app-usage/users", asyncHandler(async (req, res) => {
         mobile: { $ifNull: ["$userRecord.mobile", ""] },
         platform: { $ifNull: ["$platform", "-"] },
         appVersion: 1,
+        deviceBrand: 1,
         deviceModel: 1,
+        osVersion: 1,
+        androidVersion: 1,
+        networkType: 1,
         userType: 1,
         loginMethod: { $ifNull: ["$loginMethod", { $ifNull: ["$userRecord.loginProvider", { $ifNull: ["$userRecord.provider", ""] }] }] },
         createdAt: "$userRecord.createdAt",
@@ -3821,13 +3854,13 @@ router.get("/app-usage/devices", asyncHandler(async (req, res) => {
   const filter = appUsageFilter(req.query, "startedAt");
   const pipeline = [
     { $match: filter },
-    { $group: { _id: { deviceModel: "$deviceModel", platform: "$platform", appVersion: "$appVersion", osVersion: "$osVersion" }, users: { $addToSet: "$userId" }, sessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
-    { $project: { deviceModel: "$_id.deviceModel", platform: "$_id.platform", appVersion: "$_id.appVersion", osVersion: "$_id.osVersion", users: { $size: { $filter: { input: "$users", as: "user", cond: { $ne: ["$$user", null] } } } }, sessions: 1, lastActive: 1, averageSessionDuration: 1 } },
+    { $group: { _id: { deviceBrand: "$deviceBrand", deviceModel: "$deviceModel", platform: "$platform", appVersion: "$appVersion", osVersion: "$osVersion", androidVersion: "$androidVersion", networkType: "$networkType", screenResolution: "$screenResolution" }, users: { $addToSet: "$userId" }, sessions: { $sum: 1 }, lastActive: { $max: "$lastActiveAt" }, averageSessionDuration: { $avg: "$durationSeconds" } } },
+    { $project: { deviceBrand: "$_id.deviceBrand", deviceModel: "$_id.deviceModel", platform: "$_id.platform", appVersion: "$_id.appVersion", osVersion: "$_id.osVersion", androidVersion: "$_id.androidVersion", networkType: "$_id.networkType", screenResolution: "$_id.screenResolution", users: { $size: { $filter: { input: "$users", as: "user", cond: { $ne: ["$$user", null] } } } }, sessions: 1, lastActive: 1, averageSessionDuration: 1 } },
   ];
   const search = String(req.query.search || "").trim();
   if (search) {
     const safe = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    pipeline.push({ $match: { $or: [{ deviceModel: { $regex: safe, $options: "i" } }, { platform: { $regex: safe, $options: "i" } }, { appVersion: { $regex: safe, $options: "i" } }, { osVersion: { $regex: safe, $options: "i" } }] } });
+    pipeline.push({ $match: { $or: [{ deviceBrand: { $regex: safe, $options: "i" } }, { deviceModel: { $regex: safe, $options: "i" } }, { platform: { $regex: safe, $options: "i" } }, { appVersion: { $regex: safe, $options: "i" } }, { osVersion: { $regex: safe, $options: "i" } }, { androidVersion: { $regex: safe, $options: "i" } }, { networkType: { $regex: safe, $options: "i" } }] } });
   }
   const [items, totalRows] = await Promise.all([
     AppUsageSession.aggregate([...pipeline, { $sort: sort }, { $skip: skip }, { $limit: limit }]),
@@ -4035,13 +4068,24 @@ router.get("/app-usage/export", asyncHandler(async (req, res) => {
     userId: row.userId,
     userName: row.userName,
     email: row.email,
+    mobile: row.mobile,
     userType: row.userType,
     loginMethod: row.loginMethod,
+    deviceId: row.deviceId,
     platform: row.platform,
     screen: row.screen,
     eventType: row.eventType,
     componentName: row.componentName,
     componentType: row.componentType,
+    action: row.action,
+    deviceBrand: row.deviceBrand,
+    deviceModel: row.deviceModel,
+    osVersion: row.osVersion,
+    androidVersion: row.androidVersion,
+    appVersion: row.appVersion,
+    networkType: row.networkType,
+    screenResolution: row.screenResolution,
+    ipAddress: row.ipAddress,
     timestamp: row.timestamp,
     durationSeconds: row.durationSeconds,
   });

@@ -150,6 +150,7 @@ const appUsageEventSchema = z.object({
   userId: z.string().trim().max(120).optional().default(""),
   userName: z.string().trim().max(160).optional().default(""),
   email: z.string().trim().max(180).optional().default(""),
+  mobile: z.string().trim().max(40).optional().default(""),
   userType: z.enum(["Free", "Premium"]).optional().default("Free"),
   loginMethod: z.string().trim().max(80).optional().default(""),
   eventType: z.string().trim().min(2).max(80),
@@ -171,14 +172,32 @@ const appUsageEventSchema = z.object({
   deviceId: z.string().trim().max(160).optional().default(""),
   platform: z.string().trim().max(40).optional().default("unknown"),
   appVersion: z.string().trim().max(80).optional().default(""),
+  deviceBrand: z.string().trim().max(120).optional().default(""),
   deviceModel: z.string().trim().max(160).optional().default(""),
   osVersion: z.string().trim().max(80).optional().default(""),
+  androidVersion: z.string().trim().max(80).optional().default(""),
+  screenResolution: z.string().trim().max(80).optional().default(""),
+  networkType: z.string().trim().max(80).optional().default(""),
+  ramGb: z.coerce.number().min(0).max(1024).nullable().optional(),
+  batteryLevel: z.coerce.number().min(0).max(100).nullable().optional(),
+  batteryCharging: z.boolean().optional(),
+  rootedDevice: z.boolean().optional(),
+  isVirtualDevice: z.boolean().optional(),
   device: z.object({
     deviceId: z.string().trim().max(160).optional().default(""),
     platform: z.string().trim().max(40).optional().default("unknown"),
     appVersion: z.string().trim().max(80).optional().default(""),
+    deviceBrand: z.string().trim().max(120).optional().default(""),
     deviceModel: z.string().trim().max(160).optional().default(""),
     osVersion: z.string().trim().max(80).optional().default(""),
+    androidVersion: z.string().trim().max(80).optional().default(""),
+    screenResolution: z.string().trim().max(80).optional().default(""),
+    networkType: z.string().trim().max(80).optional().default(""),
+    ramGb: z.coerce.number().min(0).max(1024).nullable().optional(),
+    batteryLevel: z.coerce.number().min(0).max(100).nullable().optional(),
+    batteryCharging: z.boolean().optional(),
+    rootedDevice: z.boolean().optional(),
+    isVirtualDevice: z.boolean().optional(),
   }).optional(),
 });
 
@@ -208,6 +227,7 @@ function requestIpAddress(req) {
 function sessionStatusFromEvents(events) {
   const text = events.map((event) => `${event.eventType || ""} ${event.action || ""}`).join(" ");
   if (/crash/i.test(text)) return "Crashed";
+  if (/forceclose|unexpected|closed unexpectedly/i.test(text)) return "Force Closed";
   if (/sessionend|app close|logout|background/i.test(text)) return "Completed";
   return "Active";
 }
@@ -222,8 +242,17 @@ async function persistAppUsageEvents(rawEvents, req) {
       deviceId: parsed.deviceId || device.deviceId || "",
       platform: String(parsed.platform || device.platform || "unknown").toLowerCase(),
       appVersion: parsed.appVersion || device.appVersion || "",
+      deviceBrand: parsed.deviceBrand || device.deviceBrand || "",
       deviceModel: parsed.deviceModel || device.deviceModel || "",
       osVersion: parsed.osVersion || device.osVersion || "",
+      androidVersion: parsed.androidVersion || device.androidVersion || "",
+      screenResolution: parsed.screenResolution || device.screenResolution || "",
+      networkType: parsed.networkType || device.networkType || "",
+      ramGb: parsed.ramGb ?? device.ramGb,
+      batteryLevel: parsed.batteryLevel ?? device.batteryLevel,
+      batteryCharging: parsed.batteryCharging ?? device.batteryCharging,
+      rootedDevice: Boolean(parsed.rootedDevice ?? device.rootedDevice),
+      isVirtualDevice: Boolean(parsed.isVirtualDevice ?? device.isVirtualDevice),
     };
   });
   const now = new Date();
@@ -231,6 +260,7 @@ async function persistAppUsageEvents(rawEvents, req) {
     userId: event.userId,
     userName: event.userName,
     email: String(event.email || "").trim().toLowerCase(),
+    mobile: event.mobile,
     userType: event.userType,
     loginMethod: event.loginMethod,
     eventId: event.eventId,
@@ -251,8 +281,17 @@ async function persistAppUsageEvents(rawEvents, req) {
     deviceId: event.deviceId,
     platform: event.platform,
     appVersion: event.appVersion,
+    deviceBrand: event.deviceBrand,
     deviceModel: event.deviceModel,
     osVersion: event.osVersion,
+    androidVersion: event.androidVersion,
+    screenResolution: event.screenResolution,
+    networkType: event.networkType,
+    ramGb: event.ramGb ?? undefined,
+    batteryLevel: event.batteryLevel ?? undefined,
+    batteryCharging: event.batteryCharging,
+    rootedDevice: event.rootedDevice,
+    isVirtualDevice: event.isVirtualDevice,
     ipAddress,
   }));
 
@@ -282,6 +321,8 @@ async function persistAppUsageEvents(rawEvents, req) {
     const screenEvents = ordered.filter((event) => event.eventType === "ScreenView");
     const clickEvents = ordered.filter((event) => event.eventType.toLowerCase().includes("click"));
     const durationSeconds = ordered.reduce((sum, event) => sum + Number(event.durationSeconds || 0), 0);
+    const foregroundSeconds = ordered.reduce((sum, event) => sum + Number(event.metadata?.foregroundSeconds || event.durationSeconds || 0), 0);
+    const backgroundSeconds = ordered.reduce((sum, event) => sum + Number(event.metadata?.backgroundSeconds || 0), 0);
     const status = sessionStatusFromEvents(ordered);
     await AppUsageSession.findOneAndUpdate(
       { sessionId },
@@ -291,13 +332,23 @@ async function persistAppUsageEvents(rawEvents, req) {
           userId: latestUserEvent.userId || first.userId,
           userName: latestUserEvent.userName || first.userName,
           email: String(latestUserEvent.email || first.email || "").trim().toLowerCase(),
+          mobile: latestUserEvent.mobile || first.mobile,
           userType: latestUserEvent.userType || first.userType,
           loginMethod: latestUserEvent.loginMethod || first.loginMethod,
           deviceId: first.deviceId,
           platform: first.platform,
           appVersion: first.appVersion,
+          deviceBrand: first.deviceBrand,
           deviceModel: first.deviceModel,
           osVersion: first.osVersion,
+          androidVersion: first.androidVersion,
+          screenResolution: first.screenResolution,
+          networkType: first.networkType,
+          ramGb: first.ramGb,
+          batteryLevel: first.batteryLevel,
+          batteryCharging: first.batteryCharging,
+          rootedDevice: first.rootedDevice,
+          isVirtualDevice: first.isVirtualDevice,
           ipAddress: first.ipAddress,
           startedAt: first.timestamp,
           entryScreen: first.screen,
@@ -307,7 +358,8 @@ async function persistAppUsageEvents(rawEvents, req) {
           ipAddress: first.ipAddress,
           status,
           durationSeconds,
-          foregroundSeconds: durationSeconds,
+          foregroundSeconds: Math.max(durationSeconds, foregroundSeconds),
+          backgroundSeconds,
           screenViews: screenEvents.length,
           clicks: clickEvents.length,
         },
