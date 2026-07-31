@@ -3768,8 +3768,8 @@ router.get("/app-usage/users", asyncHandler(async (req, res) => {
     { $sort: sort },
   ];
   const [items, totalRows] = await Promise.all([
-    User.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
-    User.aggregate([...pipeline, { $count: "total" }]),
+    AppUsageSession.aggregate([...pipeline, { $skip: skip }, { $limit: limit }]),
+    AppUsageSession.aggregate([...pipeline, { $count: "total" }]),
   ]);
   const total = Number(totalRows[0]?.total || 0);
   res.json({ success: true, data: items, meta: appUsageMeta(total, page, limit) });
