@@ -3881,7 +3881,8 @@ router.get("/app-usage/users/:userId/activity", asyncHandler(async (req, res) =>
       },
     ]),
     AppUsageEvent.aggregate([
-      { $match: { ...eventFilter, eventType: { $in: ["AppOpen", "SessionStart", "Foreground"] } } },
+      { $match: { ...eventFilter, eventType: { $in: ["SessionStart", "AppOpen"] } } },
+      { $group: { _id: "$sessionId" } },
       { $group: { _id: null, totalAppOpens: { $sum: 1 } } },
     ]),
     AppUsageEvent.aggregate([
