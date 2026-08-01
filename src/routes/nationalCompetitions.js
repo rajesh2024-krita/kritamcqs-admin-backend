@@ -162,6 +162,30 @@ async function audit(req, action, competitionId, metadata = {}) {
   });
 }
 
+function publicPreview(competition) {
+  const raw = typeof competition?.toJSON === "function" ? competition.toJSON() : competition;
+  return {
+    id: raw.id || raw._id,
+    title: raw.title,
+    description: raw.description,
+    examType: raw.examType,
+    status: raw.status,
+    registrationOpensAt: raw.registrationOpensAt,
+    registrationClosesAt: raw.registrationClosesAt,
+    startsAt: raw.startsAt,
+    endsAt: raw.endsAt,
+    durationMinutes: raw.durationMinutes,
+    totalQuestions: raw.totalQuestions,
+    marksPerQuestion: raw.marksPerQuestion,
+    negativeMarks: raw.negativeMarks,
+    rules: raw.rules || [],
+    terms: raw.terms || "",
+    eligibility: raw.eligibility || {},
+    leaderboard: raw.leaderboard || {},
+    banner: raw.banner || {},
+  };
+}
+
 nationalCompetitionsAdminRouter.get(
   "/national-competitions/question-pool/meta",
   requireModulePermission("national-competitions", "view"),
@@ -218,6 +242,19 @@ nationalCompetitionsAdminRouter.get(
 );
 
 nationalCompetitionsAdminRouter.get(
+  "/national-competitions-calendar",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const from = req.query.from ? new Date(req.query.from) : new Date(Date.now() - 30 * 86400000);
+    const to = req.query.to ? new Date(req.query.to) : new Date(Date.now() + 90 * 86400000);
+    const items = await NationalCompetition.find({ startsAt: { $gte: from, $lte: to } })
+      .select("title status examType registrationOpensAt registrationClosesAt startsAt endsAt isPublished isEnabled")
+      .sort({ startsAt: 1 });
+    res.json({ success: true, data: items });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
   "/national-competitions",
   requireModulePermission("national-competitions", "view"),
   asyncHandler(async (req, res) => {
@@ -265,6 +302,38 @@ nationalCompetitionsAdminRouter.get(
   }),
 );
 
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/preview",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const competition = await NationalCompetition.findById(req.params.id);
+    if (!competition) throw new AppError("Competition not found", 404);
+    res.json({ success: true, data: publicPreview(competition) });
+  }),
+);
+
+nationalCompetitionsAdminRouter.post(
+  "/national-competitions/:id/duplicate",
+  requireModulePermission("national-competitions", "create"),
+  asyncHandler(async (req, res) => {
+    const source = await NationalCompetition.findById(req.params.id).lean();
+    if (!source) throw new AppError("Competition not found", 404);
+    delete source._id;
+    delete source.createdAt;
+    delete source.updatedAt;
+    source.title = `${source.title} Copy`;
+    source.slug = `${slugifyCompetition(source.slug || source.title)}-${Date.now().toString(36)}`;
+    source.status = "draft";
+    source.isPublished = false;
+    source.isEnabled = false;
+    source.createdBy = String(req.admin?._id || "");
+    source.updatedBy = String(req.admin?._id || "");
+    const item = await NationalCompetition.create(source);
+    await audit(req, "competition_duplicate", String(item._id), { sourceId: req.params.id });
+    res.status(201).json({ success: true, data: item });
+  }),
+);
+
 nationalCompetitionsAdminRouter.put(
   "/national-competitions/:id",
   requireModulePermission("national-competitions", "edit"),
@@ -289,6 +358,10 @@ nationalCompetitionsAdminRouter.patch(
     } else if (action === "enable") {
       statusPatch.isEnabled = true;
       statusPatch.isActive = true;
+    } else if (action === "archive") {
+      statusPatch.status = "archived";
+      statusPatch.isEnabled = false;
+      statusPatch.archivedAt = new Date();
     } else if (action === "disable") {
       statusPatch.isEnabled = false;
       statusPatch.isActive = false;
@@ -336,6 +409,19 @@ nationalCompetitionsAdminRouter.get(
     const users = await User.find({ _id: { $in: registrations.map((item) => item.userId) } }).select("_id name email mobile isPremium").lean();
     const userMap = new Map(users.map((user) => [String(user._id), user]));
     res.json({ success: true, data: registrations.map((item) => ({ registration: item, user: userMap.get(String(item.userId)) || null })) });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/device-logs",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const [registrations, attempts, suspicious] = await Promise.all([
+      NationalCompetitionRegistration.find({ competitionId: req.params.id }).select("userId deviceId state district updatedAt").lean(),
+      NationalCompetitionAttempt.find({ competitionId: req.params.id }).select("userId deviceId ipAddress suspiciousFlags startedAt submittedAt updatedAt").lean(),
+      NationalCompetitionAuditLog.find({ competitionId: req.params.id, action: /device|suspicious/i }).sort({ createdAt: -1 }).limit(200).lean(),
+    ]);
+    res.json({ success: true, data: { registrations, attempts, suspicious } });
   }),
 );
 
@@ -522,6 +608,20 @@ nationalCompetitionsAdminRouter.get(
   requireModulePermission("national-competitions", "view"),
   asyncHandler(async (req, res) => {
     const rows = await NationalLeaderboardEntry.find({ competitionId: req.params.id, scope: "national" }).sort({ rank: 1 }).lean();
+    if (req.params.format === "csv") {
+      const csv = [
+        "Rank,Name,State,District,Score,Accuracy",
+        ...rows.map((row) => [row.rank, row.userName, row.state, row.district, row.score, row.accuracy].map((value) => `"${String(value ?? "").replace(/"/g, '""')}"`).join(",")),
+      ].join("\n");
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader("Content-Disposition", "attachment; filename=national-leaderboard.csv");
+      return res.end(csv);
+    }
+    if (req.params.format === "print") {
+      const html = `<html><head><title>National Leaderboard</title></head><body><h1>National Leaderboard</h1><table border="1" cellpadding="6"><tr><th>Rank</th><th>Name</th><th>State</th><th>District</th><th>Score</th><th>Accuracy</th></tr>${rows.map((row) => `<tr><td>${row.rank}</td><td>${row.userName}</td><td>${row.state}</td><td>${row.district}</td><td>${row.score}</td><td>${row.accuracy}</td></tr>`).join("")}</table></body></html>`;
+      res.setHeader("Content-Type", "text/html");
+      return res.end(html);
+    }
     if (req.params.format === "pdf") {
       const text = rows.map((row) => `${row.rank}. ${row.userName} - ${row.score}`).join("\n");
       res.setHeader("Content-Type", "application/pdf");
@@ -596,6 +696,31 @@ nationalCompetitionsAdminRouter.patch(
     if (!reward) throw new AppError("Reward not found", 404);
     await audit(req, "reward_approval", reward.competitionId, { rewardId: req.params.rewardId, approvalStatus });
     res.json({ success: true, data: reward });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/leaderboard/snapshots",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const entries = await NationalLeaderboardEntry.find({ competitionId: req.params.id }).sort({ updatedAt: -1, rank: 1 }).limit(1000).lean();
+    const grouped = entries.reduce((acc, entry) => {
+      const key = `${entry.scope || "national"}:${entry.periodKey || "current"}`;
+      if (!acc[key]) acc[key] = { scope: entry.scope, periodKey: entry.periodKey || "", refreshedAt: entry.updatedAt, entries: 0, topScore: entry.score };
+      acc[key].entries += 1;
+      acc[key].topScore = Math.max(Number(acc[key].topScore || 0), Number(entry.score || 0));
+      return acc;
+    }, {});
+    res.json({ success: true, data: Object.values(grouped) });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/ranking-history",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const items = await NationalCompetitionAuditLog.find({ competitionId: req.params.id, action: /leaderboard|ranking/i }).sort({ createdAt: -1 }).limit(300);
+    res.json({ success: true, data: items });
   }),
 );
 
