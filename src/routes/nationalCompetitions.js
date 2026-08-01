@@ -438,6 +438,86 @@ nationalCompetitionsAdminRouter.get(
 );
 
 nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/analytics",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const [competition, registrations, attempts, leaderboard, rewards] = await Promise.all([
+      NationalCompetition.findById(req.params.id),
+      NationalCompetitionRegistration.find({ competitionId: req.params.id }).lean(),
+      NationalCompetitionAttempt.find({ competitionId: req.params.id }).lean(),
+      NationalLeaderboardEntry.find({ competitionId: req.params.id, scope: "national" }).sort({ rank: 1 }).lean(),
+      NationalCompetitionReward.find({ competitionId: req.params.id }).lean(),
+    ]);
+    if (!competition) throw new AppError("Competition not found", 404);
+    const submitted = attempts.filter((item) => ["submitted", "auto_submitted"].includes(item.status));
+    const disqualified = attempts.filter((item) => item.status === "disqualified");
+    const byState = registrations.reduce((acc, item) => {
+      const key = item.state || "Unassigned";
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+    const scoreBuckets = submitted.reduce((acc, item) => {
+      const bucket = `${Math.floor(Number(item.score || 0) / 50) * 50}+`;
+      acc[bucket] = (acc[bucket] || 0) + 1;
+      return acc;
+    }, {});
+    res.json({
+      success: true,
+      data: {
+        competition,
+        totals: {
+          registrations: registrations.length,
+          attended: attempts.filter((item) => item.startedAt).length,
+          submitted: submitted.length,
+          disqualified: disqualified.length,
+          pendingRewards: rewards.filter((item) => ["draft", "pending"].includes(item.approvalStatus)).length,
+        },
+        byState,
+        scoreBuckets,
+        topPerformers: leaderboard.slice(0, 10),
+      },
+    });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/attendance",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const registrations = await NationalCompetitionRegistration.find({ competitionId: req.params.id }).sort({ state: 1, district: 1 }).lean();
+    const attempts = await NationalCompetitionAttempt.find({ competitionId: req.params.id }).lean();
+    const attemptMap = new Map(attempts.map((item) => [String(item.userId), item]));
+    res.json({
+      success: true,
+      data: registrations.map((registration) => {
+        const attempt = attemptMap.get(String(registration.userId));
+        return {
+          registrationId: registration.id,
+          userId: registration.userId,
+          state: registration.state,
+          district: registration.district,
+          school: registration.school,
+          registrationStatus: registration.status,
+          attendance: attempt?.startedAt ? "present" : "absent",
+          attemptStatus: attempt?.status || "not_started",
+          startedAt: attempt?.startedAt || null,
+          submittedAt: attempt?.submittedAt || attempt?.autoSubmittedAt || null,
+        };
+      }),
+    });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
+  "/national-competitions/:id/disqualified",
+  requireModulePermission("national-competitions", "view"),
+  asyncHandler(async (req, res) => {
+    const attempts = await NationalCompetitionAttempt.find({ competitionId: req.params.id, status: "disqualified" }).sort({ updatedAt: -1 }).lean();
+    res.json({ success: true, data: attempts });
+  }),
+);
+
+nationalCompetitionsAdminRouter.get(
   "/national-competitions/:id/export/:format",
   requireModulePermission("national-competitions", "view"),
   asyncHandler(async (req, res) => {
@@ -499,6 +579,56 @@ nationalCompetitionsAdminRouter.put(
     if (!reward) throw new AppError("Reward not found", 404);
     await audit(req, "reward_update", reward.competitionId, { rewardId: req.params.rewardId });
     res.json({ success: true, data: reward });
+  }),
+);
+
+nationalCompetitionsAdminRouter.patch(
+  "/national-competitions/rewards/:rewardId/approval",
+  requireModulePermission("national-competitions", "edit"),
+  asyncHandler(async (req, res) => {
+    const approvalStatus = ["draft", "pending", "approved", "distributed", "rejected"].includes(req.body.approvalStatus) ? req.body.approvalStatus : "approved";
+    const patch = {
+      approvalStatus,
+      approvedBy: ["approved", "distributed"].includes(approvalStatus) ? String(req.admin?._id || "") : "",
+      distributedAt: approvalStatus === "distributed" ? new Date() : undefined,
+    };
+    const reward = await NationalCompetitionReward.findByIdAndUpdate(req.params.rewardId, patch, { new: true });
+    if (!reward) throw new AppError("Reward not found", 404);
+    await audit(req, "reward_approval", reward.competitionId, { rewardId: req.params.rewardId, approvalStatus });
+    res.json({ success: true, data: reward });
+  }),
+);
+
+nationalCompetitionsAdminRouter.post(
+  "/national-competitions/:competitionId/vouchers",
+  requireModulePermission("national-competitions", "edit"),
+  asyncHandler(async (req, res) => {
+    const reward = await NationalCompetitionReward.create({
+      competitionId: req.params.competitionId,
+      title: String(req.body.title || "Competition Voucher"),
+      description: String(req.body.description || ""),
+      rewardType: "voucher",
+      rankFrom: Math.max(1, Number(req.body.rankFrom || 1)),
+      rankTo: Math.max(1, Number(req.body.rankTo || req.body.rankFrom || 1)),
+      value: Number(req.body.value || 0),
+      voucherCode: String(req.body.voucherCode || `KNC-${Date.now().toString(36).toUpperCase()}`),
+      approvalStatus: "pending",
+    });
+    await audit(req, "voucher_create", req.params.competitionId, { rewardId: String(reward._id), voucherCode: reward.voucherCode });
+    res.status(201).json({ success: true, data: reward });
+  }),
+);
+
+nationalCompetitionsAdminRouter.post(
+  "/national-competitions/:competitionId/prize-distribution",
+  requireModulePermission("national-competitions", "edit"),
+  asyncHandler(async (req, res) => {
+    const rewards = await NationalCompetitionReward.updateMany(
+      { competitionId: req.params.competitionId, approvalStatus: "approved" },
+      { approvalStatus: "distributed", distributedAt: new Date() },
+    );
+    await audit(req, "prize_distribution", req.params.competitionId, { modifiedCount: rewards.modifiedCount });
+    res.json({ success: true, data: { distributed: rewards.modifiedCount } });
   }),
 );
 
