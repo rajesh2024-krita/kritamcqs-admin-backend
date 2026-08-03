@@ -1999,17 +1999,28 @@ function isInstagramVideoUrl(value = "") {
   return /^https?:\/\/(www\.)?instagram\.com\/(reel|p|tv)\/[A-Za-z0-9_-]+\/?/i.test(String(value || "").trim());
 }
 
+function isPublicMediaUrl(value = "") {
+  const url = String(value || "").trim();
+  if (!url) return false;
+  if (url.startsWith("/uploads/")) return true;
+  return /^https?:\/\//i.test(url);
+}
+
 function sanitizeInstagramVideosConfig(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   const items = Array.isArray(source.items)
     ? source.items
         .map((item, index) => {
           const url = String(item?.url || "").trim();
+          const videoUrl = String(item?.videoUrl || "").trim();
+          const thumbnailUrl = String(item?.thumbnailUrl || "").trim();
           return {
             id: String(item?.id || `instagram-${index + 1}`).trim(),
             title: String(item?.title || `Instagram Video ${index + 1}`).trim().slice(0, 140),
             description: String(item?.description || "").trim().slice(0, 280),
             url,
+            videoUrl: isPublicMediaUrl(videoUrl) ? videoUrl : "",
+            thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
             enabled: item?.enabled !== false,
             order: Number(item?.order || index + 1),
           };
@@ -2775,6 +2786,21 @@ async function saveAppImageUpload(file, folder = "app-assets") {
   return `/uploads/${safeFolder}/${fileName}`;
 }
 
+async function saveAppVideoUpload(file, folder = "app-videos") {
+  if (!file) throw new AppError("Video file is required", 400);
+  const mimeType = String(file.mimetype || "").toLowerCase();
+  if (!mimeType.startsWith("video/")) throw new AppError("Only video uploads are allowed", 400);
+  const safeFolder = sanitizeUploadFolder(folder);
+  const root = path.join(uploadsRoot, safeFolder);
+  ensureDir(root);
+  const baseName = sanitizeFileName(file.originalname || "video.mp4");
+  const ext = path.extname(baseName) || ".mp4";
+  const name = path.basename(baseName, ext);
+  const fileName = `${name}-${Date.now()}-${crypto.randomInt(1000, 9999)}${ext}`;
+  await fs.writeFile(path.join(root, fileName), file.buffer);
+  return `/uploads/${safeFolder}/${fileName}`;
+}
+
 function splitPremiumUsersBySpend(users, targetGroup) {
   const sorted = [...users].sort((a, b) => Number(b.lastPurchase?.finalAmount || 0) - Number(a.lastPurchase?.finalAmount || 0));
   if (!["highest_premium", "middle_premium", "lowest_premium"].includes(targetGroup)) return sorted;
@@ -3416,6 +3442,11 @@ router.delete("/free-question-configs/:id", asyncHandler(async (req, res) => {
 
 router.post("/uploads/app-image", upload.single("image"), asyncHandler(async (req, res) => {
   const url = await saveAppImageUpload(req.file, req.body?.folder || "app-assets");
+  res.status(201).json({ success: true, data: { url }, url });
+}));
+
+router.post("/uploads/app-video", upload.single("video"), asyncHandler(async (req, res) => {
+  const url = await saveAppVideoUpload(req.file, req.body?.folder || "app-videos");
   res.status(201).json({ success: true, data: { url }, url });
 }));
 

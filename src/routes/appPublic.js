@@ -537,18 +537,29 @@ function isInstagramVideoUrl(value = "") {
   return /^https?:\/\/(www\.)?instagram\.com\/(reel|p|tv)\/[A-Za-z0-9_-]+\/?/i.test(String(value || "").trim());
 }
 
+function isPublicMediaUrl(value = "") {
+  const url = String(value || "").trim();
+  if (!url) return false;
+  if (url.startsWith("/uploads/")) return true;
+  return /^https?:\/\//i.test(url);
+}
+
 function sanitizePublicInstagramVideos(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   const items = Array.isArray(source.items)
     ? source.items
         .map((item, index) => {
           const url = String(item?.url || "").trim();
-          if (!isInstagramVideoUrl(url) || item?.enabled === false) return null;
+          const videoUrl = String(item?.videoUrl || "").trim();
+          const thumbnailUrl = String(item?.thumbnailUrl || "").trim();
+          if ((!isInstagramVideoUrl(url) && !isPublicMediaUrl(videoUrl)) || item?.enabled === false || !isPublicMediaUrl(videoUrl)) return null;
           return {
             id: String(item?.id || `instagram-${index + 1}`).trim(),
             title: String(item?.title || `Instagram Video ${index + 1}`).trim(),
             description: String(item?.description || "").trim(),
             url,
+            videoUrl,
+            thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
             enabled: true,
             order: Number(item?.order || index + 1),
           };
