@@ -584,7 +584,9 @@ function sanitizePublicInstagramVideos(input) {
 }
 
 router.get("/website-content", asyncHandler(async (_req, res) => {
-  const document = await WebsiteContent.findOne({ key: "landing", status: "published" }).lean();
+  const document =
+    await WebsiteContent.findOne({ key: "landing", status: "published" }).sort({ updatedAt: -1 }).lean() ||
+    await WebsiteContent.findOne({ key: "landing" }).sort({ updatedAt: -1 }).lean();
   res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.json({ success: true, data: { ...(document?.content || {}), instagramVideos: sanitizePublicInstagramVideos(document?.content?.instagramVideos) } });
 }));
