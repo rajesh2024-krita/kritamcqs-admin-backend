@@ -2013,6 +2013,19 @@ function isPlayableVideoUrl(value = "") {
 
 function sanitizeInstagramVideosConfig(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const stats = Array.isArray(source.stats?.items)
+    ? {
+        items: source.stats.items
+          .map((item, index) => ({
+            enabled: item?.enabled !== false,
+            icon: String(item?.icon || ["users", "star", "play", "quote"][index] || "users").trim().slice(0, 40),
+            tone: String(item?.tone || ["blue", "yellow", "rose", "purple"][index] || "blue").trim().slice(0, 40),
+            value: String(item?.value || "").trim().slice(0, 40),
+            label: String(item?.label || "").trim().slice(0, 80),
+          }))
+          .filter((item) => item.value || item.label),
+      }
+    : undefined;
   const items = Array.isArray(source.items)
     ? source.items
         .map((item, index) => {
@@ -2023,6 +2036,12 @@ function sanitizeInstagramVideosConfig(input) {
             id: String(item?.id || `instagram-${index + 1}`).trim(),
             title: String(item?.title || `Instagram Video ${index + 1}`).trim().slice(0, 140),
             description: String(item?.description || "").trim().slice(0, 280),
+            studentName: String(item?.studentName || "").trim().slice(0, 120),
+            badge: String(item?.badge || "").trim().slice(0, 60),
+            duration: String(item?.duration || "").trim().slice(0, 20),
+            views: String(item?.views || "").trim().slice(0, 40),
+            likes: String(item?.likes || "").trim().slice(0, 40),
+            comments: String(item?.comments || "").trim().slice(0, 40),
             url,
             videoUrl: isPublicMediaUrl(videoUrl) ? videoUrl : isPlayableVideoUrl(url) ? url : "",
             thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
@@ -2044,6 +2063,7 @@ function sanitizeInstagramVideosConfig(input) {
     autoPlay: source.autoPlay === true,
     defaultVideoId,
     items,
+    ...(stats ? { stats } : {}),
   };
 }
 

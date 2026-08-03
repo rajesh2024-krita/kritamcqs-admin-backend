@@ -551,6 +551,19 @@ function isPlayableVideoUrl(value = "") {
 
 function sanitizePublicInstagramVideos(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const stats = Array.isArray(source.stats?.items)
+    ? {
+        items: source.stats.items
+          .map((item, index) => ({
+            enabled: item?.enabled !== false,
+            icon: String(item?.icon || ["users", "star", "play", "quote"][index] || "users").trim(),
+            tone: String(item?.tone || ["blue", "yellow", "rose", "purple"][index] || "blue").trim(),
+            value: String(item?.value || "").trim(),
+            label: String(item?.label || "").trim(),
+          }))
+          .filter((item) => item.value || item.label),
+      }
+    : undefined;
   const items = Array.isArray(source.items)
     ? source.items
         .map((item, index) => {
@@ -563,6 +576,12 @@ function sanitizePublicInstagramVideos(input) {
             id: String(item?.id || `instagram-${index + 1}`).trim(),
             title: String(item?.title || `Instagram Video ${index + 1}`).trim(),
             description: String(item?.description || "").trim(),
+            studentName: String(item?.studentName || "").trim(),
+            badge: String(item?.badge || "").trim(),
+            duration: String(item?.duration || "").trim(),
+            views: String(item?.views || "").trim(),
+            likes: String(item?.likes || "").trim(),
+            comments: String(item?.comments || "").trim(),
             url,
             videoUrl,
             thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
@@ -581,6 +600,7 @@ function sanitizePublicInstagramVideos(input) {
     autoPlay: source.autoPlay === true,
     defaultVideoId: items.some((item) => item.id === source.defaultVideoId) ? String(source.defaultVideoId) : items[0]?.id || "",
     items,
+    ...(stats ? { stats } : {}),
   };
 }
 
