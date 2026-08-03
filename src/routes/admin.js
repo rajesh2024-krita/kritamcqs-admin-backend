@@ -2006,6 +2006,11 @@ function isPublicMediaUrl(value = "") {
   return /^https?:\/\//i.test(url);
 }
 
+function isPlayableVideoUrl(value = "") {
+  const url = String(value || "").trim();
+  return isPublicMediaUrl(url) && /\.(mp4|m4v|mov|webm|ogg)(\?.*)?$/i.test(url);
+}
+
 function sanitizeInstagramVideosConfig(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   const items = Array.isArray(source.items)
@@ -2019,7 +2024,7 @@ function sanitizeInstagramVideosConfig(input) {
             title: String(item?.title || `Instagram Video ${index + 1}`).trim().slice(0, 140),
             description: String(item?.description || "").trim().slice(0, 280),
             url,
-            videoUrl: isPublicMediaUrl(videoUrl) ? videoUrl : "",
+            videoUrl: isPublicMediaUrl(videoUrl) ? videoUrl : isPlayableVideoUrl(url) ? url : "",
             thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
             enabled: item?.enabled !== false,
             order: Number(item?.order || index + 1),

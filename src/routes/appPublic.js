@@ -544,13 +544,18 @@ function isPublicMediaUrl(value = "") {
   return /^https?:\/\//i.test(url);
 }
 
+function isPlayableVideoUrl(value = "") {
+  const url = String(value || "").trim();
+  return isPublicMediaUrl(url) && /\.(mp4|m4v|mov|webm|ogg)(\?.*)?$/i.test(url);
+}
+
 function sanitizePublicInstagramVideos(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
   const items = Array.isArray(source.items)
     ? source.items
         .map((item, index) => {
           const url = String(item?.url || "").trim();
-          const videoUrl = String(item?.videoUrl || "").trim();
+          const videoUrl = String(item?.videoUrl || "").trim() || (isPlayableVideoUrl(url) ? url : "");
           const thumbnailUrl = String(item?.thumbnailUrl || "").trim();
           if ((!isInstagramVideoUrl(url) && !isPublicMediaUrl(videoUrl)) || item?.enabled === false || !isPublicMediaUrl(videoUrl)) return null;
           return {
