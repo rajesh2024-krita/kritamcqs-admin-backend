@@ -557,7 +557,7 @@ function sanitizePublicInstagramVideos(input) {
           const url = String(item?.url || "").trim();
           const videoUrl = String(item?.videoUrl || "").trim() || (isPlayableVideoUrl(url) ? url : "");
           const thumbnailUrl = String(item?.thumbnailUrl || "").trim();
-          if ((!isInstagramVideoUrl(url) && !isPublicMediaUrl(videoUrl)) || item?.enabled === false) return null;
+          if (item?.enabled === false || (!url && !videoUrl && !thumbnailUrl)) return null;
           return {
             id: String(item?.id || `instagram-${index + 1}`).trim(),
             title: String(item?.title || `Instagram Video ${index + 1}`).trim(),
