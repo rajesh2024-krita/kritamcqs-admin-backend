@@ -533,9 +533,44 @@ router.get("/dashboard-carousel", asyncHandler(async (_req, res) => {
   res.json({ success: true, data: banners.map((item) => ({ ...item, id: String(item._id), _id: undefined })) });
 }));
 
+function isInstagramVideoUrl(value = "") {
+  return /^https?:\/\/(www\.)?instagram\.com\/(reel|p|tv)\/[A-Za-z0-9_-]+\/?/i.test(String(value || "").trim());
+}
+
+function sanitizePublicInstagramVideos(input) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const items = Array.isArray(source.items)
+    ? source.items
+        .map((item, index) => {
+          const url = String(item?.url || "").trim();
+          if (!isInstagramVideoUrl(url) || item?.enabled === false) return null;
+          return {
+            id: String(item?.id || `instagram-${index + 1}`).trim(),
+            title: String(item?.title || `Instagram Video ${index + 1}`).trim(),
+            description: String(item?.description || "").trim(),
+            url,
+            enabled: true,
+            order: Number(item?.order || index + 1),
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+        .map((item, index) => ({ ...item, order: index + 1 }))
+    : [];
+  return {
+    enabled: source.enabled !== false,
+    title: String(source.title || "").trim(),
+    subtitle: String(source.subtitle || "").trim(),
+    autoPlay: source.autoPlay === true,
+    defaultVideoId: items.some((item) => item.id === source.defaultVideoId) ? String(source.defaultVideoId) : items[0]?.id || "",
+    items,
+  };
+}
+
 router.get("/website-content", asyncHandler(async (_req, res) => {
   const document = await WebsiteContent.findOne({ key: "landing", status: "published" }).lean();
-  res.json({ success: true, data: document?.content || {} });
+  res.set("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.json({ success: true, data: { ...(document?.content || {}), instagramVideos: sanitizePublicInstagramVideos(document?.content?.instagramVideos) } });
 }));
 
 router.get("/website-content/settings", asyncHandler(async (_req, res) => {

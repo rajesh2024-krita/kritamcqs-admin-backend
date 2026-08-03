@@ -1995,6 +1995,49 @@ router.get("/stats", asyncHandler(dashboardController.stats));
 router.get("/dashboard", asyncHandler(dashboardController.dashboard));
 router.get("/catalog", asyncHandler(dashboardController.catalog));
 
+function isInstagramVideoUrl(value = "") {
+  return /^https?:\/\/(www\.)?instagram\.com\/(reel|p|tv)\/[A-Za-z0-9_-]+\/?/i.test(String(value || "").trim());
+}
+
+function sanitizeInstagramVideosConfig(input) {
+  const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const items = Array.isArray(source.items)
+    ? source.items
+        .map((item, index) => {
+          const url = String(item?.url || "").trim();
+          return {
+            id: String(item?.id || `instagram-${index + 1}`).trim(),
+            title: String(item?.title || `Instagram Video ${index + 1}`).trim().slice(0, 140),
+            description: String(item?.description || "").trim().slice(0, 280),
+            url,
+            enabled: item?.enabled !== false,
+            order: Number(item?.order || index + 1),
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+        .map((item, index) => ({ ...item, order: index + 1 }))
+    : [];
+  const defaultVideoId = items.some((item) => item.id === source.defaultVideoId)
+    ? String(source.defaultVideoId)
+    : items.find((item) => item.enabled !== false)?.id || "";
+  return {
+    enabled: source.enabled !== false,
+    title: String(source.title || "See Krita MCQs in action").trim().slice(0, 160),
+    subtitle: String(source.subtitle || "").trim().slice(0, 320),
+    autoPlay: source.autoPlay === true,
+    defaultVideoId,
+    items,
+  };
+}
+
+function sanitizeWebsiteContent(content) {
+  return {
+    ...content,
+    instagramVideos: sanitizeInstagramVideosConfig(content?.instagramVideos),
+  };
+}
+
 router.get("/website-content/landing", asyncHandler(async (_req, res) => {
   const document = await WebsiteContent.findOneAndUpdate(
     { key: "landing" },
@@ -2006,9 +2049,10 @@ router.get("/website-content/landing", asyncHandler(async (_req, res) => {
 }));
 
 router.put("/website-content/landing", requireMainAdmin, asyncHandler(async (req, res) => {
-  const content = req.body?.content && typeof req.body.content === "object" && !Array.isArray(req.body.content)
+  const rawContent = req.body?.content && typeof req.body.content === "object" && !Array.isArray(req.body.content)
     ? req.body.content
     : {};
+  const content = sanitizeWebsiteContent(rawContent);
   const status = req.body?.status === "draft" ? "draft" : "published";
 
   const document = await WebsiteContent.findOneAndUpdate(
