@@ -2018,10 +2018,13 @@ function sanitizeInstagramVideosConfig(input) {
         items: source.stats.items
           .map((item, index) => ({
             enabled: item?.enabled !== false,
+            type: String(item?.type || (index >= 2 ? (index === 2 ? "android" : "ios") : "metric")).trim().slice(0, 40),
             icon: String(item?.icon || ["users", "star", "play", "quote"][index] || "users").trim().slice(0, 40),
             tone: String(item?.tone || ["blue", "yellow", "rose", "purple"][index] || "blue").trim().slice(0, 40),
             value: String(item?.value || "").trim().slice(0, 40),
             label: String(item?.label || "").trim().slice(0, 80),
+            href: String(item?.href || "").trim().slice(0, 240),
+            linkKey: String(item?.linkKey || "").trim().slice(0, 80),
           }))
           .filter((item) => item.value || item.label),
       }
@@ -2060,6 +2063,9 @@ function sanitizeInstagramVideosConfig(input) {
     enabled: source.enabled !== false,
     title: String(source.title || "See Krita MCQs in action").trim().slice(0, 160),
     subtitle: String(source.subtitle || "").trim().slice(0, 320),
+    profileUrl: isInstagramVideoUrl(source.profileUrl) || /^https?:\/\/(www\.)?instagram\.com\/[A-Za-z0-9_.]+\/?/i.test(String(source.profileUrl || "").trim())
+      ? String(source.profileUrl || "").trim()
+      : "https://www.instagram.com/krita_mcqs.official/",
     autoPlay: source.autoPlay === true,
     defaultVideoId,
     items,

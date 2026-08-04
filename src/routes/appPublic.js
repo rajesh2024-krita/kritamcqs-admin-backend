@@ -556,10 +556,13 @@ function sanitizePublicInstagramVideos(input) {
         items: source.stats.items
           .map((item, index) => ({
             enabled: item?.enabled !== false,
+            type: String(item?.type || (index >= 2 ? (index === 2 ? "android" : "ios") : "metric")).trim(),
             icon: String(item?.icon || ["users", "star", "play", "quote"][index] || "users").trim(),
             tone: String(item?.tone || ["blue", "yellow", "rose", "purple"][index] || "blue").trim(),
             value: String(item?.value || "").trim(),
             label: String(item?.label || "").trim(),
+            href: String(item?.href || "").trim(),
+            linkKey: String(item?.linkKey || "").trim(),
           }))
           .filter((item) => item.value || item.label),
       }
@@ -597,6 +600,9 @@ function sanitizePublicInstagramVideos(input) {
     enabled: source.enabled !== false,
     title: String(source.title || "").trim(),
     subtitle: String(source.subtitle || "").trim(),
+    profileUrl: /^https?:\/\/(www\.)?instagram\.com\/[A-Za-z0-9_.]+\/?/i.test(String(source.profileUrl || "").trim())
+      ? String(source.profileUrl || "").trim()
+      : "https://www.instagram.com/krita_mcqs.official/",
     autoPlay: source.autoPlay === true,
     defaultVideoId: items.some((item) => item.id === source.defaultVideoId) ? String(source.defaultVideoId) : items[0]?.id || "",
     items,
