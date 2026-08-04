@@ -82,6 +82,7 @@ import { createCrudService } from "../services/crudService.js";
 import { AppError } from "../utils/AppError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { sendResponse } from "../utils/apiResponse.js";
+import { normalizeInstagramTabs, resolveInstagramVideoTabId, tabPatchFor } from "../utils/instagramVideoTabs.js";
 import { hashPassword, verifyPassword } from "../utils/password.js";
 import { bulkDeleteSchema, createSchemas, listQuerySchema, updateSchemas } from "../validators/crudValidators.js";
 import { upload } from "../middlewares/upload.js";
@@ -2013,6 +2014,7 @@ function isPlayableVideoUrl(value = "") {
 
 function sanitizeInstagramVideosConfig(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const tabs = normalizeInstagramTabs(source.tabs);
   const stats = Array.isArray(source.stats?.items)
     ? {
         items: source.stats.items
@@ -2035,6 +2037,7 @@ function sanitizeInstagramVideosConfig(input) {
           const url = String(item?.url || "").trim();
           const videoUrl = String(item?.videoUrl || "").trim();
           const thumbnailUrl = String(item?.thumbnailUrl || "").trim();
+          const tabId = resolveInstagramVideoTabId(item, tabs);
           return {
             id: String(item?.id || `instagram-${index + 1}`).trim(),
             title: String(item?.title || `Instagram Video ${index + 1}`).trim().slice(0, 140),
@@ -2048,6 +2051,7 @@ function sanitizeInstagramVideosConfig(input) {
             url,
             videoUrl: isPublicMediaUrl(videoUrl) ? videoUrl : isPlayableVideoUrl(url) ? url : "",
             thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
+            ...tabPatchFor(tabId, tabs),
             enabled: item?.enabled !== false,
             order: Number(item?.order || index + 1),
           };
@@ -2068,6 +2072,7 @@ function sanitizeInstagramVideosConfig(input) {
       : "https://www.instagram.com/krita_mcqs.official/",
     autoPlay: source.autoPlay === true,
     defaultVideoId,
+    tabs,
     items,
     ...(stats ? { stats } : {}),
   };
@@ -2087,7 +2092,7 @@ router.get("/website-content/landing", asyncHandler(async (_req, res) => {
     { upsert: true, new: true, setDefaultsOnInsert: true },
   ).lean();
 
-  res.json({ success: true, data: document });
+  res.json({ success: true, data: { ...document, content: sanitizeWebsiteContent(document?.content || {}) } });
 }));
 
 router.put("/website-content/landing", requireMainAdmin, asyncHandler(async (req, res) => {

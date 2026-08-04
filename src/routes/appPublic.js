@@ -30,6 +30,7 @@ import {
 import { AppError } from "../utils/AppError.js";
 import { requireAdmin } from "../middlewares/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import { normalizeInstagramTabs, resolveInstagramVideoTabId, tabPatchFor } from "../utils/instagramVideoTabs.js";
 import { sendEmail } from "../utils/simpleEmail.js";
 import { DEFAULT_TEMPLATES, EMAIL_TEMPLATE_KEYS } from "../utils/templatedEmail.js";
 import { verifyToken } from "../utils/token.js";
@@ -551,6 +552,7 @@ function isPlayableVideoUrl(value = "") {
 
 function sanitizePublicInstagramVideos(input) {
   const source = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const tabs = normalizeInstagramTabs(source.tabs);
   const stats = Array.isArray(source.stats?.items)
     ? {
         items: source.stats.items
@@ -575,6 +577,7 @@ function sanitizePublicInstagramVideos(input) {
           const videoUrl = isPlayableVideoUrl(rawVideoUrl) ? rawVideoUrl : isPlayableVideoUrl(url) ? url : "";
           const thumbnailUrl = String(item?.thumbnailUrl || "").trim();
           if (item?.enabled === false || (!url && !videoUrl && !thumbnailUrl)) return null;
+          const tabId = resolveInstagramVideoTabId(item, tabs);
           return {
             id: String(item?.id || `instagram-${index + 1}`).trim(),
             title: String(item?.title || `Instagram Video ${index + 1}`).trim(),
@@ -588,6 +591,7 @@ function sanitizePublicInstagramVideos(input) {
             url,
             videoUrl,
             thumbnailUrl: isPublicMediaUrl(thumbnailUrl) ? thumbnailUrl : "",
+            ...tabPatchFor(tabId, tabs),
             enabled: true,
             order: Number(item?.order || index + 1),
           };
@@ -605,6 +609,7 @@ function sanitizePublicInstagramVideos(input) {
       : "https://www.instagram.com/krita_mcqs.official/",
     autoPlay: source.autoPlay === true,
     defaultVideoId: items.some((item) => item.id === source.defaultVideoId) ? String(source.defaultVideoId) : items[0]?.id || "",
+    tabs: tabs.filter((tab) => tab.enabled !== false),
     items,
     ...(stats ? { stats } : {}),
   };
