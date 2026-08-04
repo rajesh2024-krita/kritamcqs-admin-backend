@@ -2718,7 +2718,7 @@ const notificationBroadcastSchema = z.object({
   selectedUsers: z.string().trim().optional().default(""),
 });
 
-const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "selected"];
+const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "selected"];
 const notificationCenterCategoryValues = ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"];
 const notificationCenterSoundValues = ["default", "custom", "silent"];
 const notificationCenterPriorityValues = ["high", "normal", "low"];
@@ -2738,10 +2738,18 @@ const notificationTemplateSchema = z.object({
 
 const notificationCenterSendSchema = z.object({
   templateId: z.string().trim().optional().default(""),
-  title: z.string().trim().min(1).max(120),
-  message: z.string().trim().min(1).max(500),
+  campaignName: z.string().trim().max(160).optional().default(""),
+  deliveryType: z.enum(["notification", "email", "both"]).optional().default("notification"),
+  title: z.string().trim().max(120).optional().default(""),
+  message: z.string().trim().max(500).optional().default(""),
   image: z.string().trim().max(500).optional().default(""),
   deepLink: z.string().trim().max(500).optional().default("/notifications"),
+  ctaText: z.string().trim().max(120).optional().default(""),
+  targetScreen: z.string().trim().max(120).optional().default(""),
+  emailTemplateId: z.string().trim().optional().default(""),
+  emailTemplateKey: z.string().trim().optional().default(""),
+  emailSubject: z.string().trim().max(180).optional().default(""),
+  emailBody: z.string().max(250000).optional().default(""),
   targetType: z.enum(notificationCenterTargetValues).optional().default("all"),
   selectedUsers: z.union([z.string(), z.array(z.string())]).optional().default(""),
   category: z.enum(notificationCenterCategoryValues).optional().default("custom"),
@@ -2749,6 +2757,14 @@ const notificationCenterSendSchema = z.object({
   priority: z.enum(notificationCenterPriorityValues).optional().default("high"),
   scheduleDate: z.string().trim().optional().default(""),
   action: z.enum(["send", "schedule", "draft"]).optional().default("send"),
+}).superRefine((payload, ctx) => {
+  const shouldNotify = ["notification", "both"].includes(payload.deliveryType);
+  const shouldEmail = ["email", "both"].includes(payload.deliveryType);
+  if (shouldNotify && !payload.title) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["title"], message: "Notification title is required" });
+  if (shouldNotify && !payload.message) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["message"], message: "Notification message is required" });
+  if (shouldEmail && !payload.emailTemplateId && !payload.emailTemplateKey) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailTemplateId"], message: "Email template is required" });
+  if (shouldEmail && !payload.emailSubject) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailSubject"], message: "Email subject is required" });
+  if (shouldEmail && !payload.emailBody) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailBody"], message: "Email body is required" });
 });
 
 function notificationTemplateKeyForType(type, explicitTemplateKey = "") {
@@ -2858,6 +2874,8 @@ async function getNotificationRecipients(targetGroup, selectedUsers = "") {
   if (targetGroup === "free" || targetGroup === "non_premium") return User.find({ isAdmin: { $ne: true }, isPremium: { $ne: true } }).lean();
   if (targetGroup === "neet") return User.find({ isAdmin: { $ne: true }, examMode: { $in: ["NEET", "BOTH"] } }).lean();
   if (targetGroup === "jee") return User.find({ isAdmin: { $ne: true }, examMode: { $in: ["JEE", "BOTH"] } }).lean();
+  if (targetGroup === "active") return User.find({ isAdmin: { $ne: true }, isActive: { $ne: false }, isBlocked: { $ne: true } }).lean();
+  if (targetGroup === "inactive") return User.find({ isAdmin: { $ne: true }, $or: [{ isActive: false }, { isBlocked: true }] }).lean();
   if (targetGroup === "new_registered") {
     return User.find({ isAdmin: { $ne: true }, createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } }).lean();
   }
@@ -2888,6 +2906,87 @@ function notificationHistoryStatus({ action, successCount, failedCount, noTokenC
   if (failedCount > 0 && successCount === 0) return "failed";
   if (noTokenCount > 0 && successCount === 0) return "failed";
   return "sent";
+}
+
+function campaignVariablesForUser(user, payload, extra = {}) {
+  const name = user.name || user.mobile || user.email || "Learner";
+  return sampleEmailVariables({
+    ...extra,
+    user_name: name,
+    StudentName: name,
+    student_name: name,
+    email: user.email || "",
+    mobile: user.mobile || "",
+    notification_title: payload.title || payload.emailSubject || "",
+    notification_message: payload.message || "",
+    broadcast_title: payload.title || payload.emailSubject || "",
+    broadcast_body: payload.message || payload.emailBody || "",
+    current_date: new Date().toLocaleDateString("en-IN"),
+    current_time: new Date().toLocaleTimeString("en-IN"),
+  });
+}
+
+async function sendCustomCampaignEmail({ payload, recipients }) {
+  const shouldEmail = ["email", "both"].includes(payload.deliveryType);
+  const summary = { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [] };
+  if (!shouldEmail) return summary;
+
+  const settings = await InvoiceSettings.findOne({ key: "default" });
+  const requestedTemplateKey = payload.emailTemplateKey || payload.emailTemplateId || "";
+  const template = payload.emailTemplateId && mongoose.isValidObjectId(payload.emailTemplateId)
+    ? await EmailTemplate.findById(payload.emailTemplateId).lean()
+    : requestedTemplateKey
+      ? await EmailTemplate.findOne({ key: requestedTemplateKey }).lean()
+      : null;
+  const templateKey = template?.key || payload.emailTemplateKey || "notification_center_custom";
+  const templateName = template?.name || "Notification Center Campaign";
+
+  for (const user of recipients) {
+    const email = String(user.email || "").trim();
+    if (!email) {
+      summary.emailSkippedCount += 1;
+      summary.logs.push({ userId: String(user._id || user.id || ""), channel: "email", status: "skipped", error: "User email missing" });
+      continue;
+    }
+
+    const variables = campaignVariablesForUser(user, payload, template?.sampleData || {});
+    const subject = renderTemplate(payload.emailSubject || template?.subject || "", variables);
+    const html = renderTemplate(payload.emailBody || template?.htmlContent || "", variables);
+    const log = await EmailLog.create({
+      templateKey,
+      templateName,
+      module: template?.module || "Notifications",
+      to: email,
+      subject,
+      status: "pending",
+      attempts: 0,
+      payload: variables,
+    });
+
+    try {
+      const result = await sendEmail({ smtp: settings?.smtp, to: email, subject, html: html.trim() || buildDefaultHtmlBody(payload.message || "") });
+      log.attempts += 1;
+      log.lastAttemptAt = new Date();
+      log.status = result.skipped ? "skipped" : "sent";
+      log.error = result.skipped ? result.reason || "" : "";
+      log.sentAt = result.skipped ? undefined : new Date();
+      await log.save();
+
+      if (result.skipped) summary.emailSkippedCount += 1;
+      else summary.emailSentCount += 1;
+      summary.logs.push({ userId: String(user._id || user.id || ""), channel: "email", status: log.status, logId: String(log._id), error: log.error });
+    } catch (error) {
+      log.attempts += 1;
+      log.lastAttemptAt = new Date();
+      log.status = "failed";
+      log.error = error.message || "Email failed";
+      await log.save();
+      summary.emailFailedCount += 1;
+      summary.logs.push({ userId: String(user._id || user.id || ""), channel: "email", status: "failed", logId: String(log._id), error: log.error });
+    }
+  }
+
+  return summary;
 }
 
 async function saveNotificationAttachment(file) {
@@ -7297,8 +7396,10 @@ function notificationCenterSelectedUsers(value) {
 
 async function createNotificationHistory(payload, recipients, req, scheduledNotificationId = null) {
   let delivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: recipients.length, errors: [] };
+  let emailDelivery = { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [] };
+  const shouldNotify = ["notification", "both"].includes(payload.deliveryType || "notification");
 
-  if (payload.action === "send") {
+  if (payload.action === "send" && shouldNotify) {
     const dedupePrefix = `notification-center:${scheduledNotificationId || Date.now()}:${crypto.randomBytes(4).toString("hex")}`;
     const docs = recipients.map((user) => ({
       userId: String(user._id || user.id || ""),
@@ -7319,13 +7420,38 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
     }));
     const inserted = await insertUserNotifications(docs, { autoPush: true });
     delivery = inserted.pushDelivery || delivery;
+  } else if (!shouldNotify) {
+    delivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, errors: [] };
   }
 
+  if (payload.action === "send") {
+    emailDelivery = await sendCustomCampaignEmail({ payload, recipients });
+  }
+
+  const totalSuccess = Number(delivery.successCount || 0) + Number(emailDelivery.emailSentCount || 0);
+  const totalFailed = Number(delivery.failedCount || 0) + Number(emailDelivery.emailFailedCount || 0);
+  const totalSkipped = Number(delivery.noTokenCount || 0) + Number(emailDelivery.emailSkippedCount || 0);
+  const status = payload.action === "draft"
+    ? "draft"
+    : totalFailed > 0 && totalSuccess > 0
+      ? "partial"
+      : (totalFailed > 0 || totalSkipped > 0) && totalSuccess === 0
+        ? "failed"
+        : "sent";
+
   const history = await NotificationHistory.create({
-    title: payload.title,
-    message: payload.message,
+    campaignName: payload.campaignName || payload.title || payload.emailSubject || "Notification Campaign",
+    deliveryType: payload.deliveryType || "notification",
+    title: payload.title || "",
+    message: payload.message || "",
     image: payload.image || "",
     deepLink: payload.deepLink || "/notifications",
+    ctaText: payload.ctaText || "",
+    targetScreen: payload.targetScreen || "",
+    emailTemplateId: payload.emailTemplateId || "",
+    emailTemplateKey: payload.emailTemplateKey || "",
+    emailSubject: payload.emailSubject || "",
+    emailBody: payload.emailBody || "",
     targetType: payload.targetType || "all",
     selectedUsers: notificationCenterSelectedUsers(payload.selectedUsers),
     category: payload.category || "custom",
@@ -7335,7 +7461,11 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
     successCount: delivery.successCount,
     failedCount: delivery.failedCount,
     noTokenCount: delivery.noTokenCount,
-    status: notificationHistoryStatus({ action: payload.action, ...delivery }),
+    emailSentCount: emailDelivery.emailSentCount,
+    emailFailedCount: emailDelivery.emailFailedCount,
+    emailSkippedCount: emailDelivery.emailSkippedCount,
+    logs: [...(delivery.errors || []).map((error) => ({ channel: "notification", status: "failed", error })), ...(emailDelivery.logs || [])],
+    status,
     createdBy: String(req.admin?._id || ""),
     createdByName: req.admin?.name || req.admin?.email || "Admin",
     sentAt: payload.action === "send" ? new Date() : undefined,
@@ -7348,10 +7478,18 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
 async function processScheduledNotification(item, req = {}) {
   const recipients = await getNotificationRecipients(item.targetType, item.selectedUsers || []);
   const payload = {
+    campaignName: item.campaignName,
+    deliveryType: item.deliveryType || "notification",
     title: item.title,
     message: item.message,
     image: item.image,
     deepLink: item.deepLink,
+    ctaText: item.ctaText,
+    targetScreen: item.targetScreen,
+    emailTemplateId: item.emailTemplateId,
+    emailTemplateKey: item.emailTemplateKey,
+    emailSubject: item.emailSubject,
+    emailBody: item.emailBody,
     targetType: item.targetType,
     selectedUsers: item.selectedUsers || [],
     category: item.category,
@@ -7473,7 +7611,19 @@ router.post("/notifications/send", asyncHandler(async (req, res) => {
   const selectedUsers = notificationCenterSelectedUsers(payload.selectedUsers);
 
   if (payload.targetType === "selected" && !selectedUsers.length) {
-    throw new AppError("Select at least one user before sending a test push", 400);
+    throw new AppError("Select at least one user before sending this campaign", 400);
+  }
+
+  if (payload.action === "draft") {
+    const item = await ScheduledNotification.create({
+      ...payload,
+      selectedUsers,
+      status: "draft",
+      createdBy: String(req.admin?._id || ""),
+      createdByName: req.admin?.name || req.admin?.email || "Admin",
+    });
+    res.status(201).json({ success: true, message: "Campaign saved as draft", data: serializeNotificationDoc(item) });
+    return;
   }
 
   if (payload.action === "schedule") {
@@ -7491,7 +7641,7 @@ router.post("/notifications/send", asyncHandler(async (req, res) => {
     return;
   }
 
-  const recipients = payload.action === "draft" ? [] : await getNotificationRecipients(payload.targetType, selectedUsers);
+  const recipients = await getNotificationRecipients(payload.targetType, selectedUsers);
   if (payload.action === "send" && !recipients.length) throw new AppError("No users found for selected target audience", 400);
   const { history, delivery } = await createNotificationHistory({ ...payload, selectedUsers }, recipients, req);
 
@@ -7508,7 +7658,9 @@ router.get("/notifications/scheduled", asyncHandler(async (_req, res) => {
 }));
 
 router.put("/notifications/scheduled/:id", asyncHandler(async (req, res) => {
-  const payload = notificationCenterSendSchema.partial().parse(req.body || {});
+  const payload = { ...(req.body || {}) };
+  if (payload.scheduleDate) payload.scheduleDate = new Date(payload.scheduleDate);
+  if (payload.status && !["pending", "sent", "failed", "cancelled", "draft"].includes(payload.status)) throw new AppError("Invalid scheduled campaign status", 400);
   const item = await ScheduledNotification.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true });
   if (!item) throw new AppError("Scheduled notification not found", 404);
   res.json({ success: true, message: "Scheduled notification updated", data: serializeNotificationDoc(item) });
