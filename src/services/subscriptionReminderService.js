@@ -18,6 +18,107 @@ function nextDateFromConfig(config, useRepeat = false) {
   return new Date(Date.now() + Math.max(0, Number(amount || 0)) * unitToMs(config.delayUnit));
 }
 
+const defaultReminderTemplates = [
+  {
+    id: "immediate",
+    name: "Reminder 1 - Immediate",
+    enabled: true,
+    delayAmount: 0,
+    delayUnit: "Minutes",
+    inApp: {
+      title: "You're Almost There",
+      message: "Your Krita NEET JEE Premium purchase was not completed. Unlock 6 months of preparation with 7,000+ MCQs, 10 years of PYQs, weak-area tracking and weekly NEET/JEE-pattern mock tests for ₹499.",
+      ctaText: "Complete My Purchase",
+      ctaAction: "https://app.kritamcqs.com/premium",
+    },
+    push: {
+      title: "Your Premium Access Is Waiting",
+      message: "Complete your ₹499 purchase and unlock 6 months of 7,000+ MCQs, PYQs and weekly NEET/JEE-pattern mock tests.",
+      ctaText: "Complete Purchase",
+      ctaAction: "https://app.kritamcqs.com/premium",
+    },
+    email: {
+      subject: "Continue Your NEET/JEE Preparation",
+      body: "<p>Hi {{StudentName}},</p><p>You were close to activating Krita NEET JEE Premium, but your purchase was not completed.</p><p>Get 6 months of complete Premium access for ₹499 and continue preparing with:</p><ul><li>7,000+ NEET and JEE MCQs</li><li>Last 10 years' previous-year questions</li><li>Chapter-wise and topic-wise practice</li><li>Detailed answers and clear explanations</li><li>Weak-area identification and progress tracking</li><li>Weekly mock tests following the NEET/JEE exam pattern</li></ul><p>That works out to approximately ₹83 per month for complete exam-focused practice.</p><p>Don't stop after identifying your weak chapters. Practise them, improve your accuracy and track your progress regularly.</p><p>Your Premium access will be activated after successful payment.</p><p>Best wishes,<br/>Team Krita NEET JEE</p>",
+      ctaText: "Complete My ₹499 Purchase",
+      ctaUrl: "https://app.kritamcqs.com/premium",
+    },
+  },
+  {
+    id: "after-24-hours",
+    name: "Reminder 2 - After 24 Hours",
+    enabled: true,
+    delayAmount: 24,
+    delayUnit: "Hours",
+    inApp: {
+      title: "Improve Your Weak NEET Topics",
+      message: "Don't stop after identifying your weak chapters. Unlock complete practice, PYQs and weekly mock tests for ₹499 for 6 months.",
+      ctaText: "Unlock Premium",
+      ctaAction: "https://app.kritamcqs.com/premium",
+    },
+    push: {
+      title: "Improve Your Weak NEET Topics",
+      message: "Don't stop after identifying your weak chapters. Unlock complete practice, PYQs and weekly mock tests for ₹499 for 6 months.",
+      ctaText: "Unlock Premium",
+      ctaAction: "https://app.kritamcqs.com/premium",
+    },
+    email: {
+      subject: "Continue Your NEET/JEE Preparation",
+      body: "<p>Hi {{StudentName}},</p><p>Your Krita NEET JEE Premium access is still waiting. Complete your ₹499 purchase to unlock MCQs, PYQs, weak-area tracking and weekly NEET/JEE-pattern mock tests.</p><p>Keep practising your weak chapters and track your progress regularly.</p><p>Best wishes,<br/>Team Krita NEET JEE</p>",
+      ctaText: "Complete My ₹499 Purchase",
+      ctaUrl: "https://app.kritamcqs.com/premium",
+    },
+  },
+];
+
+function cleanText(value, fallback = "") {
+  return String(value ?? fallback).replace(/\u0000/g, "").trim();
+}
+
+function normalizeTemplateGroup(value = {}, fallback = {}) {
+  return {
+    title: cleanText(value.title, fallback.title).slice(0, 180),
+    message: cleanText(value.message, fallback.message).slice(0, 4000),
+    ctaText: cleanText(value.ctaText, fallback.ctaText).slice(0, 120),
+    ctaAction: cleanText(value.ctaAction, fallback.ctaAction).slice(0, 500),
+  };
+}
+
+function normalizeEmailTemplate(value = {}, fallback = {}) {
+  return {
+    subject: cleanText(value.subject, fallback.subject).slice(0, 180),
+    body: cleanText(value.body, fallback.body).slice(0, 250000),
+    ctaText: cleanText(value.ctaText, fallback.ctaText).slice(0, 120),
+    ctaUrl: cleanText(value.ctaUrl, fallback.ctaUrl).slice(0, 500),
+  };
+}
+
+function normalizeReminderTemplates(bodyReminders, existing = {}) {
+  const existingReminders = Array.isArray(existing.reminders) && existing.reminders.length ? existing.reminders : [];
+  const source = Array.isArray(bodyReminders) && bodyReminders.length
+    ? bodyReminders
+    : existingReminders.length
+      ? existingReminders
+      : defaultReminderTemplates;
+
+  const normalized = source.map((item, index) => {
+    const fallback = defaultReminderTemplates[index] || defaultReminderTemplates[0];
+    const id = cleanText(item?.id, fallback.id || `reminder-${index + 1}`) || `reminder-${index + 1}`;
+    return {
+      id,
+      name: cleanText(item?.name, fallback.name || `Reminder ${index + 1}`).slice(0, 160),
+      enabled: item?.enabled !== false,
+      delayAmount: Math.max(0, Number(item?.delayAmount ?? fallback.delayAmount ?? 0)),
+      delayUnit: ["Minutes", "Hours", "Days"].includes(item?.delayUnit) ? item.delayUnit : fallback.delayUnit || "Hours",
+      inApp: normalizeTemplateGroup(item?.inApp, fallback.inApp),
+      push: normalizeTemplateGroup(item?.push, fallback.push),
+      email: normalizeEmailTemplate(item?.email, fallback.email),
+    };
+  });
+
+  return normalized.length ? normalized : defaultReminderTemplates;
+}
+
 async function audit(action, previousValue, updatedValue, admin) {
   await AdminActivityLog.create({
     employeeId: admin?._id,
@@ -30,30 +131,40 @@ async function audit(action, previousValue, updatedValue, admin) {
 }
 
 function configPayload(body = {}, existing = {}) {
+  const reminders = normalizeReminderTemplates(body.reminders, existing);
+  const firstEnabledReminder = reminders.find((item) => item.enabled !== false) || reminders[0];
   const payload = {
     reminderName: body.reminderName !== undefined ? String(body.reminderName || "").trim() : existing.reminderName,
     status: body.status !== undefined ? String(body.status || "enabled") : existing.status || "enabled",
     channels: body.channels !== undefined ? String(body.channels || "Both") : existing.channels || "Both",
-    immediateReminderEnabled: body.immediateReminderEnabled !== undefined ? Boolean(body.immediateReminderEnabled) : existing.immediateReminderEnabled !== false,
-    initialDelay: body.initialDelay !== undefined ? Number(body.initialDelay || 0) : Number(existing.initialDelay || 30),
-    repeatInterval: body.repeatInterval !== undefined ? Number(body.repeatInterval || 1) : Number(existing.repeatInterval || 24),
-    delayUnit: body.delayUnit !== undefined ? String(body.delayUnit || "Hours") : existing.delayUnit || "Hours",
-    maximumReminderCount: body.maximumReminderCount !== undefined ? Number(body.maximumReminderCount || 1) : Number(existing.maximumReminderCount || 3),
-    notificationTitle: body.notificationTitle !== undefined ? String(body.notificationTitle || "").trim() : existing.notificationTitle,
-    notificationMessage: body.notificationMessage !== undefined ? String(body.notificationMessage || "").trim() : existing.notificationMessage,
-    emailSubject: body.emailSubject !== undefined ? String(body.emailSubject || "").trim() : existing.emailSubject,
-    emailTemplate: body.emailTemplate !== undefined ? String(body.emailTemplate || "").replace(/\u0000/g, "").trim() : existing.emailTemplate,
+    immediateReminderEnabled: firstEnabledReminder?.delayAmount === 0,
+    initialDelay: Number(firstEnabledReminder?.delayAmount || 0),
+    repeatInterval: Number(reminders[1]?.delayAmount || existing.repeatInterval || 24),
+    delayUnit: firstEnabledReminder?.delayUnit || "Hours",
+    maximumReminderCount: body.maximumReminderCount !== undefined ? Number(body.maximumReminderCount || 1) : Math.max(1, reminders.filter((item) => item.enabled !== false).length),
+    notificationTitle: firstEnabledReminder?.push?.title || firstEnabledReminder?.inApp?.title || "",
+    notificationMessage: firstEnabledReminder?.push?.message || firstEnabledReminder?.inApp?.message || "",
+    emailSubject: firstEnabledReminder?.email?.subject || "",
+    emailTemplate: firstEnabledReminder?.email?.body || "",
+    reminders,
     platform: body.platform !== undefined ? String(body.platform || "Both") : existing.platform || "Both",
     applicablePlan: body.applicablePlan !== undefined ? String(body.applicablePlan || "").trim() : existing.applicablePlan,
     targetUsers: body.targetUsers !== undefined ? String(body.targetUsers || "all") : existing.targetUsers || "all",
     priority: body.priority !== undefined ? Number(body.priority || 0) : Number(existing.priority || 100),
   };
   if (!payload.reminderName) throw new AppError("Reminder Name is required", 400);
-  if (payload.channels !== "Email" && (!payload.notificationTitle || !payload.notificationMessage)) {
-    throw new AppError("Notification title and message are required for notification reminders", 400);
-  }
-  if (payload.channels !== "Notification" && (!payload.emailSubject || !payload.emailTemplate)) {
-    throw new AppError("Email subject and template are required for email reminders", 400);
+  const enabledReminders = payload.reminders.filter((item) => item.enabled !== false);
+  if (!enabledReminders.length) throw new AppError("Enable at least one reminder", 400);
+  for (const reminder of enabledReminders) {
+    if (!reminder.inApp.title || !reminder.inApp.message || !reminder.inApp.ctaText || !reminder.inApp.ctaAction) {
+      throw new AppError(`${reminder.name}: In-app title, message, CTA text and CTA action are required`, 400);
+    }
+    if (!reminder.push.title || !reminder.push.message || !reminder.push.ctaText || !reminder.push.ctaAction) {
+      throw new AppError(`${reminder.name}: Push title, message, CTA text and CTA action are required`, 400);
+    }
+    if (!reminder.email.subject || !reminder.email.body || !reminder.email.ctaText || !reminder.email.ctaUrl) {
+      throw new AppError(`${reminder.name}: Email subject, body, CTA text and CTA URL are required`, 400);
+    }
   }
   return payload;
 }

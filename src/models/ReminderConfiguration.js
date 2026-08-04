@@ -20,6 +20,7 @@ const reminderConfigurationSchema = new Schema(
     notificationMessage: { type: String, trim: true, maxlength: 2000, default: "" },
     emailSubject: { type: String, trim: true, maxlength: 180, default: "" },
     emailTemplate: { type: String, maxlength: 250000, default: "" },
+    reminders: { type: [Schema.Types.Mixed], default: [] },
     platform: { type: String, enum: reminderPlatformValues, default: "Both", index: true },
     applicablePlan: { type: String, trim: true, maxlength: 160, default: "" },
     targetUsers: { type: String, enum: reminderTargetValues, default: "all" },
