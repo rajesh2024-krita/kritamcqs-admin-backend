@@ -2926,26 +2926,60 @@ function campaignVariablesForUser(user, payload, extra = {}) {
   });
 }
 
+async function resolveNotificationCenterEmailTemplate(payload) {
+  const requestedTemplateKey = String(payload.emailTemplateKey || payload.emailTemplateId || "").trim();
+  const dbTemplate = payload.emailTemplateId && mongoose.isValidObjectId(payload.emailTemplateId)
+    ? await EmailTemplate.findById(payload.emailTemplateId).lean()
+    : requestedTemplateKey
+      ? await EmailTemplate.findOne({ key: requestedTemplateKey }).lean()
+      : null;
+
+  if (dbTemplate) return dbTemplate;
+
+  const definition = EMAIL_TEMPLATE_DEFINITIONS.find((item) => item.key === requestedTemplateKey);
+  if (!definition) return null;
+
+  const fallback = buildDefaultTemplate(definition);
+  return {
+    ...definition,
+    ...fallback,
+    key: definition.key,
+    name: definition.name,
+    module: definition.module,
+    type: definition.type,
+    sampleData: sampleEmailVariables(),
+    isCatalogFallback: true,
+  };
+}
+
 async function sendCustomCampaignEmail({ payload, recipients }) {
   const shouldEmail = ["email", "both"].includes(payload.deliveryType);
   const summary = { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [] };
   if (!shouldEmail) return summary;
 
-  const settings = await InvoiceSettings.findOne({ key: "default" });
-  const requestedTemplateKey = payload.emailTemplateKey || payload.emailTemplateId || "";
-  const template = payload.emailTemplateId && mongoose.isValidObjectId(payload.emailTemplateId)
-    ? await EmailTemplate.findById(payload.emailTemplateId).lean()
-    : requestedTemplateKey
-      ? await EmailTemplate.findOne({ key: requestedTemplateKey }).lean()
-      : null;
+  const settings = await getInvoiceSettingsDoc();
+  const template = await resolveNotificationCenterEmailTemplate(payload);
   const templateKey = template?.key || payload.emailTemplateKey || "notification_center_custom";
   const templateName = template?.name || "Notification Center Campaign";
+  const smtpConfigured = Boolean(settings?.smtp?.host && settings?.smtp?.fromEmail);
+  if (!smtpConfigured) {
+    console.error("[NOTIFICATION_CENTER_EMAIL] SMTP settings are incomplete; campaign emails will be skipped", {
+      campaignName: payload.campaignName || payload.title || payload.emailSubject || "",
+      deliveryType: payload.deliveryType,
+      hasHost: Boolean(settings?.smtp?.host),
+      hasFromEmail: Boolean(settings?.smtp?.fromEmail),
+    });
+  }
 
   for (const user of recipients) {
     const email = String(user.email || "").trim();
     if (!email) {
       summary.emailSkippedCount += 1;
       summary.logs.push({ userId: String(user._id || user.id || ""), channel: "email", status: "skipped", error: "User email missing" });
+      console.warn("[NOTIFICATION_CENTER_EMAIL] Recipient email missing", {
+        campaignName: payload.campaignName || payload.title || payload.emailSubject || "",
+        userId: String(user._id || user.id || ""),
+      });
       continue;
     }
 
@@ -2975,6 +3009,15 @@ async function sendCustomCampaignEmail({ payload, recipients }) {
       if (result.skipped) summary.emailSkippedCount += 1;
       else summary.emailSentCount += 1;
       summary.logs.push({ userId: String(user._id || user.id || ""), channel: "email", status: log.status, logId: String(log._id), error: log.error });
+      if (result.skipped) {
+        console.error("[NOTIFICATION_CENTER_EMAIL] Email delivery skipped", {
+          campaignName: payload.campaignName || payload.title || payload.emailSubject || "",
+          userId: String(user._id || user.id || ""),
+          to: email,
+          reason: log.error,
+          logId: String(log._id),
+        });
+      }
     } catch (error) {
       log.attempts += 1;
       log.lastAttemptAt = new Date();
@@ -2983,6 +3026,13 @@ async function sendCustomCampaignEmail({ payload, recipients }) {
       await log.save();
       summary.emailFailedCount += 1;
       summary.logs.push({ userId: String(user._id || user.id || ""), channel: "email", status: "failed", logId: String(log._id), error: log.error });
+      console.error("[NOTIFICATION_CENTER_EMAIL] Email delivery failed", {
+        campaignName: payload.campaignName || payload.title || payload.emailSubject || "",
+        userId: String(user._id || user.id || ""),
+        to: email,
+        error: log.error,
+        logId: String(log._id),
+      });
     }
   }
 
@@ -7472,7 +7522,7 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
     scheduledNotificationId,
   });
 
-  return { history, delivery };
+  return { history, delivery, emailDelivery };
 }
 
 async function processScheduledNotification(item, req = {}) {
@@ -7498,12 +7548,13 @@ async function processScheduledNotification(item, req = {}) {
     action: "send",
   };
 
-  const { history, delivery } = await createNotificationHistory(payload, recipients, req, item._id);
+  const { history, delivery, emailDelivery } = await createNotificationHistory(payload, recipients, req, item._id);
   item.status = history.status === "failed" ? "failed" : "sent";
   item.sentAt = new Date();
-  item.lastError = delivery.errors?.[0] || "";
+  item.lastError = delivery.errors?.[0] || emailDelivery.logs?.find((log) => log.status === "failed" || log.status === "skipped")?.error || "";
+  item.logs = [...(delivery.errors || []).map((error) => ({ channel: "notification", status: "failed", error })), ...(emailDelivery.logs || [])];
   await item.save();
-  return { history, delivery };
+  return { history, delivery, emailDelivery };
 }
 
 const NOTIFICATION_CENTER_SCHEDULER_INTERVAL_MS = 60 * 1000;
@@ -7516,7 +7567,15 @@ async function processDueScheduledNotifications(req = {}) {
   for (const item of items) {
     try {
       const result = await processScheduledNotification(item, req);
-      processed.push({ id: String(item._id), status: item.status, successCount: result.delivery.successCount, failedCount: result.delivery.failedCount });
+      processed.push({
+        id: String(item._id),
+        status: item.status,
+        successCount: result.delivery.successCount,
+        failedCount: result.delivery.failedCount,
+        emailSentCount: result.emailDelivery.emailSentCount,
+        emailFailedCount: result.emailDelivery.emailFailedCount,
+        emailSkippedCount: result.emailDelivery.emailSkippedCount,
+      });
     } catch (error) {
       item.status = "failed";
       item.lastError = error.message || "Failed to process scheduled notification";
@@ -7643,12 +7702,12 @@ router.post("/notifications/send", asyncHandler(async (req, res) => {
 
   const recipients = await getNotificationRecipients(payload.targetType, selectedUsers);
   if (payload.action === "send" && !recipients.length) throw new AppError("No users found for selected target audience", 400);
-  const { history, delivery } = await createNotificationHistory({ ...payload, selectedUsers }, recipients, req);
+  const { history, delivery, emailDelivery } = await createNotificationHistory({ ...payload, selectedUsers }, recipients, req);
 
   res.status(201).json({
     success: true,
-    message: payload.action === "draft" ? "Notification saved as draft" : "Notification sent",
-    data: { ...serializeNotificationDoc(history), delivery },
+    message: history.status === "sent" ? "Campaign sent" : history.status === "partial" ? "Campaign partially delivered" : "Campaign delivery failed",
+    data: { ...serializeNotificationDoc(history), delivery, emailDelivery },
   });
 }));
 
@@ -7690,12 +7749,12 @@ router.get("/notifications/stats", asyncHandler(async (_req, res) => {
   const [totalNotifications, todayNotifications, delivered, failed, activeDeviceTokens, sentTrend] = await Promise.all([
     NotificationHistory.countDocuments(),
     NotificationHistory.countDocuments({ createdAt: { $gte: start, $lt: end } }),
-    NotificationHistory.aggregate([{ $group: { _id: null, count: { $sum: "$successCount" } } }]),
-    NotificationHistory.aggregate([{ $group: { _id: null, count: { $sum: "$failedCount" } } }]),
+    NotificationHistory.aggregate([{ $group: { _id: null, count: { $sum: { $add: [{ $ifNull: ["$successCount", 0] }, { $ifNull: ["$emailSentCount", 0] }] } } } }]),
+    NotificationHistory.aggregate([{ $group: { _id: null, count: { $sum: { $add: [{ $ifNull: ["$failedCount", 0] }, { $ifNull: ["$emailFailedCount", 0] }, { $ifNull: ["$emailSkippedCount", 0] }] } } } }]),
     PushDeviceToken.countDocuments({ enabled: true, active: { $ne: false } }),
     NotificationHistory.aggregate([
       { $match: { createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } } },
-      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, sent: { $sum: "$sentCount" }, delivered: { $sum: "$successCount" }, failed: { $sum: "$failedCount" } } },
+      { $group: { _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } }, sent: { $sum: { $add: [{ $ifNull: ["$sentCount", 0] }, { $ifNull: ["$emailSentCount", 0] }] } }, delivered: { $sum: { $add: [{ $ifNull: ["$successCount", 0] }, { $ifNull: ["$emailSentCount", 0] }] } }, failed: { $sum: { $add: [{ $ifNull: ["$failedCount", 0] }, { $ifNull: ["$emailFailedCount", 0] }, { $ifNull: ["$emailSkippedCount", 0] }] } } } },
       { $sort: { _id: 1 } },
     ]),
   ]);
