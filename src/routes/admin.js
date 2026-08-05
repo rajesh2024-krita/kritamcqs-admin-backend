@@ -392,7 +392,7 @@ function normalizeEmailCtaPayload(payload = {}, existing = {}) {
 function buildEmailCtaHtml(template) {
   if (!template?.ctaEnabled) return "";
   const text = String(template.ctaText || "").trim();
-  const href = normalizeEmailCtaHref(template.ctaUrl);
+  const href = normalizeEmailCtaHref(template.ctaUrl, template.openIn);
   if (!text || !isValidCtaUrl(href)) return "";
   const alignment = ["left", "center", "right"].includes(String(template.buttonAlignment)) ? String(template.buttonAlignment) : "center";
   const buttonColor = /^#[0-9a-f]{6}$/i.test(String(template.buttonColor || "")) ? template.buttonColor : "#2563eb";
@@ -410,27 +410,47 @@ function appendEmailCta(htmlContent, ctaHtml) {
 function appendTextCta(textContent, template) {
   if (!template?.ctaEnabled) return textContent;
   const text = String(template.ctaText || "").trim();
-  const href = normalizeEmailCtaHref(template.ctaUrl);
+  const href = normalizeEmailCtaHref(template.ctaUrl, template.openIn);
   if (!text || !isValidCtaUrl(href)) return textContent;
   const current = String(textContent || "").trimEnd();
   return `${current}${current ? "\n\n" : ""}${text}: ${href}`;
 }
 
-function normalizeEmailCtaHref(value) {
+const CTA_REDIRECT_BASE = "https://app.kritamcqs.com/cta";
+const APP_LINK_HOST = "app.kritamcqs.com";
+
+function ctaRedirectUrl(target) {
+  return `${CTA_REDIRECT_BASE}?target=${encodeURIComponent(target)}`;
+}
+
+function normalizeAppCtaTarget(value) {
   const rawHref = String(value || "").trim();
   if (!rawHref) return "";
-  if (rawHref.startsWith("/")) return `https://app.kritamcqs.com/#${rawHref}`;
+  if (rawHref.startsWith("/")) return rawHref;
   if (/^https?:\/\//i.test(rawHref)) {
     try {
       const parsed = new URL(rawHref);
-      if (parsed.hostname === "app.kritamcqs.com" && parsed.pathname !== "/" && !parsed.hash.startsWith("#/")) {
-        return `https://app.kritamcqs.com/#${parsed.pathname}${parsed.search}`;
+      if (parsed.hostname === APP_LINK_HOST) {
+        if (parsed.pathname === "/cta") return parsed.searchParams.get("target") || "/dashboard";
+        if (parsed.hash.startsWith("#/")) return `${parsed.hash.slice(1)}${parsed.search}`;
+        return `${parsed.pathname || "/dashboard"}${parsed.search}`;
       }
     } catch {
       return rawHref;
     }
   }
   return rawHref;
+}
+
+function normalizeEmailCtaHref(value, openIn = "auto") {
+  const rawHref = String(value || "").trim();
+  if (!rawHref) return "";
+  const mode = String(openIn || "auto");
+  const isWebsiteMode = mode === "website";
+  const isStoreUrl = /^https:\/\/(play\.google\.com|apps\.apple\.com)\//i.test(rawHref);
+  const isWebsiteUrl = /^https?:\/\/(www\.)?kritamcqs\.com(\/|$)/i.test(rawHref);
+  if (isWebsiteMode || isStoreUrl || isWebsiteUrl) return rawHref;
+  return ctaRedirectUrl(normalizeAppCtaTarget(rawHref));
 }
 
 function normalizeCtaConfigPayload(payload = {}, existing = {}) {
