@@ -392,8 +392,7 @@ function normalizeEmailCtaPayload(payload = {}, existing = {}) {
 function buildEmailCtaHtml(template) {
   if (!template?.ctaEnabled) return "";
   const text = String(template.ctaText || "").trim();
-  const rawHref = String(template.ctaUrl || "").trim();
-  const href = rawHref.startsWith("/") ? `https://app.kritamcqs.com${rawHref}` : rawHref;
+  const href = normalizeEmailCtaHref(template.ctaUrl);
   if (!text || !isValidCtaUrl(href)) return "";
   const alignment = ["left", "center", "right"].includes(String(template.buttonAlignment)) ? String(template.buttonAlignment) : "center";
   const buttonColor = /^#[0-9a-f]{6}$/i.test(String(template.buttonColor || "")) ? template.buttonColor : "#2563eb";
@@ -411,11 +410,27 @@ function appendEmailCta(htmlContent, ctaHtml) {
 function appendTextCta(textContent, template) {
   if (!template?.ctaEnabled) return textContent;
   const text = String(template.ctaText || "").trim();
-  const rawHref = String(template.ctaUrl || "").trim();
-  const href = rawHref.startsWith("/") ? `https://app.kritamcqs.com${rawHref}` : rawHref;
+  const href = normalizeEmailCtaHref(template.ctaUrl);
   if (!text || !isValidCtaUrl(href)) return textContent;
   const current = String(textContent || "").trimEnd();
   return `${current}${current ? "\n\n" : ""}${text}: ${href}`;
+}
+
+function normalizeEmailCtaHref(value) {
+  const rawHref = String(value || "").trim();
+  if (!rawHref) return "";
+  if (rawHref.startsWith("/")) return `https://app.kritamcqs.com/#${rawHref}`;
+  if (/^https?:\/\//i.test(rawHref)) {
+    try {
+      const parsed = new URL(rawHref);
+      if (parsed.hostname === "app.kritamcqs.com" && parsed.pathname !== "/" && !parsed.hash.startsWith("#/")) {
+        return `https://app.kritamcqs.com/#${parsed.pathname}${parsed.search}`;
+      }
+    } catch {
+      return rawHref;
+    }
+  }
+  return rawHref;
 }
 
 function normalizeCtaConfigPayload(payload = {}, existing = {}) {
