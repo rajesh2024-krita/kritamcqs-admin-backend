@@ -373,15 +373,42 @@ function isValidCtaUrl(value) {
   return /^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(url);
 }
 
+const EMAIL_CTA_DESTINATIONS = {
+  home: "/home",
+  daily_test: "/daily-test",
+  revision: "/revision",
+  mock_test: "/mock-tests",
+  leaderboard: "/leaderboard",
+  weak_areas: "/weak-areas",
+  mistake_book: "/mistake-book",
+  subscription: "/subscription",
+  profile: "/profile",
+  login: "/login",
+  register: "/login",
+  premium_plan: "/subscription",
+  renew_subscription: "/subscription",
+  upgrade_plan: "/subscription",
+  payment: "/subscription",
+  pyq: "/year-questions",
+  analytics: "/test-results",
+  notifications: "/notifications",
+  offers: "/notifications",
+  referral: "/profile",
+  invite_friends: "/profile",
+  contact_support: "/help-support",
+};
+
 function normalizeEmailCtaPayload(payload = {}, existing = {}) {
   const openIn = ["app", "website", "auto"].includes(String(payload.openIn ?? existing.openIn)) ? String(payload.openIn ?? existing.openIn) : "auto";
   const buttonAlignment = ["left", "center", "right"].includes(String(payload.buttonAlignment ?? existing.buttonAlignment)) ? String(payload.buttonAlignment ?? existing.buttonAlignment) : "center";
   const hexOrDefault = (value, fallback) => /^#[0-9a-f]{6}$/i.test(String(value || "").trim()) ? String(value).trim() : fallback;
+  const ctaType = String(payload.ctaType ?? existing.ctaType ?? "none").trim() || "none";
+  const mappedUrl = EMAIL_CTA_DESTINATIONS[ctaType] || "";
   return {
     ctaEnabled: Boolean(payload.ctaEnabled ?? existing.ctaEnabled ?? false),
     ctaText: String(payload.ctaText ?? existing.ctaText ?? "").trim(),
-    ctaType: String(payload.ctaType ?? existing.ctaType ?? "none").trim() || "none",
-    ctaUrl: String(payload.ctaUrl ?? existing.ctaUrl ?? "").trim(),
+    ctaType,
+    ctaUrl: ctaType === "custom_url" ? String(payload.ctaUrl ?? existing.ctaUrl ?? "").trim() : mappedUrl,
     openIn,
     buttonColor: hexOrDefault(payload.buttonColor ?? existing.buttonColor, "#2563eb"),
     buttonTextColor: hexOrDefault(payload.buttonTextColor ?? existing.buttonTextColor, "#ffffff"),
@@ -416,11 +443,11 @@ function appendTextCta(textContent, template) {
   return `${current}${current ? "\n\n" : ""}${text}: ${href}`;
 }
 
-const CTA_REDIRECT_BASE = "https://app.kritamcqs.com/cta";
 const APP_LINK_HOST = "app.kritamcqs.com";
 
-function ctaRedirectUrl(target) {
-  return `${CTA_REDIRECT_BASE}?target=${encodeURIComponent(target)}`;
+function appLinkUrl(target) {
+  const normalized = normalizeAppCtaTarget(target) || "/home";
+  return `https://${APP_LINK_HOST}${normalized.startsWith("/") ? normalized : `/${normalized}`}`;
 }
 
 function normalizeAppCtaTarget(value) {
@@ -450,7 +477,15 @@ function normalizeEmailCtaHref(value, openIn = "auto") {
   const isStoreUrl = /^https:\/\/(play\.google\.com|apps\.apple\.com)\//i.test(rawHref);
   const isWebsiteUrl = /^https?:\/\/(www\.)?kritamcqs\.com(\/|$)/i.test(rawHref);
   if (isWebsiteMode || isStoreUrl || isWebsiteUrl) return rawHref;
-  return ctaRedirectUrl(normalizeAppCtaTarget(rawHref));
+  if (/^https?:\/\//i.test(rawHref)) {
+    try {
+      const parsed = new URL(rawHref);
+      if (parsed.hostname !== APP_LINK_HOST) return rawHref;
+    } catch {
+      return rawHref;
+    }
+  }
+  return appLinkUrl(rawHref);
 }
 
 function normalizeCtaConfigPayload(payload = {}, existing = {}) {
@@ -928,8 +963,14 @@ async function sendTemplatedEmail(templateKey, to, variables, attachments = []) 
   }
 
   const subject = renderTemplate(effectiveTemplate.subject, mergedData);
-  const textContent = renderTemplate(effectiveTemplate.textContent, mergedData);
-  const htmlContent = renderTemplate(effectiveTemplate.htmlContent, mergedData);
+  const renderedCtaTemplate = {
+    ...(typeof effectiveTemplate.toObject === "function" ? effectiveTemplate.toObject() : effectiveTemplate),
+    ctaText: renderTemplate(effectiveTemplate.ctaText, mergedData),
+    ctaUrl: renderTemplate(effectiveTemplate.ctaUrl, mergedData),
+  };
+  const ctaHtml = buildEmailCtaHtml(renderedCtaTemplate);
+  const textContent = appendTextCta(renderTemplate(effectiveTemplate.textContent, mergedData), renderedCtaTemplate);
+  const htmlContent = appendEmailCta(renderTemplate(effectiveTemplate.htmlContent, mergedData), ctaHtml);
   const htmlBody = htmlContent.trim() || buildDefaultHtmlBody(textContent);
 
   console.log(

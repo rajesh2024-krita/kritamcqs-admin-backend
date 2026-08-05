@@ -153,14 +153,19 @@ const emailTemplateBodySchemaBase = z.object({
 function validateEmailTemplateCta(value, ctx) {
   if (!value.ctaEnabled) return;
   const ctaText = String(value.ctaText || "").trim();
+  const ctaType = String(value.ctaType || "").trim();
   const ctaUrl = String(value.ctaUrl || "").trim();
   if (!ctaText) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaText"], message: "CTA button text is required when CTA is enabled." });
   }
-  if (!ctaUrl) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "CTA URL / Deep Link is required when CTA is enabled." });
+  if (!ctaType || ctaType === "none") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaType"], message: "CTA destination is required when CTA is enabled." });
+  }
+  if (ctaType !== "custom_url" && !ctaUrl) return;
+  if (ctaType === "custom_url" && !ctaUrl) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "Custom URL is required when Custom URL is selected." });
   } else if (!/^\/[^\s]*$/.test(ctaUrl) && !/^https?:\/\/\S+$/i.test(ctaUrl) && !/^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(ctaUrl)) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "CTA URL / Deep Link must be a valid HTTPS URL or custom deep link." });
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "CTA URL must be a valid URL." });
   }
 }
 

@@ -433,6 +433,88 @@ function escapedValues(values) {
   return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, escapeHtml(value)]));
 }
 
+const APP_LINK_HOST = "app.kritamcqs.com";
+const EMAIL_CTA_DESTINATIONS = {
+  home: "/home",
+  daily_test: "/daily-test",
+  revision: "/revision",
+  mock_test: "/mock-tests",
+  leaderboard: "/leaderboard",
+  weak_areas: "/weak-areas",
+  mistake_book: "/mistake-book",
+  subscription: "/subscription",
+  profile: "/profile",
+  login: "/login",
+  register: "/login",
+  premium_plan: "/subscription",
+  renew_subscription: "/subscription",
+  upgrade_plan: "/subscription",
+  payment: "/subscription",
+  pyq: "/year-questions",
+  analytics: "/test-results",
+  notifications: "/notifications",
+  offers: "/notifications",
+  referral: "/profile",
+  invite_friends: "/profile",
+  contact_support: "/help-support",
+};
+
+function normalizeAppCtaTarget(value) {
+  const rawHref = String(value || "").trim();
+  if (!rawHref) return "";
+  if (rawHref.startsWith("/")) return rawHref;
+  if (/^https?:\/\//i.test(rawHref)) {
+    try {
+      const parsed = new URL(rawHref);
+      if (parsed.hostname === APP_LINK_HOST) return `${parsed.pathname || "/home"}${parsed.search}`;
+      return rawHref;
+    } catch {
+      return rawHref;
+    }
+  }
+  return `/${rawHref.replace(/^\/+/, "")}`;
+}
+
+function buildEmailCtaHref(template) {
+  if (!template?.ctaEnabled) return "";
+  const type = String(template.ctaType || "none");
+  const mappedTarget = EMAIL_CTA_DESTINATIONS[type] || "";
+  const rawHref = type === "custom_url" ? String(template.ctaUrl || "").trim() : mappedTarget;
+  if (!rawHref) return "";
+  if (/^https?:\/\//i.test(rawHref)) {
+    try {
+      const parsed = new URL(rawHref);
+      if (parsed.hostname !== APP_LINK_HOST) return rawHref;
+    } catch {
+      return rawHref;
+    }
+  }
+  const target = normalizeAppCtaTarget(rawHref);
+  return `https://${APP_LINK_HOST}${target.startsWith("/") ? target : `/${target}`}`;
+}
+
+function buildEmailCtaHtml(template) {
+  const text = String(template?.ctaText || "").trim();
+  const href = buildEmailCtaHref(template);
+  if (!text || !href) return "";
+  return `<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;margin:24px 0 8px 0;"><tr><td align="center" style="padding:0;text-align:center;"><a href="${escapeHtml(href)}" target="_blank" role="button" style="display:inline-block;background:#0A6CFF;color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:700;line-height:20px;text-decoration:none;border-radius:8px;padding:14px 28px;border:1px solid #0A6CFF;text-align:center;">${escapeHtml(text)}</a></td></tr></table>`;
+}
+
+function appendEmailCta(html, ctaHtml) {
+  if (!ctaHtml) return html;
+  const content = String(html || "");
+  if (/<\/body\s*>/i.test(content)) return content.replace(/<\/body\s*>/i, `${ctaHtml}</body>`);
+  return `${content}${ctaHtml}`;
+}
+
+function appendTextCta(text, template) {
+  const ctaText = String(template?.ctaText || "").trim();
+  const href = buildEmailCtaHref(template);
+  if (!ctaText || !href) return text;
+  const current = String(text || "").trimEnd();
+  return `${current}${current ? "\n\n" : ""}${ctaText}: ${href}`;
+}
+
 async function renderEmailTemplate(templateKey, values) {
   const template = await EmailTemplate.findOne({ key: templateKey }).lean();
   if (template && template.isActive === false) {
@@ -443,8 +525,14 @@ async function renderEmailTemplate(templateKey, values) {
   const subjectTemplate = template?.subject || fallback.subject || "";
   const textTemplate = template?.textContent || fallback.text || "";
   const htmlTemplate = template?.htmlContent || fallback.html || "";
-  const text = renderTemplate(textTemplate, values);
-  const html = renderTemplate(htmlTemplate, escapedValues(values)).trim() || buildHtmlFallback(text);
+  const renderedCtaTemplate = template ? {
+    ...template,
+    ctaText: renderTemplate(template.ctaText, values),
+    ctaUrl: renderTemplate(template.ctaUrl, values),
+  } : null;
+  const text = appendTextCta(renderTemplate(textTemplate, values), renderedCtaTemplate);
+  const ctaHtml = buildEmailCtaHtml(renderedCtaTemplate);
+  const html = appendEmailCta(renderTemplate(htmlTemplate, escapedValues(values)), ctaHtml).trim() || buildHtmlFallback(text);
 
   return {
     skipped: false,
