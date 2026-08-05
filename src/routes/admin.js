@@ -349,6 +349,71 @@ function renderTemplate(template, values) {
   return String(template || "").replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_match, key) => String(values[key] ?? ""));
 }
 
+function escapeCtaHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function isValidCtaUrl(value) {
+  const url = String(value || "").trim();
+  if (!url || /\s/.test(url)) return false;
+  if (/^https?:\/\//i.test(url)) {
+    try {
+      const parsed = new URL(url);
+      return Boolean(parsed.hostname);
+    } catch {
+      return false;
+    }
+  }
+  return /^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(url);
+}
+
+function normalizeEmailCtaPayload(payload = {}, existing = {}) {
+  const openIn = ["app", "website", "auto"].includes(String(payload.openIn ?? existing.openIn)) ? String(payload.openIn ?? existing.openIn) : "auto";
+  const buttonAlignment = ["left", "center", "right"].includes(String(payload.buttonAlignment ?? existing.buttonAlignment)) ? String(payload.buttonAlignment ?? existing.buttonAlignment) : "center";
+  const hexOrDefault = (value, fallback) => /^#[0-9a-f]{6}$/i.test(String(value || "").trim()) ? String(value).trim() : fallback;
+  return {
+    ctaEnabled: Boolean(payload.ctaEnabled ?? existing.ctaEnabled ?? false),
+    ctaText: String(payload.ctaText ?? existing.ctaText ?? "").trim(),
+    ctaType: String(payload.ctaType ?? existing.ctaType ?? "none").trim() || "none",
+    ctaUrl: String(payload.ctaUrl ?? existing.ctaUrl ?? "").trim(),
+    openIn,
+    buttonColor: hexOrDefault(payload.buttonColor ?? existing.buttonColor, "#2563eb"),
+    buttonTextColor: hexOrDefault(payload.buttonTextColor ?? existing.buttonTextColor, "#ffffff"),
+    buttonAlignment,
+  };
+}
+
+function buildEmailCtaHtml(template) {
+  if (!template?.ctaEnabled) return "";
+  const text = String(template.ctaText || "").trim();
+  const href = String(template.ctaUrl || "").trim();
+  if (!text || !isValidCtaUrl(href)) return "";
+  const alignment = ["left", "center", "right"].includes(String(template.buttonAlignment)) ? String(template.buttonAlignment) : "center";
+  const buttonColor = /^#[0-9a-f]{6}$/i.test(String(template.buttonColor || "")) ? template.buttonColor : "#2563eb";
+  const buttonTextColor = /^#[0-9a-f]{6}$/i.test(String(template.buttonTextColor || "")) ? template.buttonTextColor : "#ffffff";
+  return `<table role="presentation" border="0" cellpadding="0" cellspacing="0" width="100%" style="border-collapse:collapse;margin:24px 0 8px 0;"><tr><td align="${alignment}" style="padding:0;text-align:${alignment};"><a href="${escapeCtaHtml(href)}" target="_blank" role="button" style="display:inline-block;background:${buttonColor};color:${buttonTextColor};font-family:Arial,Helvetica,sans-serif;font-size:16px;font-weight:700;line-height:20px;text-decoration:none;border-radius:6px;padding:13px 22px;border:1px solid ${buttonColor};mso-padding-alt:0;text-align:center;">${escapeCtaHtml(text)}</a></td></tr></table>`;
+}
+
+function appendEmailCta(htmlContent, ctaHtml) {
+  if (!ctaHtml) return htmlContent;
+  const html = String(htmlContent || "");
+  if (/<\/body\s*>/i.test(html)) return html.replace(/<\/body\s*>/i, `${ctaHtml}</body>`);
+  return `${html}${ctaHtml}`;
+}
+
+function appendTextCta(textContent, template) {
+  if (!template?.ctaEnabled) return textContent;
+  const text = String(template.ctaText || "").trim();
+  const href = String(template.ctaUrl || "").trim();
+  if (!text || !isValidCtaUrl(href)) return textContent;
+  const current = String(textContent || "").trimEnd();
+  return `${current}${current ? "\n\n" : ""}${text}: ${href}`;
+}
+
 function sampleEmailVariables(overrides = {}) {
   const now = new Date();
   return {
@@ -10092,10 +10157,11 @@ const emailTemplateService = createCrudService({
     sampleData: payload.sampleData || {},
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : true,
     isDefault: payload.isDefault !== undefined ? Boolean(payload.isDefault) : false,
+    ...normalizeEmailCtaPayload(payload),
     createdBy: String(payload.createdBy || ""),
     updatedBy: String(payload.updatedBy || ""),
   }),
-  beforeUpdate: async (_existing, payload) => ({
+  beforeUpdate: async (existing, payload) => ({
     ...payload,
     ...(payload.key !== undefined ? { key: String(payload.key || "").trim() } : {}),
     ...(payload.name !== undefined ? { name: String(payload.name || "").trim() } : {}),
@@ -10109,6 +10175,7 @@ const emailTemplateService = createCrudService({
     ...(payload.sampleData !== undefined ? { sampleData: payload.sampleData } : {}),
     ...(payload.isActive !== undefined ? { isActive: Boolean(payload.isActive) } : {}),
     ...(payload.isDefault !== undefined ? { isDefault: Boolean(payload.isDefault) } : {}),
+    ...normalizeEmailCtaPayload(payload, existing),
     ...(payload.updatedBy !== undefined ? { updatedBy: String(payload.updatedBy || "") } : {}),
   }),
 });
@@ -10240,11 +10307,19 @@ router.post(
     const template = await EmailTemplate.findById(req.params.id);
     if (!template) throw new AppError("Email template not found", 404);
     const values = sampleEmailVariables({ ...(template.sampleData || {}), ...(req.body?.variables || {}) });
+    const renderedCtaTemplate = {
+      ...template.toObject(),
+      ctaText: renderTemplate(template.ctaText, values),
+      ctaUrl: renderTemplate(template.ctaUrl, values),
+    };
+    const ctaHtml = buildEmailCtaHtml(renderedCtaTemplate);
+    const htmlContent = renderTemplate(template.htmlContent, values);
+    const textContent = renderTemplate(template.textContent, values);
     sendResponse(res, {
       data: {
         subject: renderTemplate(template.subject, values),
-        htmlContent: renderTemplate(template.htmlContent, values),
-        textContent: renderTemplate(template.textContent, values),
+        htmlContent: appendEmailCta(htmlContent, ctaHtml),
+        textContent: appendTextCta(textContent, renderedCtaTemplate),
         variables: values,
       },
     });
@@ -10258,7 +10333,23 @@ router.post(
     if (!template) throw new AppError("Email template not found", 404);
     const to = String(req.body?.to || "").trim();
     if (!to) throw new AppError("Test recipient email is required", 400);
-    const result = await sendTemplatedEmail(template.key, to, req.body?.variables || {});
+    const settings = await InvoiceSettings.findOne({ key: "default" });
+    const values = sampleEmailVariables({ ...(template.sampleData || {}), ...(req.body?.variables || {}), email: to });
+    const renderedCtaTemplate = {
+      ...template.toObject(),
+      ctaText: renderTemplate(template.ctaText, values),
+      ctaUrl: renderTemplate(template.ctaUrl, values),
+    };
+    const ctaHtml = buildEmailCtaHtml(renderedCtaTemplate);
+    const htmlContent = appendEmailCta(renderTemplate(template.htmlContent, values), ctaHtml);
+    const textContent = appendTextCta(renderTemplate(template.textContent, values), renderedCtaTemplate);
+    const result = await sendEmail({
+      smtp: settings?.smtp || {},
+      to,
+      subject: renderTemplate(template.subject, values),
+      html: htmlContent || buildDefaultHtmlBody(textContent),
+      text: textContent,
+    });
     sendResponse(res, { data: result, message: result.skipped ? "Test email skipped" : "Test email sent" });
   }),
 );

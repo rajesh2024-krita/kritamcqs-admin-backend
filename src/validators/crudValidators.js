@@ -108,7 +108,7 @@ export const yearBodySchema = z.object({
   examType: examTypeSchema,
 });
 
-export const emailTemplateBodySchema = z.object({
+const emailTemplateBodySchemaBase = z.object({
   key: z.string().trim().min(2).max(120),
   name: z.string().trim().min(2).max(120),
   type: z.enum([
@@ -139,7 +139,31 @@ export const emailTemplateBodySchema = z.object({
   sampleData: z.record(z.any()).optional().default({}),
   isActive: z.boolean().optional().default(true),
   isDefault: z.boolean().optional().default(false),
+  ctaEnabled: z.boolean().optional().default(false),
+  ctaText: z.string().trim().max(80).optional().or(z.literal("")),
+  ctaType: z.string().trim().max(80).optional().default("none"),
+  ctaUrl: z.string().trim().max(1000).optional().or(z.literal("")),
+  openIn: z.enum(["app", "website", "auto"]).optional().default("auto"),
+  buttonColor: z.string().trim().max(32).optional().default("#2563eb"),
+  buttonTextColor: z.string().trim().max(32).optional().default("#ffffff"),
+  buttonAlignment: z.enum(["left", "center", "right"]).optional().default("center"),
 });
+
+function validateEmailTemplateCta(value, ctx) {
+  if (!value.ctaEnabled) return;
+  const ctaText = String(value.ctaText || "").trim();
+  const ctaUrl = String(value.ctaUrl || "").trim();
+  if (!ctaText) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaText"], message: "CTA button text is required when CTA is enabled." });
+  }
+  if (!ctaUrl) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "CTA URL / Deep Link is required when CTA is enabled." });
+  } else if (!/^https?:\/\/\S+$/i.test(ctaUrl) && !/^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(ctaUrl)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "CTA URL / Deep Link must be a valid HTTPS URL or custom deep link." });
+  }
+}
+
+export const emailTemplateBodySchema = emailTemplateBodySchemaBase.superRefine(validateEmailTemplateCta);
 
 export const questionTypeBodySchema = z.object({
   name: z.string().min(2).max(120),
@@ -560,7 +584,7 @@ export const updateSchemas = {
   listStyle: z.object({ body: listStyleBodySchema.partial() }),
   question: z.object({ body: questionUpdateBodySchema }),
   user: z.object({ body: userUpdateBodySchema }),
-  emailTemplate: z.object({ body: emailTemplateBodySchema.partial() }),
+  emailTemplate: z.object({ body: emailTemplateBodySchemaBase.partial().superRefine(validateEmailTemplateCta) }),
   coupon: z.object({ body: couponBodySchema.partial() }),
   subscriptionPlan: z.object({ body: subscriptionPlanBodySchema.partial() }),
   subscriptionFreeCard: z.object({ body: subscriptionFreeCardBodySchema.partial() }),

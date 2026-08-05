@@ -300,6 +300,14 @@ export function buildDefaultTemplate(definition) {
     sampleData: {},
     isActive: true,
     isDefault: true,
+    ctaEnabled: false,
+    ctaText: "",
+    ctaType: "none",
+    ctaUrl: "",
+    openIn: "auto",
+    buttonColor: "#2563eb",
+    buttonTextColor: "#ffffff",
+    buttonAlignment: "center",
   };
 }
 
