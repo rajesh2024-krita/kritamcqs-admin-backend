@@ -57,6 +57,7 @@ export * from "./UserNotification.js";
 export * from "./SupportTicket.js";
 export * from "./ContactMessage.js";
 export * from "./EmailTemplate.js";
+export * from "./CtaConfig.js";
 export * from "./EmailLog.js";
 export * from "./SubscriptionPageTemplate.js";
 export * from "./DashboardCarouselBanner.js";

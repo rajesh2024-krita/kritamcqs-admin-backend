@@ -22,6 +22,8 @@ const userNotificationSchema = new Schema(
     pushStatus: { type: String, default: "" },
     pushError: { type: String, default: "" },
     templateKey: { type: String, default: "" },
+    ctaConfigId: { type: String, default: "", index: true },
+    ctaText: { type: String, default: "" },
     sentAt: Date,
     readAt: Date,
   },

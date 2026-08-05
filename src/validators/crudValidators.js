@@ -139,6 +139,7 @@ const emailTemplateBodySchemaBase = z.object({
   sampleData: z.record(z.any()).optional().default({}),
   isActive: z.boolean().optional().default(true),
   isDefault: z.boolean().optional().default(false),
+  ctaConfigId: z.string().trim().max(120).optional().or(z.literal("")),
   ctaEnabled: z.boolean().optional().default(false),
   ctaText: z.string().trim().max(80).optional().or(z.literal("")),
   ctaType: z.string().trim().max(80).optional().default("none"),
@@ -158,7 +159,7 @@ function validateEmailTemplateCta(value, ctx) {
   }
   if (!ctaUrl) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "CTA URL / Deep Link is required when CTA is enabled." });
-  } else if (!/^https?:\/\/\S+$/i.test(ctaUrl) && !/^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(ctaUrl)) {
+  } else if (!/^\/[^\s]*$/.test(ctaUrl) && !/^https?:\/\/\S+$/i.test(ctaUrl) && !/^[a-z][a-z0-9+.-]*:\/\/\S+$/i.test(ctaUrl)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["ctaUrl"], message: "CTA URL / Deep Link must be a valid HTTPS URL or custom deep link." });
   }
 }

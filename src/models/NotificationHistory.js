@@ -8,6 +8,7 @@ const notificationHistorySchema = new Schema(
     message: { type: String, default: "" },
     image: { type: String, trim: true, default: "" },
     deepLink: { type: String, trim: true, default: "/notifications" },
+    ctaConfigId: { type: String, trim: true, default: "", index: true },
     ctaText: { type: String, trim: true, default: "" },
     targetScreen: { type: String, trim: true, default: "" },
     emailTemplateId: { type: String, trim: true, default: "" },

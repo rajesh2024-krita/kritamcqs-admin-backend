@@ -16,6 +16,7 @@ import {
   AdminActivityLog,
   AdminLoginHistory,
   ContactMessage,
+  CtaConfig,
   Topic,
   Coupon,
   CmsMenuItem,
@@ -360,6 +361,7 @@ function escapeCtaHtml(value) {
 function isValidCtaUrl(value) {
   const url = String(value || "").trim();
   if (!url || /\s/.test(url)) return false;
+  if (/^\/[^\s]*$/.test(url)) return true;
   if (/^https?:\/\//i.test(url)) {
     try {
       const parsed = new URL(url);
@@ -390,7 +392,8 @@ function normalizeEmailCtaPayload(payload = {}, existing = {}) {
 function buildEmailCtaHtml(template) {
   if (!template?.ctaEnabled) return "";
   const text = String(template.ctaText || "").trim();
-  const href = String(template.ctaUrl || "").trim();
+  const rawHref = String(template.ctaUrl || "").trim();
+  const href = rawHref.startsWith("/") ? `https://app.kritamcqs.com${rawHref}` : rawHref;
   if (!text || !isValidCtaUrl(href)) return "";
   const alignment = ["left", "center", "right"].includes(String(template.buttonAlignment)) ? String(template.buttonAlignment) : "center";
   const buttonColor = /^#[0-9a-f]{6}$/i.test(String(template.buttonColor || "")) ? template.buttonColor : "#2563eb";
@@ -408,10 +411,36 @@ function appendEmailCta(htmlContent, ctaHtml) {
 function appendTextCta(textContent, template) {
   if (!template?.ctaEnabled) return textContent;
   const text = String(template.ctaText || "").trim();
-  const href = String(template.ctaUrl || "").trim();
+  const rawHref = String(template.ctaUrl || "").trim();
+  const href = rawHref.startsWith("/") ? `https://app.kritamcqs.com${rawHref}` : rawHref;
   if (!text || !isValidCtaUrl(href)) return textContent;
   const current = String(textContent || "").trimEnd();
   return `${current}${current ? "\n\n" : ""}${text}: ${href}`;
+}
+
+function normalizeCtaConfigPayload(payload = {}, existing = {}) {
+  const cta = normalizeEmailCtaPayload({ ...payload, ctaEnabled: true }, existing);
+  const channel = ["email", "push", "both"].includes(String(payload.channel ?? existing.channel)) ? String(payload.channel ?? existing.channel) : "both";
+  return {
+    name: String(payload.name ?? existing.name ?? "").trim(),
+    description: String(payload.description ?? existing.description ?? "").trim(),
+    channel,
+    ctaText: cta.ctaText,
+    ctaType: cta.ctaType,
+    ctaUrl: cta.ctaUrl,
+    openIn: cta.openIn,
+    buttonColor: cta.buttonColor,
+    buttonTextColor: cta.buttonTextColor,
+    buttonAlignment: cta.buttonAlignment,
+    isActive: payload.isActive === undefined ? existing.isActive !== false : Boolean(payload.isActive),
+  };
+}
+
+function assertValidCtaConfig(payload) {
+  if (!payload.name) throw new AppError("CTA name is required", 400);
+  if (!payload.ctaText) throw new AppError("CTA button text is required", 400);
+  if (!payload.ctaUrl) throw new AppError("CTA URL / Deep Link is required", 400);
+  if (!isValidCtaUrl(payload.ctaUrl)) throw new AppError("CTA URL / Deep Link must be a valid HTTPS URL or custom deep link", 400);
 }
 
 function sampleEmailVariables(overrides = {}) {
@@ -2794,6 +2823,8 @@ const notificationTemplateSchema = z.object({
   message: z.string().trim().min(1).max(500),
   image: z.string().trim().max(500).optional().default(""),
   deepLink: z.string().trim().max(500).optional().default("/notifications"),
+  ctaConfigId: z.string().trim().max(120).optional().default(""),
+  ctaText: z.string().trim().max(120).optional().default(""),
   targetType: z.enum(notificationCenterTargetValues).optional().default("all"),
   category: z.enum(notificationCenterCategoryValues).optional().default("custom"),
   sound: z.enum(notificationCenterSoundValues).optional().default("default"),
@@ -2809,6 +2840,7 @@ const notificationCenterSendSchema = z.object({
   message: z.string().trim().max(500).optional().default(""),
   image: z.string().trim().max(500).optional().default(""),
   deepLink: z.string().trim().max(500).optional().default("/notifications"),
+  ctaConfigId: z.string().trim().max(120).optional().default(""),
   ctaText: z.string().trim().max(120).optional().default(""),
   targetScreen: z.string().trim().max(120).optional().default(""),
   emailTemplateId: z.string().trim().optional().default(""),
@@ -7524,6 +7556,8 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
       dedupeKey: `${dedupePrefix}:${String(user._id || user.id || "")}`,
       visibleInApp: true,
       linkUrl: payload.deepLink || "/notifications",
+      ctaConfigId: payload.ctaConfigId || "",
+      ctaText: payload.ctaText || "",
       imageUrl: payload.image || "",
       targetGroup: payload.targetType || "all",
       deliveryMode: "notification",
@@ -7561,6 +7595,7 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
     message: payload.message || "",
     image: payload.image || "",
     deepLink: payload.deepLink || "/notifications",
+    ctaConfigId: payload.ctaConfigId || "",
     ctaText: payload.ctaText || "",
     targetScreen: payload.targetScreen || "",
     emailTemplateId: payload.emailTemplateId || "",
@@ -7599,6 +7634,7 @@ async function processScheduledNotification(item, req = {}) {
     message: item.message,
     image: item.image,
     deepLink: item.deepLink,
+    ctaConfigId: item.ctaConfigId,
     ctaText: item.ctaText,
     targetScreen: item.targetScreen,
     emailTemplateId: item.emailTemplateId,
@@ -10138,6 +10174,57 @@ router.use("/dashboard-carousel-banners", createCrudRouter({ key: "dashboardCaro
 router.use("/subscription-page-templates", createCrudRouter({ key: "subscriptionPageTemplate", label: "Subscription Page Template", service: subscriptionPageTemplateService }));
 router.use("/explanation-preview-templates", createCrudRouter({ key: "explanationPreviewTemplate", label: "Explanation Preview Template", service: explanationPreviewTemplateService }));
 
+router.get(
+  "/cta-configs",
+  asyncHandler(async (req, res) => {
+    const filters = {};
+    const channel = String(req.query.channel || "").trim();
+    if (["email", "push"].includes(channel)) filters.channel = { $in: [channel, "both"] };
+    if (req.query.isActive !== undefined) filters.isActive = String(req.query.isActive) !== "false";
+    const search = String(req.query.search || "").trim();
+    if (search) filters.$or = [{ name: new RegExp(search, "i") }, { ctaText: new RegExp(search, "i") }, { ctaUrl: new RegExp(search, "i") }, { ctaType: new RegExp(search, "i") }];
+    const items = await CtaConfig.find(filters).sort({ updatedAt: -1, name: 1 });
+    sendResponse(res, { data: items });
+  }),
+);
+
+router.post(
+  "/cta-configs",
+  asyncHandler(async (req, res) => {
+    const payload = normalizeCtaConfigPayload(req.body || {});
+    assertValidCtaConfig(payload);
+    const item = await CtaConfig.create({
+      ...payload,
+      createdBy: String(req.admin?.name || req.admin?.email || "Admin"),
+      updatedBy: String(req.admin?.name || req.admin?.email || "Admin"),
+    });
+    sendResponse(res, { status: 201, data: item, message: "CTA configuration created" });
+  }),
+);
+
+router.put(
+  "/cta-configs/:id",
+  asyncHandler(async (req, res) => {
+    const item = await CtaConfig.findById(req.params.id);
+    if (!item) throw new AppError("CTA configuration not found", 404);
+    const payload = normalizeCtaConfigPayload(req.body || {}, item);
+    assertValidCtaConfig(payload);
+    item.set({ ...payload, updatedBy: String(req.admin?.name || req.admin?.email || "Admin") });
+    await item.save();
+    sendResponse(res, { data: item, message: "CTA configuration updated" });
+  }),
+);
+
+router.delete(
+  "/cta-configs/:id",
+  asyncHandler(async (req, res) => {
+    const item = await CtaConfig.findById(req.params.id);
+    if (!item) throw new AppError("CTA configuration not found", 404);
+    await CtaConfig.findByIdAndDelete(req.params.id);
+    sendResponse(res, { data: null, message: "CTA configuration deleted" });
+  }),
+);
+
 // Email Templates (System)
 const emailTemplateService = createCrudService({
   model: EmailTemplate,
@@ -10157,6 +10244,7 @@ const emailTemplateService = createCrudService({
     sampleData: payload.sampleData || {},
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : true,
     isDefault: payload.isDefault !== undefined ? Boolean(payload.isDefault) : false,
+    ctaConfigId: String(payload.ctaConfigId || "").trim(),
     ...normalizeEmailCtaPayload(payload),
     createdBy: String(payload.createdBy || ""),
     updatedBy: String(payload.updatedBy || ""),
@@ -10175,6 +10263,7 @@ const emailTemplateService = createCrudService({
     ...(payload.sampleData !== undefined ? { sampleData: payload.sampleData } : {}),
     ...(payload.isActive !== undefined ? { isActive: Boolean(payload.isActive) } : {}),
     ...(payload.isDefault !== undefined ? { isDefault: Boolean(payload.isDefault) } : {}),
+    ...(payload.ctaConfigId !== undefined ? { ctaConfigId: String(payload.ctaConfigId || "").trim() } : {}),
     ...normalizeEmailCtaPayload(payload, existing),
     ...(payload.updatedBy !== undefined ? { updatedBy: String(payload.updatedBy || "") } : {}),
   }),

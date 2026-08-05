@@ -36,6 +36,7 @@ const EmailTemplateSchema = new mongoose.Schema(
     sampleData: { type: mongoose.Schema.Types.Mixed, default: {} },
     isActive: { type: Boolean, default: true },
     isDefault: { type: Boolean, default: false },
+    ctaConfigId: { type: String, default: "", index: true },
     ctaEnabled: { type: Boolean, default: false },
     ctaText: { type: String, default: "" },
     ctaType: { type: String, default: "none" },
