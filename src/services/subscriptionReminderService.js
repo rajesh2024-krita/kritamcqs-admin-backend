@@ -225,7 +225,13 @@ export const subscriptionReminderService = {
     item.updatedBy = admin?._id;
     await item.save();
     if (status === "disabled") {
-      await SubscriptionReminder.updateMany({ status: "pending" }, { $set: { status: "stopped", stoppedReason: "Reminder disabled" } });
+      await SubscriptionReminder.updateMany(
+        { status: "pending" },
+        {
+          $set: { status: "stopped", stoppedReason: "Reminder disabled" },
+          $unset: { activeKey: "", immediateReminderSending: "", scheduledReminderSending: "" },
+        },
+      );
     }
     await audit(status === "enabled" ? "Enabled" : "Disabled", previous, item.toObject(), admin);
     return item;
@@ -233,7 +239,14 @@ export const subscriptionReminderService = {
 
   async stopReminder(id, reason = "Stopped by admin") {
     assertObjectId(id, "Invalid reminder id");
-    const item = await SubscriptionReminder.findByIdAndUpdate(id, { status: "stopped", stoppedReason: reason }, { new: true });
+    const item = await SubscriptionReminder.findByIdAndUpdate(
+      id,
+      {
+        $set: { status: "stopped", stoppedReason: reason },
+        $unset: { activeKey: "", immediateReminderSending: "", scheduledReminderSending: "" },
+      },
+      { new: true },
+    );
     if (!item) throw new AppError("Subscription reminder not found", 404);
     return item;
   },
@@ -242,9 +255,20 @@ export const subscriptionReminderService = {
     assertObjectId(id, "Invalid reminder id");
     const config = await ReminderConfiguration.findOne({ status: "enabled" }).sort({ priority: 1, updatedAt: -1 });
     if (!config) throw new AppError("Enable a reminder configuration before restarting", 400);
+    const existing = await SubscriptionReminder.findById(id);
+    if (!existing) throw new AppError("Subscription reminder not found", 404);
     const item = await SubscriptionReminder.findByIdAndUpdate(
       id,
-      { status: "pending", purchaseCompleted: false, nextReminderDate: nextDateFromConfig(config), stoppedReason: "" },
+      {
+        $set: {
+          status: "pending",
+          purchaseCompleted: false,
+          nextReminderDate: nextDateFromConfig(config),
+          stoppedReason: "",
+          activeKey: `subscription-reminder:${String(existing.userId)}`,
+        },
+        $unset: { immediateReminderSending: "", scheduledReminderSending: "" },
+      },
       { new: true },
     );
     if (!item) throw new AppError("Subscription reminder not found", 404);

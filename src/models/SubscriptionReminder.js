@@ -9,6 +9,7 @@ const subscriptionReminderSchema = new Schema(
     subscriptionPlan: { type: String, trim: true, default: "" },
     eventType: { type: String, trim: true, required: true, index: true },
     eventTime: { type: Date, default: Date.now, index: true },
+    activeKey: { type: String, trim: true, index: true },
     platform: { type: String, enum: ["Android", "iOS", "Web"], default: "Android", index: true },
     status: { type: String, enum: subscriptionReminderStatusValues, default: "pending", index: true },
     reminderCount: { type: Number, default: 0 },
@@ -17,6 +18,9 @@ const subscriptionReminderSchema = new Schema(
     purchaseCompleted: { type: Boolean, default: false, index: true },
     completedDate: { type: Date },
     stoppedReason: { type: String, trim: true, default: "" },
+    immediateReminderSentAt: { type: Date },
+    immediateReminderSending: { type: Boolean, default: false },
+    scheduledReminderSending: { type: Boolean, default: false },
   },
   baseJsonOptions,
 );
