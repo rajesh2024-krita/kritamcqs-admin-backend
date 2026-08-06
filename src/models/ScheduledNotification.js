@@ -3,6 +3,7 @@ import { Schema, model, models, baseJsonOptions } from "./base.js";
 const scheduledNotificationSchema = new Schema(
   {
     campaignName: { type: String, trim: true, default: "" },
+    notificationType: { type: String, enum: ["standard", "reminder_subscription"], default: "standard", index: true },
     deliveryType: { type: String, enum: ["notification", "email", "both"], default: "notification", index: true },
     title: { type: String, trim: true, default: "" },
     message: { type: String, default: "" },
@@ -15,7 +16,7 @@ const scheduledNotificationSchema = new Schema(
     emailTemplateKey: { type: String, trim: true, default: "" },
     emailSubject: { type: String, trim: true, default: "" },
     emailBody: { type: String, default: "" },
-    targetType: { type: String, enum: ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "selected"], default: "all", index: true },
+    targetType: { type: String, enum: ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "reminder_subscription", "selected"], default: "all", index: true },
     selectedUsers: { type: [String], default: [] },
     category: { type: String, enum: ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"], default: "custom" },
     sound: { type: String, enum: ["default", "custom", "silent"], default: "default" },
@@ -25,6 +26,9 @@ const scheduledNotificationSchema = new Schema(
     recurrence: { type: String, enum: ["none", "daily", "weekly", "monthly", "custom"], default: "none", index: true },
     recurrenceInterval: { type: Number, default: 1 },
     recurrenceUnit: { type: String, enum: ["Minutes", "Hours", "Days"], default: "Days" },
+    reminderStages: { type: [Schema.Types.Mixed], default: [] },
+    reminderStageIndex: { type: Number, default: 0, index: true },
+    reminderStageId: { type: String, trim: true, default: "", index: true },
     pausedAt: { type: Date },
     status: { type: String, enum: ["pending", "sent", "failed", "cancelled", "draft", "paused"], default: "pending", index: true },
     createdBy: { type: String, default: "" },
