@@ -2,7 +2,7 @@ import { Router } from "express";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { sendResponse } from "../utils/apiResponse.js";
 import { requireAdmin } from "../middlewares/auth.js";
-import { subscriptionReminderService } from "../services/subscriptionReminderService.js";
+import { subscriptionReminderNotificationCenterService as subscriptionReminderService } from "../services/subscriptionReminderNotificationCenterService.js";
 
 export const adminSubscriptionReminderRouter = Router();
 

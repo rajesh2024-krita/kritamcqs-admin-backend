@@ -2930,11 +2930,11 @@ const notificationBroadcastSchema = z.object({
   selectedUsers: z.string().trim().optional().default(""),
 });
 
-const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "reminder_subscription", "selected"];
+const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "selected"];
 const notificationCenterCategoryValues = ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"];
 const notificationCenterSoundValues = ["default", "custom", "silent"];
 const notificationCenterPriorityValues = ["high", "normal", "low"];
-const notificationCenterTypeValues = ["standard", "reminder_subscription"];
+const notificationCenterTypeValues = ["standard"];
 
 const reminderStageSchema = z.object({
   id: z.string().trim().optional().default(""),
@@ -2997,22 +2997,8 @@ const notificationCenterSendSchema = z.object({
   reminderStages: z.array(reminderStageSchema).optional().default([]),
   action: z.enum(["send", "schedule", "draft", "automate"]).optional().default("send"),
 }).superRefine((payload, ctx) => {
-  if (payload.targetType === "reminder_subscription") payload.notificationType = "reminder_subscription";
-  const isReminderSubscription = payload.notificationType === "reminder_subscription" || payload.targetType === "reminder_subscription";
   const shouldNotify = ["notification", "both"].includes(payload.deliveryType);
   const shouldEmail = ["email", "both"].includes(payload.deliveryType);
-  if (isReminderSubscription) {
-    const enabledStages = (payload.reminderStages || []).filter((stage) => stage.enabled !== false);
-    if (!enabledStages.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reminderStages"], message: "At least one enabled reminder stage is required" });
-    enabledStages.forEach((stage, index) => {
-      if (shouldNotify && !(stage.title || payload.title)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reminderStages", index, "title"], message: "Reminder notification title is required" });
-      if (shouldNotify && !(stage.message || payload.message)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reminderStages", index, "message"], message: "Reminder notification message is required" });
-      if (shouldEmail && !(stage.emailTemplateId || stage.emailTemplateKey || payload.emailTemplateId || payload.emailTemplateKey)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reminderStages", index, "emailTemplateId"], message: "Reminder email template is required" });
-      if (shouldEmail && !(stage.emailSubject || payload.emailSubject)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reminderStages", index, "emailSubject"], message: "Reminder email subject is required" });
-      if (shouldEmail && !(stage.emailBody || payload.emailBody)) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["reminderStages", index, "emailBody"], message: "Reminder email body is required" });
-    });
-    return;
-  }
   if (shouldNotify && !payload.title) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["title"], message: "Notification title is required" });
   if (shouldNotify && !payload.message) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["message"], message: "Notification message is required" });
   if (shouldEmail && !payload.emailTemplateId && !payload.emailTemplateKey) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailTemplateId"], message: "Email template is required" });
@@ -3174,7 +3160,7 @@ async function getNotificationRecipients(targetGroup, selectedUsers = "") {
   if (targetGroup === "jee") return User.find({ isAdmin: { $ne: true }, examMode: { $in: ["JEE", "BOTH"] } }).lean();
   if (targetGroup === "active") return User.find({ isAdmin: { $ne: true }, isActive: { $ne: false }, isBlocked: { $ne: true } }).lean();
   if (targetGroup === "inactive") return User.find({ isAdmin: { $ne: true }, $or: [{ isActive: false }, { isBlocked: true }] }).lean();
-  if (targetGroup === "payment_pending" || targetGroup === "reminder_subscription") {
+  if (targetGroup === "payment_pending") {
     const users = await getPaymentPendingUsers();
     const values = selectedUserValues(selectedUsers);
     if (!values.length) return users;
@@ -7853,111 +7839,9 @@ function nextRecurringScheduleDate(item) {
   return next;
 }
 
-function dateWithReminderDelay(baseDate, stage = {}) {
-  const date = new Date(baseDate || Date.now());
-  const amount = Math.max(0, Number(stage.delayValue || 0));
-  const unit = stage.delayUnit || "Hours";
-  if (unit === "Minutes") date.setMinutes(date.getMinutes() + amount);
-  else if (unit === "Hours") date.setHours(date.getHours() + amount);
-  else date.setDate(date.getDate() + amount);
-  return date;
-}
-
-function payloadForReminderStage(item, stage = {}) {
-  const stageNumber = Number(item.reminderStageIndex || 0) + 1;
-  return {
-    campaignName: `${item.campaignName || "Reminder Subscription"} - ${stage.name || `Stage ${stageNumber}`}`,
-    deliveryType: item.deliveryType || "both",
-    title: stage.title || item.title,
-    message: stage.message || item.message,
-    image: item.image,
-    deepLink: stage.deepLink || item.deepLink || "/subscription",
-    ctaConfigId: stage.ctaConfigId || item.ctaConfigId,
-    ctaText: stage.ctaText || item.ctaText,
-    targetScreen: item.targetScreen || "subscription",
-    emailTemplateId: stage.emailTemplateId || item.emailTemplateId,
-    emailTemplateKey: stage.emailTemplateKey || item.emailTemplateKey,
-    emailSubject: stage.emailSubject || item.emailSubject,
-    emailBody: stage.emailBody || item.emailBody,
-    targetType: "reminder_subscription",
-    selectedUsers: item.selectedUsers || [],
-    category: "subscription",
-    sound: item.sound,
-    priority: item.priority,
-    action: "send",
-    dedupeKeyPrefix: `notification-center:reminder-subscription:${String(item._id)}:${String(item.scheduleDate?.toISOString?.() || item.scheduleDate || "")}:${item.reminderStageId || item.reminderStageIndex || 0}`,
-  };
-}
-
-function normalizeReminderStagesForStorage(payload) {
-  return (payload.reminderStages || [])
-    .map((stage, index) => ({
-      ...stage,
-      id: stage.id || `stage-${index + 1}`,
-      name: stage.name || `Reminder ${index + 1}`,
-      enabled: stage.enabled !== false,
-      delayValue: Math.max(0, Number(stage.delayValue || 0)),
-      delayUnit: stage.delayUnit || "Hours",
-    }))
-    .filter((stage) => stage.enabled !== false);
-}
-
-async function createReminderSubscriptionCampaigns(payload, selectedUsers, req) {
-  const stages = normalizeReminderStagesForStorage(payload);
-  if (!stages.length) throw new AppError("At least one enabled reminder stage is required", 400);
-  const baseDate = payload.action === "schedule"
-    ? new Date(payload.scheduleDate)
-    : new Date();
-  if (payload.action === "schedule" && (!payload.scheduleDate || Number.isNaN(baseDate.getTime()))) throw new AppError("Valid schedule date is required", 400);
-  const created = [];
-  const processNow = [];
-  const recurrence = payload.action === "automate" && (!payload.recurrence || payload.recurrence === "none") ? "daily" : payload.recurrence;
-
-  for (const [index, stage] of stages.entries()) {
-    const scheduleDate = dateWithReminderDelay(baseDate, stage);
-    const isImmediateStage = payload.action === "send" && scheduleDate.getTime() <= Date.now() + 1000;
-    const item = await ScheduledNotification.create({
-      ...payload,
-      notificationType: "reminder_subscription",
-      targetType: "reminder_subscription",
-      category: "subscription",
-      selectedUsers,
-      title: stage.title || payload.title,
-      message: stage.message || payload.message,
-      deepLink: stage.deepLink || payload.deepLink || "/subscription",
-      ctaConfigId: stage.ctaConfigId || payload.ctaConfigId,
-      ctaText: stage.ctaText || payload.ctaText,
-      emailTemplateId: stage.emailTemplateId || payload.emailTemplateId,
-      emailTemplateKey: stage.emailTemplateKey || payload.emailTemplateKey,
-      emailSubject: stage.emailSubject || payload.emailSubject,
-      emailBody: stage.emailBody || payload.emailBody,
-      scheduleDate,
-      recurring: payload.action === "automate" ? true : Boolean(payload.recurring),
-      recurrence,
-      status: payload.action === "draft" ? "draft" : "pending",
-      reminderStages: stages,
-      reminderStageIndex: index,
-      reminderStageId: stage.id,
-      createdBy: String(req.admin?._id || ""),
-      createdByName: req.admin?.name || req.admin?.email || "Admin",
-    });
-    created.push(item);
-    if (isImmediateStage) processNow.push(item);
-  }
-
-  const processed = [];
-  for (const item of processNow) {
-    processed.push(await processScheduledNotification(item, req));
-  }
-  return { created, processed };
-}
-
 async function processScheduledNotification(item, req = {}) {
   const recipients = await getNotificationRecipients(item.targetType, item.selectedUsers || []);
-  const stage = item.notificationType === "reminder_subscription"
-    ? (item.reminderStages || [])[Number(item.reminderStageIndex || 0)] || {}
-    : {};
-  const payload = item.notificationType === "reminder_subscription" ? payloadForReminderStage(item, stage) : {
+  const payload = {
     campaignName: item.campaignName,
     deliveryType: item.deliveryType || "notification",
     title: item.title,
@@ -8149,31 +8033,9 @@ router.post("/notifications/test", asyncHandler(async (req, res) => {
 router.post("/notifications/send", asyncHandler(async (req, res) => {
   const payload = notificationCenterSendSchema.parse(req.body || {});
   const selectedUsers = notificationCenterSelectedUsers(payload.selectedUsers);
-  const isReminderSubscription = payload.notificationType === "reminder_subscription" || payload.targetType === "reminder_subscription";
 
   if (payload.targetType === "selected" && !selectedUsers.length) {
     throw new AppError("Select at least one user before sending this campaign", 400);
-  }
-
-  if (isReminderSubscription) {
-    const result = await createReminderSubscriptionCampaigns(payload, selectedUsers, req);
-    res.status(201).json({
-      success: true,
-      message: payload.action === "draft"
-        ? "Reminder Subscription saved as draft"
-        : payload.action === "automate"
-          ? "Reminder Subscription automation configured"
-          : "Reminder Subscription scheduled",
-      data: {
-        created: result.created.map(serializeNotificationDoc),
-        processed: result.processed.map((item) => ({
-          history: serializeNotificationDoc(item.history),
-          delivery: item.delivery,
-          emailDelivery: item.emailDelivery,
-        })),
-      },
-    });
-    return;
   }
 
   if (payload.action === "draft") {
