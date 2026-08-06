@@ -3109,22 +3109,30 @@ function selectedUserValues(value = "") {
 }
 
 async function getPaymentPendingUserIds() {
-  const [paymentRows, reminderRows] = await Promise.all([
+  const reminderJobCollection = mongoose.connection.db?.collection("subscription_reminder_notification_center_jobs");
+  const [paymentRows, reminderRows, reminderJobRows] = await Promise.all([
     Subscription.find({
       $or: [
         { paymentStatus: { $in: ["PENDING", "FAILED"] } },
-        { status: { $in: ["pending", "failed", "cancelled"] } },
+        { status: { $in: ["pending", "failed", "cancelled", "timeout", "timed_out", "incomplete"] } },
       ],
     }).select("userId").lean(),
     SubscriptionReminder.find({
       status: "pending",
       purchaseCompleted: { $ne: true },
     }).select("userId").lean(),
+    reminderJobCollection
+      ? reminderJobCollection.find({
+          purchaseCompleted: { $ne: true },
+          status: { $in: ["pending", "sent", "failed", "partial"] },
+        }).project({ userId: 1 }).toArray()
+      : [],
   ]);
 
   const candidateIds = [...new Set([
     ...paymentRows.map((item) => String(item.userId || "")),
     ...reminderRows.map((item) => String(item.userId || "")),
+    ...reminderJobRows.map((item) => String(item.userId || "")),
   ].filter(Boolean))];
   if (!candidateIds.length) return [];
 
@@ -7948,7 +7956,7 @@ router.delete("/notifications/templates/:id", asyncHandler(async (req, res) => {
 }));
 
 router.get("/notifications/users", asyncHandler(async (req, res) => {
-  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 12)));
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 12)));
   const q = String(req.query.q || "").trim();
   const targetType = notificationCenterTargetValues.includes(String(req.query.targetType || ""))
     ? String(req.query.targetType)
