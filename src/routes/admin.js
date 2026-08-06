@@ -61,6 +61,7 @@ import {
   SessionAttempt,
   Subject,
   Subscription,
+  SubscriptionReminder,
   UserSubscription,
   SubscriptionPlan,
   SubscriptionFreeCard,
@@ -2288,6 +2289,47 @@ router.put("/website-content/landing", requireMainAdmin, asyncHandler(async (req
   res.json({ success: true, data: document });
 }));
 
+const freeUserSubscriptionCtaDefaults = {
+  enabled: true,
+  eyebrow: "NEET & JEE Unlock",
+  title: "Go Premium",
+  description: "Unlock unlimited questions, weak area analysis, and smart revision.",
+  imageUrl: "",
+  ctaText: "View Plans",
+  ctaLink: "/subscription",
+};
+
+function sanitizeFreeUserSubscriptionCta(value = {}) {
+  return {
+    enabled: value.enabled !== false,
+    eyebrow: String(value.eyebrow || freeUserSubscriptionCtaDefaults.eyebrow).trim().slice(0, 80),
+    title: String(value.title || freeUserSubscriptionCtaDefaults.title).trim().slice(0, 120),
+    description: String(value.description || freeUserSubscriptionCtaDefaults.description).trim().slice(0, 500),
+    imageUrl: String(value.imageUrl || "").trim().slice(0, 500),
+    ctaText: String(value.ctaText || freeUserSubscriptionCtaDefaults.ctaText).trim().slice(0, 80),
+    ctaLink: String(value.ctaLink || freeUserSubscriptionCtaDefaults.ctaLink).trim().slice(0, 500),
+  };
+}
+
+router.get("/free-user-subscription-cta", asyncHandler(async (_req, res) => {
+  const item = await WebsiteContent.findOneAndUpdate(
+    { key: "free-user-subscription-cta" },
+    { $setOnInsert: { key: "free-user-subscription-cta", content: freeUserSubscriptionCtaDefaults, status: "published" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  res.json({ success: true, data: sanitizeFreeUserSubscriptionCta(item.content || {}) });
+}));
+
+router.put("/free-user-subscription-cta", requireMainAdmin, asyncHandler(async (req, res) => {
+  const content = sanitizeFreeUserSubscriptionCta(req.body || {});
+  const item = await WebsiteContent.findOneAndUpdate(
+    { key: "free-user-subscription-cta" },
+    { $set: { content, status: "published" }, $setOnInsert: { key: "free-user-subscription-cta" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  res.json({ success: true, message: "Free user subscription CTA saved", data: sanitizeFreeUserSubscriptionCta(item.content || {}) });
+}));
+
 const offerTimerSettingsSchema = z.object({
   enabled: z.coerce.boolean().optional().default(false),
   title: z.string().trim().max(160).optional().default(""),
@@ -2880,7 +2922,7 @@ const notificationBroadcastSchema = z.object({
   title: z.string().trim().min(2).max(160),
   body: z.string().trim().min(1).max(3000),
   type: z.enum(["text", "image", "offer", "announcement", "update", "reminder"]).default("text"),
-  targetGroup: z.enum(["all", "premium", "non_premium", "new_registered", "selected", "highest_premium", "middle_premium", "lowest_premium"]).default("all"),
+  targetGroup: z.enum(["all", "premium", "non_premium", "new_registered", "selected", "highest_premium", "middle_premium", "lowest_premium", "payment_pending"]).default("all"),
   deliveryMode: z.enum(["notification", "email", "both", "push", "email_push"]).default("notification"),
   templateKey: z.string().trim().optional().default(""),
   variables: z.string().trim().optional().default("{}"),
@@ -2888,7 +2930,7 @@ const notificationBroadcastSchema = z.object({
   selectedUsers: z.string().trim().optional().default(""),
 });
 
-const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "selected"];
+const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "selected"];
 const notificationCenterCategoryValues = ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"];
 const notificationCenterSoundValues = ["default", "custom", "silent"];
 const notificationCenterPriorityValues = ["high", "normal", "low"];
@@ -2929,6 +2971,10 @@ const notificationCenterSendSchema = z.object({
   sound: z.enum(notificationCenterSoundValues).optional().default("default"),
   priority: z.enum(notificationCenterPriorityValues).optional().default("high"),
   scheduleDate: z.string().trim().optional().default(""),
+  recurring: z.coerce.boolean().optional().default(false),
+  recurrence: z.enum(["none", "daily", "weekly", "monthly", "custom"]).optional().default("none"),
+  recurrenceInterval: z.coerce.number().int().min(1).max(365).optional().default(1),
+  recurrenceUnit: z.enum(["Minutes", "Hours", "Days"]).optional().default("Days"),
   action: z.enum(["send", "schedule", "draft"]).optional().default("send"),
 }).superRefine((payload, ctx) => {
   const shouldNotify = ["notification", "both"].includes(payload.deliveryType);
@@ -3042,6 +3088,51 @@ function selectedUserValues(value = "") {
     .filter(Boolean);
 }
 
+async function getPaymentPendingUserIds() {
+  const [paymentRows, reminderRows] = await Promise.all([
+    Subscription.find({
+      $or: [
+        { paymentStatus: { $in: ["PENDING", "FAILED"] } },
+        { status: { $in: ["pending", "failed", "cancelled"] } },
+      ],
+    }).select("userId").lean(),
+    SubscriptionReminder.find({
+      status: "pending",
+      purchaseCompleted: { $ne: true },
+    }).select("userId").lean(),
+  ]);
+
+  const candidateIds = [...new Set([
+    ...paymentRows.map((item) => String(item.userId || "")),
+    ...reminderRows.map((item) => String(item.userId || "")),
+  ].filter(Boolean))];
+  if (!candidateIds.length) return [];
+
+  const paidRows = await Subscription.find({
+    userId: { $in: candidateIds },
+    $or: [
+      { paymentStatus: "PAID" },
+      { status: "active" },
+    ],
+  }).select("userId").lean();
+  const paidIds = new Set(paidRows.map((item) => String(item.userId || "")));
+  return candidateIds.filter((id) => !paidIds.has(id));
+}
+
+async function getPaymentPendingUsers() {
+  const ids = await getPaymentPendingUserIds();
+  if (!ids.length) return [];
+  const objectIds = ids.filter((id) => mongoose.isValidObjectId(id));
+  return User.find({
+    isAdmin: { $ne: true },
+    isPremium: { $ne: true },
+    $or: [
+      ...(objectIds.length ? [{ _id: { $in: objectIds } }] : []),
+      { _id: { $in: ids } },
+    ],
+  }).lean();
+}
+
 async function getNotificationRecipients(targetGroup, selectedUsers = "") {
   if (targetGroup === "all") return User.find({ isAdmin: { $ne: true } }).lean();
   if (targetGroup === "free" || targetGroup === "non_premium") return User.find({ isAdmin: { $ne: true }, isPremium: { $ne: true } }).lean();
@@ -3049,6 +3140,7 @@ async function getNotificationRecipients(targetGroup, selectedUsers = "") {
   if (targetGroup === "jee") return User.find({ isAdmin: { $ne: true }, examMode: { $in: ["JEE", "BOTH"] } }).lean();
   if (targetGroup === "active") return User.find({ isAdmin: { $ne: true }, isActive: { $ne: false }, isBlocked: { $ne: true } }).lean();
   if (targetGroup === "inactive") return User.find({ isAdmin: { $ne: true }, $or: [{ isActive: false }, { isBlocked: true }] }).lean();
+  if (targetGroup === "payment_pending") return getPaymentPendingUsers();
   if (targetGroup === "new_registered") {
     return User.find({ isAdmin: { $ne: true }, createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } }).lean();
   }
@@ -7701,6 +7793,26 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
   return { history, delivery, emailDelivery };
 }
 
+function nextRecurringScheduleDate(item) {
+  if (!item.recurring || item.recurrence === "none") return null;
+  const next = new Date(item.scheduleDate || Date.now());
+  const advance = () => {
+    if (item.recurrence === "daily") next.setDate(next.getDate() + 1);
+    else if (item.recurrence === "weekly") next.setDate(next.getDate() + 7);
+    else if (item.recurrence === "monthly") next.setMonth(next.getMonth() + 1);
+    else {
+      const amount = Math.max(1, Number(item.recurrenceInterval || 1));
+      const unit = item.recurrenceUnit || "Days";
+      if (unit === "Minutes") next.setMinutes(next.getMinutes() + amount);
+      else if (unit === "Hours") next.setHours(next.getHours() + amount);
+      else next.setDate(next.getDate() + amount);
+    }
+  };
+  advance();
+  while (next.getTime() <= Date.now()) advance();
+  return next;
+}
+
 async function processScheduledNotification(item, req = {}) {
   const recipients = await getNotificationRecipients(item.targetType, item.selectedUsers || []);
   const payload = {
@@ -7726,7 +7838,9 @@ async function processScheduledNotification(item, req = {}) {
   };
 
   const { history, delivery, emailDelivery } = await createNotificationHistory(payload, recipients, req, item._id);
-  item.status = history.status === "failed" ? "failed" : "sent";
+  const nextSchedule = nextRecurringScheduleDate(item);
+  item.status = nextSchedule ? "pending" : history.status === "failed" ? "failed" : "sent";
+  if (nextSchedule) item.scheduleDate = nextSchedule;
   item.sentAt = new Date();
   item.lastError = delivery.errors?.[0] || emailDelivery.logs?.find((log) => log.status === "failed" || log.status === "skipped")?.error || "";
   item.logs = [...(delivery.errors || []).map((error) => ({ channel: "notification", status: "failed", error })), ...(emailDelivery.logs || [])];
@@ -7810,6 +7924,12 @@ router.delete("/notifications/templates/:id", asyncHandler(async (req, res) => {
 router.get("/notifications/users", asyncHandler(async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit || 12)));
   const q = String(req.query.q || "").trim();
+  const targetType = notificationCenterTargetValues.includes(String(req.query.targetType || ""))
+    ? String(req.query.targetType)
+    : "";
+  let users = targetType && targetType !== "selected"
+    ? await getNotificationRecipients(targetType)
+    : null;
   const filter = { isAdmin: { $ne: true } };
   if (q) {
     const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -7821,7 +7941,14 @@ router.get("/notifications/users", asyncHandler(async (req, res) => {
     ];
   }
 
-  const users = await User.find(filter).select("_id name email mobile examMode isPremium").sort({ createdAt: -1 }).limit(limit).lean();
+  if (!users) {
+    users = await User.find(filter).select("_id name email mobile examMode isPremium").sort({ createdAt: -1 }).limit(limit).lean();
+  } else {
+    const lowerQ = q.toLowerCase();
+    users = users
+      .filter((user) => !q || [user.name, user.email, user.mobile, String(user._id)].some((value) => String(value || "").toLowerCase().includes(lowerQ)))
+      .slice(0, limit);
+  }
   const counts = await PushDeviceToken.aggregate([
     { $match: { userId: { $in: users.map((user) => String(user._id)) }, enabled: true, active: { $ne: false } } },
     { $group: { _id: "$userId", count: { $sum: 1 } } },
@@ -7840,6 +7967,41 @@ router.get("/notifications/users", asyncHandler(async (req, res) => {
       tokenCount: countByUser.get(String(user._id)) || 0,
     })),
   });
+}));
+
+router.get("/notifications/audiences", asyncHandler(async (_req, res) => {
+  const entries = await Promise.all(notificationCenterTargetValues
+    .filter((value) => value !== "selected")
+    .map(async (value) => {
+      const users = await getNotificationRecipients(value);
+      return { value, count: users.length };
+    }));
+  res.json({ success: true, data: entries });
+}));
+
+router.post("/notifications/test", asyncHandler(async (req, res) => {
+  const testTarget = String(req.body?.testTarget || "selected");
+  const payload = notificationCenterSendSchema.parse({
+    ...(req.body || {}),
+    emailTemplateKey: req.body?.emailTemplateKey || EMAIL_TEMPLATE_KEYS.NOTIFICATION_GENERAL,
+    action: "send",
+    targetType: "selected",
+  });
+  const selectedUsers = notificationCenterSelectedUsers(payload.selectedUsers || req.body?.testUser || "");
+  const testEmail = String(req.body?.testEmail || "").trim();
+  let recipients = [];
+  if (testTarget === "admin" && req.admin?._id) {
+    const adminUser = await User.findById(req.admin._id).lean();
+    if (adminUser) recipients = [adminUser];
+  } else if (selectedUsers.length) {
+    recipients = await getNotificationRecipients("selected", selectedUsers);
+  }
+  if (!recipients.length && testEmail) {
+    recipients = [{ _id: `test-email-${Date.now()}`, name: "Test Recipient", email: testEmail, mobile: "", isPremium: false }];
+  }
+  if (!recipients.length) throw new AppError("Select the admin device, a test user, or enter a test email", 400);
+  const { history, delivery, emailDelivery } = await createNotificationHistory({ ...payload, selectedUsers, action: "send" }, recipients, req);
+  res.status(201).json({ success: true, message: "Test notification processed", data: { ...serializeNotificationDoc(history), delivery, emailDelivery } });
 }));
 
 router.post("/notifications/send", asyncHandler(async (req, res) => {
@@ -7896,10 +8058,22 @@ router.get("/notifications/scheduled", asyncHandler(async (_req, res) => {
 router.put("/notifications/scheduled/:id", asyncHandler(async (req, res) => {
   const payload = { ...(req.body || {}) };
   if (payload.scheduleDate) payload.scheduleDate = new Date(payload.scheduleDate);
-  if (payload.status && !["pending", "sent", "failed", "cancelled", "draft"].includes(payload.status)) throw new AppError("Invalid scheduled campaign status", 400);
+  if (payload.status && !["pending", "sent", "failed", "cancelled", "draft", "paused"].includes(payload.status)) throw new AppError("Invalid scheduled campaign status", 400);
   const item = await ScheduledNotification.findByIdAndUpdate(req.params.id, payload, { new: true, runValidators: true });
   if (!item) throw new AppError("Scheduled notification not found", 404);
   res.json({ success: true, message: "Scheduled notification updated", data: serializeNotificationDoc(item) });
+}));
+
+router.post("/notifications/scheduled/:id/pause", asyncHandler(async (req, res) => {
+  const item = await ScheduledNotification.findByIdAndUpdate(req.params.id, { status: "paused", pausedAt: new Date() }, { new: true });
+  if (!item) throw new AppError("Scheduled notification not found", 404);
+  res.json({ success: true, message: "Scheduled notification paused", data: serializeNotificationDoc(item) });
+}));
+
+router.post("/notifications/scheduled/:id/resume", asyncHandler(async (req, res) => {
+  const item = await ScheduledNotification.findByIdAndUpdate(req.params.id, { status: "pending", pausedAt: undefined }, { new: true });
+  if (!item) throw new AppError("Scheduled notification not found", 404);
+  res.json({ success: true, message: "Scheduled notification resumed", data: serializeNotificationDoc(item) });
 }));
 
 router.delete("/notifications/scheduled/:id", asyncHandler(async (req, res) => {

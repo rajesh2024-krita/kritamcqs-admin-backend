@@ -9,7 +9,7 @@ const notificationTemplateSchema = new Schema(
     deepLink: { type: String, trim: true, default: "/notifications" },
     ctaConfigId: { type: String, trim: true, default: "", index: true },
     ctaText: { type: String, trim: true, default: "" },
-    targetType: { type: String, enum: ["all", "free", "premium", "neet", "jee", "selected"], default: "all", index: true },
+    targetType: { type: String, enum: ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "selected"], default: "all", index: true },
     category: { type: String, enum: ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"], default: "custom" },
     sound: { type: String, enum: ["default", "custom", "silent"], default: "default" },
     priority: { type: String, enum: ["high", "normal", "low"], default: "high" },
