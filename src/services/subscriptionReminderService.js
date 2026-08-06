@@ -134,7 +134,7 @@ function configPayload(body = {}, existing = {}) {
     emailSubject: firstEnabledReminder?.email?.subject || "",
     emailTemplate: firstEnabledReminder?.email?.body || "",
     reminders,
-    platform: body.platform !== undefined ? String(body.platform || "Both") : existing.platform || "Both",
+    platform: ["Android", "iOS", "Web", "Both"].includes(String(body.platform || "")) ? String(body.platform || "Both") : existing.platform || "Both",
     applicablePlan: body.applicablePlan !== undefined ? String(body.applicablePlan || "").trim() : existing.applicablePlan,
     targetUsers: body.targetUsers !== undefined ? String(body.targetUsers || "all") : existing.targetUsers || "all",
     priority: body.priority !== undefined ? Number(body.priority || 0) : Number(existing.priority || 100),

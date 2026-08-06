@@ -2,7 +2,7 @@ import { Schema, model, models, Types, baseJsonOptions } from "./base.js";
 
 export const reminderChannelValues = ["Notification", "Email", "Both"];
 export const reminderDelayUnitValues = ["Minutes", "Hours", "Days"];
-export const reminderPlatformValues = ["Android", "iOS", "Both"];
+export const reminderPlatformValues = ["Android", "iOS", "Web", "Both"];
 export const reminderStatusValues = ["enabled", "disabled"];
 export const reminderTargetValues = ["all", "free", "premium", "selected"];
 
