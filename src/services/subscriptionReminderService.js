@@ -25,12 +25,6 @@ const defaultReminderTemplates = [
     enabled: true,
     delayAmount: 0,
     delayUnit: "Minutes",
-    inApp: {
-      title: "You're Almost There",
-      message: "Your Krita NEET JEE Premium purchase was not completed. Unlock 6 months of preparation with 7,000+ MCQs, 10 years of PYQs, weak-area tracking and weekly NEET/JEE-pattern mock tests for ₹499.",
-      ctaText: "Complete My Purchase",
-      ctaAction: "/subscription",
-    },
     push: {
       title: "Your Premium Access Is Waiting",
       message: "Complete your ₹499 purchase and unlock 6 months of 7,000+ MCQs, PYQs and weekly NEET/JEE-pattern mock tests.",
@@ -50,12 +44,6 @@ const defaultReminderTemplates = [
     enabled: true,
     delayAmount: 24,
     delayUnit: "Hours",
-    inApp: {
-      title: "Improve Your Weak NEET Topics",
-      message: "Don't stop after identifying your weak chapters. Unlock complete practice, PYQs and weekly mock tests for ₹499 for 6 months.",
-      ctaText: "Unlock Premium",
-      ctaAction: "/subscription",
-    },
     push: {
       title: "Improve Your Weak NEET Topics",
       message: "Don't stop after identifying your weak chapters. Unlock complete practice, PYQs and weekly mock tests for ₹499 for 6 months.",
@@ -110,8 +98,7 @@ function normalizeReminderTemplates(bodyReminders, existing = {}) {
       enabled: item?.enabled !== false,
       delayAmount: Math.max(0, Number(item?.delayAmount ?? fallback.delayAmount ?? 0)),
       delayUnit: ["Minutes", "Hours", "Days"].includes(item?.delayUnit) ? item.delayUnit : fallback.delayUnit || "Hours",
-      inApp: normalizeTemplateGroup(item?.inApp, fallback.inApp),
-      push: normalizeTemplateGroup(item?.push, fallback.push),
+      push: normalizeTemplateGroup(item?.push || item?.inApp, fallback.push),
       email: normalizeEmailTemplate(item?.email, fallback.email),
     };
   });
@@ -142,8 +129,8 @@ function configPayload(body = {}, existing = {}) {
     repeatInterval: Number(reminders[1]?.delayAmount || existing.repeatInterval || 24),
     delayUnit: firstEnabledReminder?.delayUnit || "Hours",
     maximumReminderCount: body.maximumReminderCount !== undefined ? Number(body.maximumReminderCount || 1) : Math.max(1, reminders.filter((item) => item.enabled !== false).length),
-    notificationTitle: firstEnabledReminder?.push?.title || firstEnabledReminder?.inApp?.title || "",
-    notificationMessage: firstEnabledReminder?.push?.message || firstEnabledReminder?.inApp?.message || "",
+    notificationTitle: firstEnabledReminder?.push?.title || "",
+    notificationMessage: firstEnabledReminder?.push?.message || "",
     emailSubject: firstEnabledReminder?.email?.subject || "",
     emailTemplate: firstEnabledReminder?.email?.body || "",
     reminders,
@@ -156,9 +143,6 @@ function configPayload(body = {}, existing = {}) {
   const enabledReminders = payload.reminders.filter((item) => item.enabled !== false);
   if (!enabledReminders.length) throw new AppError("Enable at least one reminder", 400);
   for (const reminder of enabledReminders) {
-    if (!reminder.inApp.title || !reminder.inApp.message || !reminder.inApp.ctaText || !reminder.inApp.ctaAction) {
-      throw new AppError(`${reminder.name}: In-app title, message, CTA text and CTA action are required`, 400);
-    }
     if (!reminder.push.title || !reminder.push.message || !reminder.push.ctaText || !reminder.push.ctaAction) {
       throw new AppError(`${reminder.name}: Push title, message, CTA text and CTA action are required`, 400);
     }
