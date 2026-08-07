@@ -8204,8 +8204,15 @@ async function processPaymentCancelledAutoJob(job) {
 
   let pushDelivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, skippedCount: 0, errors: [] };
   try {
-    pushDelivery = await sendNotificationCenterPushDocs([notificationDoc], pushDelivery, job.dedupeKey);
-    await paymentAutoWriteLog(job, { status: "push_processed", pushDelivery });
+    const { created: wasCreated, pushDelivery: delivery } = await upsertUserNotificationOnInsert(
+      { dedupeKey: job.dedupeKey },
+      notificationDoc,
+    );
+    pushDelivery = delivery || pushDelivery;
+    await paymentAutoWriteLog(job, {
+      status: wasCreated ? "push_processed" : "push_skipped_duplicate",
+      pushDelivery,
+    });
   } catch (error) {
     pushDelivery = { ...pushDelivery, failedCount: 1, errors: [error.message || "Push failed"] };
     await paymentAutoWriteLog(job, { status: "push_failed", errorMessage: pushDelivery.errors[0] });
