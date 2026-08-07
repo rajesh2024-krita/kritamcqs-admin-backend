@@ -2935,7 +2935,7 @@ const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee",
 const notificationCenterCategoryValues = ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"];
 const notificationCenterSoundValues = ["default", "custom", "silent"];
 const notificationCenterPriorityValues = ["high", "normal", "low"];
-const notificationCenterTypeValues = ["standard"];
+const notificationCenterTypeValues = ["standard", "remind_notify"];
 
 const reminderStageSchema = z.object({
   id: z.string().trim().optional().default(""),
@@ -7923,6 +7923,7 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
 
   const history = await NotificationHistory.create({
     campaignName: payload.campaignName || payload.title || payload.emailSubject || "Notification Campaign",
+    notificationType: payload.notificationType || "standard",
     deliveryType: payload.deliveryType || "notification",
     title: payload.title || "",
     message: payload.message || "",
@@ -8506,9 +8507,13 @@ router.post("/notifications/test", asyncHandler(async (req, res) => {
   res.status(201).json({ success: true, message: "Test notification processed", data: { ...serializeNotificationDoc(history), delivery, emailDelivery } });
 }));
 
-router.post("/notifications/send", asyncHandler(async (req, res) => {
-  const payload = notificationCenterSendSchema.parse(req.body || {});
+async function handleNotificationCenterSend(req, res, options = {}) {
+  const payload = notificationCenterSendSchema.parse({
+    ...(req.body || {}),
+    notificationType: options.notificationType || req.body?.notificationType || "standard",
+  });
   const selectedUsers = notificationCenterSelectedUsers(payload.selectedUsers);
+  const label = options.label || "Campaign";
 
   if (payload.targetType === "selected" && !selectedUsers.length) {
     throw new AppError("Select at least one user before sending this campaign", 400);
@@ -8522,7 +8527,7 @@ router.post("/notifications/send", asyncHandler(async (req, res) => {
       createdBy: String(req.admin?._id || ""),
       createdByName: req.admin?.name || req.admin?.email || "Admin",
     });
-    res.status(201).json({ success: true, message: "Campaign saved as draft", data: serializeNotificationDoc(item) });
+    res.status(201).json({ success: true, message: `${label} saved as draft`, data: serializeNotificationDoc(item) });
     return;
   }
 
@@ -8537,18 +8542,37 @@ router.post("/notifications/send", asyncHandler(async (req, res) => {
       createdBy: String(req.admin?._id || ""),
       createdByName: req.admin?.name || req.admin?.email || "Admin",
     });
-    res.status(201).json({ success: true, message: "Notification scheduled", data: serializeNotificationDoc(item) });
+    res.status(201).json({ success: true, message: `${label} scheduled`, data: serializeNotificationDoc(item) });
     return;
   }
 
   const recipients = await getNotificationRecipients(payload.targetType, selectedUsers);
   if (payload.action === "send" && !recipients.length) throw new AppError("No users found for selected target audience", 400);
-  const { history, delivery, emailDelivery } = await createNotificationHistory({ ...payload, selectedUsers }, recipients, req);
+  const dedupePrefix = options.dedupePrefix
+    ? `${options.dedupePrefix}:${Date.now()}:${crypto.randomBytes(4).toString("hex")}`
+    : undefined;
+  const { history, delivery, emailDelivery } = await createNotificationHistory({ ...payload, selectedUsers, dedupeKeyPrefix: dedupePrefix }, recipients, req);
 
   res.status(201).json({
     success: true,
-    message: history.status === "sent" ? "Campaign sent" : history.status === "partial" ? "Campaign partially delivered" : "Campaign delivery failed",
+    message: history.status === "sent" ? `${label} sent` : history.status === "partial" ? `${label} partially delivered` : `${label} delivery failed`,
     data: { ...serializeNotificationDoc(history), delivery, emailDelivery },
+  });
+}
+
+router.post("/notifications/send", asyncHandler(async (req, res) => {
+  await handleNotificationCenterSend(req, res, {
+    notificationType: "standard",
+    label: "Campaign",
+    dedupePrefix: "notification-center",
+  });
+}));
+
+router.post("/notifications/remind-notify/send", asyncHandler(async (req, res) => {
+  await handleNotificationCenterSend(req, res, {
+    notificationType: "remind_notify",
+    label: "Remind Notify",
+    dedupePrefix: "remind-notify",
   });
 }));
 
