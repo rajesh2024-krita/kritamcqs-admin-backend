@@ -8155,7 +8155,7 @@ async function processPaymentCancelledAutoJob(job) {
     linkUrl: stage.deepLink || "/subscription",
     imageUrl: stage.image || "",
     targetGroup: "payment_cancelled",
-    deliveryMode: "both",
+    deliveryMode: "notification",
     notificationStatus: "created",
     pushStatus: "pending",
     senderId: "payment-cancelled-auto",

@@ -1,3 +1,4 @@
+import mongoose from "mongoose";
 import { PushDeviceToken, UserNotification } from "../models/index.js";
 import { isPushConfigured, sendPushToTokens } from "../utils/pushNotificationSender.js";
 
@@ -12,6 +13,10 @@ function notificationToPayload(notification) {
     data: {
       notificationId: String(notification._id || notification.id || ""),
       notificationType: notification.type || "",
+      linkUrl: notification.linkUrl || "/notifications",
+      ctaText: notification.ctaText || "",
+      ctaConfigId: notification.ctaConfigId || "",
+      imageUrl: notification.imageUrl || "",
     },
   };
 }
@@ -20,8 +25,17 @@ async function activeTokensForUsers(userIds = []) {
   const uniqueUserIds = [...new Set(userIds.map((id) => String(id || "")).filter(Boolean))];
   if (!uniqueUserIds.length) return { tokenRows: [], tokensByUser: new Map() };
 
+  const objectUserIds = uniqueUserIds
+    .filter((id) => mongoose.isValidObjectId(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  const userIdFilters = [{ userId: { $in: uniqueUserIds } }];
+  if (objectUserIds.length) {
+    userIdFilters.push({ userId: { $in: objectUserIds } });
+  }
+
   const tokenRows = await PushDeviceToken.find({
-    userId: { $in: uniqueUserIds },
+    $or: userIdFilters,
     enabled: true,
     active: { $ne: false },
   }).lean();
