@@ -3006,6 +3006,136 @@ const notificationCenterSendSchema = z.object({
   if (shouldEmail && !payload.emailBody) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailBody"], message: "Email body is required" });
 });
 
+const paymentCancelledAutoReminderSchema = z.object({
+  id: z.string().trim().optional().default(""),
+  name: z.string().trim().max(120).optional().default(""),
+  enabled: z.coerce.boolean().optional().default(true),
+  delayValue: z.coerce.number().int().min(0).max(365).optional().default(0),
+  delayUnit: z.enum(["Minutes", "Hours", "Days"]).optional().default("Hours"),
+  title: z.string().trim().max(120).optional().default(""),
+  message: z.string().trim().max(500).optional().default(""),
+  image: z.string().trim().max(500).optional().default(""),
+  deepLink: z.string().trim().max(500).optional().default("/subscription"),
+  ctaConfigId: z.string().trim().max(120).optional().default(""),
+  ctaText: z.string().trim().max(120).optional().default("Complete Payment"),
+  emailTemplateId: z.string().trim().optional().default(""),
+  emailTemplateKey: z.string().trim().optional().default(""),
+  emailSubject: z.string().trim().max(180).optional().default("Complete your Krita MCQs premium payment"),
+  emailBody: z.string().max(250000).optional().default(""),
+});
+
+const paymentCancelledAutoConfigSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional().default("Payment Cancelled Auto Notification"),
+  status: z.enum(["enabled", "disabled"]).optional().default("disabled"),
+  priority: z.coerce.number().int().min(1).max(100).optional().default(10),
+  reminders: z.array(paymentCancelledAutoReminderSchema).min(1).max(12).optional().default([]),
+});
+
+const paymentCancelledAutoDefaultReminders = [
+  {
+    id: "immediate",
+    name: "Reminder 1 - Immediate",
+    enabled: true,
+    delayValue: 0,
+    delayUnit: "Minutes",
+    title: "Your premium payment was not completed",
+    message: "You can still complete your subscription and continue your preparation without interruption.",
+    image: "",
+    deepLink: "/subscription",
+    ctaConfigId: "",
+    ctaText: "Complete Payment",
+    emailTemplateId: "",
+    emailTemplateKey: EMAIL_TEMPLATE_KEYS.NOTIFICATION_REMINDER,
+    emailSubject: "Complete your Krita MCQs premium payment",
+    emailBody: "<p>Hi {{user_name}},</p><p>Your premium payment was not completed. You can still finish the payment and continue learning.</p><p><a href=\"{{payment_link}}\">Complete Payment</a></p>",
+  },
+  {
+    id: "after-24-hours",
+    name: "Reminder 2 - 24 Hours",
+    enabled: true,
+    delayValue: 24,
+    delayUnit: "Hours",
+    title: "Your premium plan is still waiting",
+    message: "Complete your payment to unlock premium practice, mock tests, and revision tools.",
+    image: "",
+    deepLink: "/subscription",
+    ctaConfigId: "",
+    ctaText: "Resume Payment",
+    emailTemplateId: "",
+    emailTemplateKey: EMAIL_TEMPLATE_KEYS.NOTIFICATION_REMINDER,
+    emailSubject: "Your Krita MCQs premium plan is still waiting",
+    emailBody: "<p>Hi {{user_name}},</p><p>Your premium plan is still waiting. Complete your payment to unlock all premium features.</p><p><a href=\"{{payment_link}}\">Resume Payment</a></p>",
+  },
+];
+
+const paymentCancelledAutoCollections = {
+  configs: "payment_cancelled_auto_notification_configs",
+  jobs: "payment_cancelled_auto_notification_jobs",
+  logs: "payment_cancelled_auto_notification_logs",
+};
+
+function adminCollection(name) {
+  const db = mongoose.connection.db;
+  if (!db) throw new AppError("Database is not connected", 500);
+  return db.collection(name);
+}
+
+function normalizePaymentCancelledAutoReminder(reminder, index = 0) {
+  const fallback = paymentCancelledAutoDefaultReminders[index] || paymentCancelledAutoDefaultReminders[0];
+  return {
+    ...fallback,
+    ...(reminder || {}),
+    id: String(reminder?.id || fallback.id || `reminder-${index + 1}`).trim(),
+    name: String(reminder?.name || fallback.name || `Reminder ${index + 1}`).trim(),
+    enabled: reminder?.enabled !== false,
+    delayValue: Math.max(0, Number(reminder?.delayValue ?? fallback.delayValue ?? 0)),
+    delayUnit: ["Minutes", "Hours", "Days"].includes(String(reminder?.delayUnit)) ? String(reminder.delayUnit) : fallback.delayUnit,
+  };
+}
+
+function normalizePaymentCancelledAutoConfig(input = {}) {
+  const parsed = paymentCancelledAutoConfigSchema.parse({
+    ...input,
+    reminders: Array.isArray(input.reminders) && input.reminders.length ? input.reminders : paymentCancelledAutoDefaultReminders,
+  });
+  return {
+    ...parsed,
+    reminders: parsed.reminders.map(normalizePaymentCancelledAutoReminder),
+  };
+}
+
+async function ensurePaymentCancelledAutoIndexes() {
+  await Promise.all([
+    adminCollection(paymentCancelledAutoCollections.configs).createIndex({ status: 1, priority: 1, updatedAt: -1 }),
+    adminCollection(paymentCancelledAutoCollections.jobs).createIndex({ status: 1, dueAt: 1 }),
+    adminCollection(paymentCancelledAutoCollections.logs).createIndex({ createdAt: -1 }),
+    adminCollection(paymentCancelledAutoCollections.logs).createIndex({ userId: 1, createdAt: -1 }),
+  ]);
+}
+
+async function ensurePaymentCancelledAutoDefaultConfig() {
+  await ensurePaymentCancelledAutoIndexes();
+  const configs = adminCollection(paymentCancelledAutoCollections.configs);
+  const existing = await configs.findOne({});
+  if (existing) return existing;
+  const now = new Date();
+  const doc = {
+    ...normalizePaymentCancelledAutoConfig({}),
+    status: "disabled",
+    createdAt: now,
+    updatedAt: now,
+    createdBy: "system",
+    createdByName: "System",
+    lastTriggerAt: null,
+  };
+  const result = await configs.insertOne(doc);
+  return { ...doc, _id: result.insertedId };
+}
+
+function serializePaymentCancelledAutoDoc(item = {}) {
+  return { ...item, id: String(item._id || item.id || "") };
+}
+
 function notificationTemplateKeyForType(type, explicitTemplateKey = "") {
   const requested = String(explicitTemplateKey || "").trim();
   if (requested) return requested;
@@ -7930,6 +8060,123 @@ export function startNotificationCenterScheduler() {
   notificationCenterSchedulerTimer = setInterval(tick, NOTIFICATION_CENTER_SCHEDULER_INTERVAL_MS);
   void tick();
 }
+
+router.get("/notifications/payment-cancelled-auto", asyncHandler(async (_req, res) => {
+  await ensurePaymentCancelledAutoDefaultConfig();
+  const [configs, pendingJobs, logs] = await Promise.all([
+    adminCollection(paymentCancelledAutoCollections.configs).find({}).sort({ priority: 1, updatedAt: -1 }).toArray(),
+    adminCollection(paymentCancelledAutoCollections.jobs).countDocuments({ status: "pending" }),
+    adminCollection(paymentCancelledAutoCollections.logs).find({}).sort({ createdAt: -1 }).limit(20).toArray(),
+  ]);
+  res.json({
+    success: true,
+    data: {
+      configs: configs.map((item) => ({
+        ...serializePaymentCancelledAutoDoc(item),
+        reminders: (item.reminders || []).map(normalizePaymentCancelledAutoReminder),
+        reminderCount: (item.reminders || []).filter((reminder) => reminder.enabled !== false).length,
+      })),
+      pendingJobs,
+      logs: logs.map(serializePaymentCancelledAutoDoc),
+    },
+  });
+}));
+
+router.post("/notifications/payment-cancelled-auto", asyncHandler(async (req, res) => {
+  const payload = normalizePaymentCancelledAutoConfig(req.body || {});
+  const now = new Date();
+  const doc = {
+    ...payload,
+    createdBy: String(req.admin?._id || ""),
+    createdByName: req.admin?.name || req.admin?.email || "Admin",
+    createdAt: now,
+    updatedAt: now,
+    lastTriggerAt: null,
+  };
+  const result = await adminCollection(paymentCancelledAutoCollections.configs).insertOne(doc);
+  res.status(201).json({
+    success: true,
+    message: "Payment Cancelled Auto Notification created",
+    data: serializePaymentCancelledAutoDoc({ ...doc, _id: result.insertedId }),
+  });
+}));
+
+router.put("/notifications/payment-cancelled-auto/:id", asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid configuration id", 400);
+  const payload = normalizePaymentCancelledAutoConfig(req.body || {});
+  const id = new mongoose.Types.ObjectId(req.params.id);
+  const update = {
+    ...payload,
+    updatedAt: new Date(),
+    updatedBy: String(req.admin?._id || ""),
+    updatedByName: req.admin?.name || req.admin?.email || "Admin",
+  };
+  const result = await adminCollection(paymentCancelledAutoCollections.configs).findOneAndUpdate(
+    { _id: id },
+    { $set: update },
+    { returnDocument: "after" },
+  );
+  if (!result) throw new AppError("Payment Cancelled Auto Notification not found", 404);
+  if (payload.status === "disabled") {
+    await adminCollection(paymentCancelledAutoCollections.jobs).updateMany(
+      { configId: String(id), status: "pending" },
+      { $set: { status: "cancelled", stoppedReason: "Configuration disabled", updatedAt: new Date() } },
+    );
+  }
+  res.json({
+    success: true,
+    message: "Payment Cancelled Auto Notification updated",
+    data: serializePaymentCancelledAutoDoc(result),
+  });
+}));
+
+router.patch("/notifications/payment-cancelled-auto/:id/status", asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid configuration id", 400);
+  const status = String(req.body?.status || "") === "enabled" ? "enabled" : "disabled";
+  const id = new mongoose.Types.ObjectId(req.params.id);
+  const result = await adminCollection(paymentCancelledAutoCollections.configs).findOneAndUpdate(
+    { _id: id },
+    {
+      $set: {
+        status,
+        updatedAt: new Date(),
+        updatedBy: String(req.admin?._id || ""),
+        updatedByName: req.admin?.name || req.admin?.email || "Admin",
+      },
+    },
+    { returnDocument: "after" },
+  );
+  if (!result) throw new AppError("Payment Cancelled Auto Notification not found", 404);
+  if (status === "disabled") {
+    await adminCollection(paymentCancelledAutoCollections.jobs).updateMany(
+      { configId: String(id), status: "pending" },
+      { $set: { status: "cancelled", stoppedReason: "Configuration disabled", updatedAt: new Date() } },
+    );
+  }
+  res.json({
+    success: true,
+    message: `Payment Cancelled Auto Notification ${status}`,
+    data: serializePaymentCancelledAutoDoc(result),
+  });
+}));
+
+router.delete("/notifications/payment-cancelled-auto/:id", asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid configuration id", 400);
+  const id = new mongoose.Types.ObjectId(req.params.id);
+  const result = await adminCollection(paymentCancelledAutoCollections.configs).findOneAndDelete({ _id: id });
+  if (!result) throw new AppError("Payment Cancelled Auto Notification not found", 404);
+  await adminCollection(paymentCancelledAutoCollections.jobs).updateMany(
+    { configId: String(id), status: "pending" },
+    { $set: { status: "cancelled", stoppedReason: "Configuration deleted", updatedAt: new Date() } },
+  );
+  res.json({ success: true, message: "Payment Cancelled Auto Notification deleted" });
+}));
+
+router.get("/notifications/payment-cancelled-auto/logs", asyncHandler(async (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+  const logs = await adminCollection(paymentCancelledAutoCollections.logs).find({}).sort({ createdAt: -1 }).limit(limit).toArray();
+  res.json({ success: true, data: logs.map(serializePaymentCancelledAutoDoc) });
+}));
 
 router.get("/notifications/templates", asyncHandler(async (_req, res) => {
   const items = await NotificationTemplate.find().sort({ createdAt: -1 });
