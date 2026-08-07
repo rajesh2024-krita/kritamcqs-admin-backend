@@ -8203,26 +8203,51 @@ async function processPaymentCancelledAutoJob(job) {
   };
 
   let pushDelivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, skippedCount: 0, errors: [] };
+  let inAppStatus = "unknown";
+  let inAppReason = "";
   try {
     const { created: wasCreated, pushDelivery: delivery } = await upsertUserNotificationOnInsert(
       { dedupeKey: job.dedupeKey },
       notificationDoc,
     );
+    inAppStatus = wasCreated ? "created" : "duplicate";
+    inAppReason = wasCreated ? "In-app notification created" : "In-app notification already existed for this reminder";
     if (delivery) {
       pushDelivery = delivery;
     } else if (!wasCreated) {
       const existingNotification = await UserNotification.findOne({ dedupeKey: job.dedupeKey });
       if (existingNotification && String(existingNotification.pushStatus || "") !== "sent") {
         pushDelivery = await sendPushForNotifications([existingNotification]);
+      } else if (existingNotification) {
+        pushDelivery = { ...pushDelivery, skippedCount: 1 };
+        inAppReason = "Existing notification push was already sent";
+      } else {
+        inAppStatus = "missing";
+        inAppReason = "Existing in-app notification not found for duplicate dedupe key";
       }
     }
+    const pushReason = Number(pushDelivery.successCount || 0) > 0
+      ? "Push notification sent by FCM"
+      : Number(pushDelivery.noTokenCount || 0) > 0
+        ? "No active device push token found for user"
+        : Number(pushDelivery.failedCount || 0) > 0
+          ? (pushDelivery.errors?.[0] || "FCM push delivery failed")
+          : Number(pushDelivery.skippedCount || 0) > 0
+            ? "Push skipped because it was already sent"
+            : "Push was not attempted";
     await paymentAutoWriteLog(job, {
       status: wasCreated ? "push_processed" : Number(pushDelivery.sentCount || 0) > 0 || Number(pushDelivery.noTokenCount || 0) > 0 || Number(pushDelivery.failedCount || 0) > 0 ? "push_reprocessed_existing" : "push_skipped_duplicate",
+      inAppStatus,
+      inAppReason,
+      pushStatus: Number(pushDelivery.successCount || 0) > 0 ? "sent" : Number(pushDelivery.noTokenCount || 0) > 0 ? "no_token" : Number(pushDelivery.failedCount || 0) > 0 ? "failed" : "skipped",
+      pushReason,
       pushDelivery,
     });
   } catch (error) {
+    inAppStatus = "failed";
+    inAppReason = error.message || "In-app notification creation failed";
     pushDelivery = { ...pushDelivery, failedCount: 1, errors: [error.message || "Push failed"] };
-    await paymentAutoWriteLog(job, { status: "push_failed", errorMessage: pushDelivery.errors[0] });
+    await paymentAutoWriteLog(job, { status: "push_failed", inAppStatus, inAppReason, pushStatus: "failed", pushReason: pushDelivery.errors[0], errorMessage: pushDelivery.errors[0], pushDelivery });
   }
 
   let emailResult = { skipped: true, reason: "User email or SMTP settings missing" };
@@ -8239,10 +8264,15 @@ async function processPaymentCancelledAutoJob(job) {
       });
       emailResult = result.skipped ? result : { sent: true };
     }
-    await paymentAutoWriteLog(job, { status: emailResult.sent ? "email_sent" : "email_skipped", emailResult });
+    await paymentAutoWriteLog(job, {
+      status: emailResult.sent ? "email_sent" : "email_skipped",
+      emailStatus: emailResult.sent ? "sent" : "skipped",
+      emailReason: emailResult.sent ? "Email sent successfully" : (emailResult.reason || "User email or SMTP settings missing"),
+      emailResult,
+    });
   } catch (error) {
     emailResult = { sent: false, reason: error.message || "Email failed" };
-    await paymentAutoWriteLog(job, { status: "email_failed", errorMessage: emailResult.reason });
+    await paymentAutoWriteLog(job, { status: "email_failed", emailStatus: "failed", emailReason: emailResult.reason, errorMessage: emailResult.reason, emailResult });
   }
 
   const pushOk = Number(pushDelivery.successCount || 0) > 0;
@@ -8252,8 +8282,14 @@ async function processPaymentCancelledAutoJob(job) {
   await paymentAutoWriteLog(job, {
     status: finalStatus,
     reason: "Reminder completed",
+    inAppStatus,
+    inAppReason,
     pushStatus: pushOk ? "sent" : Number(pushDelivery.noTokenCount || 0) > 0 ? "no_token" : "failed",
+    pushReason: pushOk ? "Push notification sent by FCM" : Number(pushDelivery.noTokenCount || 0) > 0 ? "No active device push token found for user" : (pushDelivery.errors?.[0] || "Push notification failed or was not attempted"),
     emailStatus: emailOk ? "sent" : emailResult.skipped ? "skipped" : "failed",
+    emailReason: emailOk ? "Email sent successfully" : (emailResult.reason || "Email failed or skipped"),
+    pushDelivery,
+    emailResult,
   });
   await jobs.updateOne(
     { _id: job._id },
