@@ -3,7 +3,7 @@ import { Schema, model, models, baseJsonOptions } from "./base.js";
 const scheduledNotificationSchema = new Schema(
   {
     campaignName: { type: String, trim: true, default: "" },
-    notificationType: { type: String, enum: ["standard", "reminder_subscription", "remind_notify"], default: "standard", index: true },
+    notificationType: { type: String, enum: ["standard", "reminder_subscription"], default: "standard", index: true },
     deliveryType: { type: String, enum: ["notification", "email", "both"], default: "notification", index: true },
     title: { type: String, trim: true, default: "" },
     message: { type: String, default: "" },
@@ -16,7 +16,7 @@ const scheduledNotificationSchema = new Schema(
     emailTemplateKey: { type: String, trim: true, default: "" },
     emailSubject: { type: String, trim: true, default: "" },
     emailBody: { type: String, default: "" },
-    targetType: { type: String, enum: ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "remind_payment", "reminder_subscription", "selected"], default: "all", index: true },
+    targetType: { type: String, enum: ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "reminder_subscription", "selected"], default: "all", index: true },
     selectedUsers: { type: [String], default: [] },
     category: { type: String, enum: ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"], default: "custom" },
     sound: { type: String, enum: ["default", "custom", "silent"], default: "default" },

@@ -3,7 +3,7 @@ import { Schema, model, models, baseJsonOptions } from "./base.js";
 const notificationHistorySchema = new Schema(
   {
     campaignName: { type: String, trim: true, default: "" },
-    notificationType: { type: String, enum: ["standard", "remind_notify", "reminder_subscription"], default: "standard", index: true },
+    notificationType: { type: String, enum: ["standard", "reminder_subscription", "subscription_cancellation_reminder"], default: "standard", index: true },
     deliveryType: { type: String, enum: ["notification", "email", "both"], default: "notification", index: true },
     title: { type: String, trim: true, default: "" },
     message: { type: String, default: "" },

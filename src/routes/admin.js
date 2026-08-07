@@ -2723,6 +2723,7 @@ export function startAppNotificationReminderScheduler() {
     reminderSchedulerRunning = true;
     try {
       await processAppNotificationReminders();
+      await processDuePaymentCancelledAutoNotifications();
     } catch (error) {
       console.error("Automatic app reminder scheduler failed", error);
     } finally {
@@ -2931,11 +2932,11 @@ const notificationBroadcastSchema = z.object({
   selectedUsers: z.string().trim().optional().default(""),
 });
 
-const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "remind_payment", "selected"];
+const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "selected"];
 const notificationCenterCategoryValues = ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"];
 const notificationCenterSoundValues = ["default", "custom", "silent"];
 const notificationCenterPriorityValues = ["high", "normal", "low"];
-const notificationCenterTypeValues = ["standard", "remind_notify"];
+const notificationCenterTypeValues = ["standard"];
 
 const reminderStageSchema = z.object({
   id: z.string().trim().optional().default(""),
@@ -2945,6 +2946,10 @@ const reminderStageSchema = z.object({
   delayUnit: z.enum(["Minutes", "Hours", "Days"]).optional().default("Hours"),
   title: z.string().trim().max(120).optional().default(""),
   message: z.string().trim().max(500).optional().default(""),
+  pushTitle: z.string().trim().max(120).optional().default(""),
+  pushMessage: z.string().trim().max(500).optional().default(""),
+  inAppTitle: z.string().trim().max(120).optional().default(""),
+  inAppMessage: z.string().trim().max(500).optional().default(""),
   emailTemplateId: z.string().trim().optional().default(""),
   emailTemplateKey: z.string().trim().optional().default(""),
   emailSubject: z.string().trim().max(180).optional().default(""),
@@ -3015,6 +3020,10 @@ const paymentCancelledAutoReminderSchema = z.object({
   delayUnit: z.enum(["Minutes", "Hours", "Days"]).optional().default("Hours"),
   title: z.string().trim().max(120).optional().default(""),
   message: z.string().trim().max(500).optional().default(""),
+  pushTitle: z.string().trim().max(120).optional().default(""),
+  pushMessage: z.string().trim().max(500).optional().default(""),
+  inAppTitle: z.string().trim().max(120).optional().default(""),
+  inAppMessage: z.string().trim().max(500).optional().default(""),
   image: z.string().trim().max(500).optional().default(""),
   deepLink: z.string().trim().max(500).optional().default("/subscription"),
   ctaConfigId: z.string().trim().max(120).optional().default(""),
@@ -3041,6 +3050,10 @@ const paymentCancelledAutoDefaultReminders = [
     delayUnit: "Minutes",
     title: "Your premium payment was not completed",
     message: "You can still complete your subscription and continue your preparation without interruption.",
+    pushTitle: "Your premium payment was not completed",
+    pushMessage: "You can still complete your subscription and continue your preparation without interruption.",
+    inAppTitle: "Your premium payment was not completed",
+    inAppMessage: "You can still complete your subscription and continue your preparation without interruption.",
     image: "",
     deepLink: "/subscription",
     ctaConfigId: "",
@@ -3058,6 +3071,10 @@ const paymentCancelledAutoDefaultReminders = [
     delayUnit: "Hours",
     title: "Your premium plan is still waiting",
     message: "Complete your payment to unlock premium practice, mock tests, and revision tools.",
+    pushTitle: "Your premium plan is still waiting",
+    pushMessage: "Complete your payment to unlock premium practice, mock tests, and revision tools.",
+    inAppTitle: "Your premium plan is still waiting",
+    inAppMessage: "Complete your payment to unlock premium practice, mock tests, and revision tools.",
     image: "",
     deepLink: "/subscription",
     ctaConfigId: "",
@@ -3299,7 +3316,7 @@ async function getNotificationRecipients(targetGroup, selectedUsers = "") {
   if (targetGroup === "jee") return User.find({ isAdmin: { $ne: true }, examMode: { $in: ["JEE", "BOTH"] } }).lean();
   if (targetGroup === "active") return User.find({ isAdmin: { $ne: true }, isActive: { $ne: false }, isBlocked: { $ne: true } }).lean();
   if (targetGroup === "inactive") return User.find({ isAdmin: { $ne: true }, $or: [{ isActive: false }, { isBlocked: true }] }).lean();
-  if (targetGroup === "payment_pending" || targetGroup === "remind_payment") {
+  if (targetGroup === "payment_pending") {
     const users = await getPaymentPendingUsers();
     const values = selectedUserValues(selectedUsers);
     if (!values.length) return users;
@@ -8098,6 +8115,7 @@ async function paymentAutoWriteLog(job, payload) {
 async function paymentAutoCreateHistory(config, stage, job, pushDelivery, emailResult, status) {
   await NotificationHistory.create({
     campaignName: `${config.name || "Payment Cancelled Auto Notification"} - ${stage.name || job.stageName}`,
+    notificationType: "subscription_cancellation_reminder",
     deliveryType: "both",
     title: stage.title || "",
     message: stage.message || "",
@@ -8163,9 +8181,11 @@ async function processPaymentCancelledAutoJob(job) {
 
   const notificationDoc = {
     userId: String(job.userId),
-    type: "payment_cancelled_auto",
-    title: paymentAutoApplyVariables(stage.title, user, job),
-    body: paymentAutoApplyVariables(stage.message, user, job),
+    type: "subscription_cancellation_reminder",
+    title: paymentAutoApplyVariables(stage.inAppTitle || stage.title, user, job),
+    body: paymentAutoApplyVariables(stage.inAppMessage || stage.message, user, job),
+    pushTitle: paymentAutoApplyVariables(stage.pushTitle || stage.title, user, job),
+    pushBody: paymentAutoApplyVariables(stage.pushMessage || stage.message, user, job),
     dedupeKey: job.dedupeKey,
     visibleInApp: true,
     linkUrl: stage.deepLink || "/subscription",
@@ -8274,12 +8294,8 @@ export function startNotificationCenterScheduler() {
     notificationCenterSchedulerRunning = true;
     try {
       const processed = await processDueScheduledNotifications();
-      const paymentCancelledProcessed = await processDuePaymentCancelledAutoNotifications();
       if (processed.length) {
         console.info(`[NOTIFICATION_CENTER] Processed ${processed.length} scheduled notification(s)`);
-      }
-      if (paymentCancelledProcessed.length) {
-        console.info(`[NOTIFICATION_CENTER] Processed ${paymentCancelledProcessed.length} payment cancelled auto notification(s)`);
       }
     } catch (error) {
       console.error("Notification center scheduler failed", error);
@@ -8291,7 +8307,7 @@ export function startNotificationCenterScheduler() {
   void tick();
 }
 
-router.get("/notifications/payment-cancelled-auto", asyncHandler(async (_req, res) => {
+router.get(["/notifications/payment-cancelled-auto", "/notification-management/subscription-cancellation-reminders"], asyncHandler(async (_req, res) => {
   await ensurePaymentCancelledAutoDefaultConfig();
   const [configs, pendingJobs, logs] = await Promise.all([
     adminCollection(paymentCancelledAutoCollections.configs).find({}).sort({ priority: 1, updatedAt: -1 }).toArray(),
@@ -8312,7 +8328,7 @@ router.get("/notifications/payment-cancelled-auto", asyncHandler(async (_req, re
   });
 }));
 
-router.post("/notifications/payment-cancelled-auto", asyncHandler(async (req, res) => {
+router.post(["/notifications/payment-cancelled-auto", "/notification-management/subscription-cancellation-reminders"], asyncHandler(async (req, res) => {
   const payload = normalizePaymentCancelledAutoConfig(req.body || {});
   const now = new Date();
   const doc = {
@@ -8331,7 +8347,7 @@ router.post("/notifications/payment-cancelled-auto", asyncHandler(async (req, re
   });
 }));
 
-router.put("/notifications/payment-cancelled-auto/:id", asyncHandler(async (req, res) => {
+router.put(["/notifications/payment-cancelled-auto/:id", "/notification-management/subscription-cancellation-reminders/:id"], asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid configuration id", 400);
   const payload = normalizePaymentCancelledAutoConfig(req.body || {});
   const id = new mongoose.Types.ObjectId(req.params.id);
@@ -8360,7 +8376,7 @@ router.put("/notifications/payment-cancelled-auto/:id", asyncHandler(async (req,
   });
 }));
 
-router.patch("/notifications/payment-cancelled-auto/:id/status", asyncHandler(async (req, res) => {
+router.patch(["/notifications/payment-cancelled-auto/:id/status", "/notification-management/subscription-cancellation-reminders/:id/status"], asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid configuration id", 400);
   const status = String(req.body?.status || "") === "enabled" ? "enabled" : "disabled";
   const id = new mongoose.Types.ObjectId(req.params.id);
@@ -8390,7 +8406,7 @@ router.patch("/notifications/payment-cancelled-auto/:id/status", asyncHandler(as
   });
 }));
 
-router.delete("/notifications/payment-cancelled-auto/:id", asyncHandler(async (req, res) => {
+router.delete(["/notifications/payment-cancelled-auto/:id", "/notification-management/subscription-cancellation-reminders/:id"], asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid configuration id", 400);
   const id = new mongoose.Types.ObjectId(req.params.id);
   const result = await adminCollection(paymentCancelledAutoCollections.configs).findOneAndDelete({ _id: id });
@@ -8402,7 +8418,7 @@ router.delete("/notifications/payment-cancelled-auto/:id", asyncHandler(async (r
   res.json({ success: true, message: "Payment Cancelled Auto Notification deleted" });
 }));
 
-router.get("/notifications/payment-cancelled-auto/logs", asyncHandler(async (req, res) => {
+router.get(["/notifications/payment-cancelled-auto/logs", "/notification-management/subscription-cancellation-reminders/logs"], asyncHandler(async (req, res) => {
   const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
   const logs = await adminCollection(paymentCancelledAutoCollections.logs).find({}).sort({ createdAt: -1 }).limit(limit).toArray();
   res.json({ success: true, data: logs.map(serializePaymentCancelledAutoDoc) });
@@ -8576,14 +8592,6 @@ router.post("/notifications/send", asyncHandler(async (req, res) => {
   });
 }));
 
-router.post("/notifications/remind-notify/send", asyncHandler(async (req, res) => {
-  await handleNotificationCenterSend(req, res, {
-    notificationType: "remind_notify",
-    label: "Remind Notify",
-    dedupePrefix: "remind-notify",
-  });
-}));
-
 router.get("/notifications/scheduled", asyncHandler(async (_req, res) => {
   const items = await ScheduledNotification.find().sort({ scheduleDate: -1 }).limit(200);
   res.json({ success: true, data: items.map(serializeNotificationDoc) });
@@ -8619,15 +8627,11 @@ router.delete("/notifications/scheduled/:id", asyncHandler(async (req, res) => {
 }));
 
 router.post("/notifications/process-scheduled", asyncHandler(async (req, res) => {
-  const [processed, paymentCancelledProcessed] = await Promise.all([
-    processDueScheduledNotifications(req),
-    processDuePaymentCancelledAutoNotifications(),
-  ]);
+  const processed = await processDueScheduledNotifications(req);
   res.json({
     success: true,
     message: "Due scheduled notifications processed",
     data: processed,
-    paymentCancelledAuto: paymentCancelledProcessed,
   });
 }));
 

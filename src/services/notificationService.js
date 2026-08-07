@@ -4,8 +4,8 @@ import { isPushConfigured, sendPushToTokens } from "../utils/pushNotificationSen
 
 function notificationToPayload(notification) {
   return {
-    title: notification.title,
-    body: notification.body,
+    title: notification.pushTitle || notification.title,
+    body: notification.pushBody || notification.body,
     image: notification.imageUrl,
     deepLink: notification.linkUrl || "/notifications",
     category: notification.type || "custom",
