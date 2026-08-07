@@ -2931,7 +2931,7 @@ const notificationBroadcastSchema = z.object({
   selectedUsers: z.string().trim().optional().default(""),
 });
 
-const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "selected"];
+const notificationCenterTargetValues = ["all", "free", "premium", "neet", "jee", "active", "inactive", "payment_pending", "remind_payment", "selected"];
 const notificationCenterCategoryValues = ["exam", "offer", "subscription", "revision", "mock_test", "system", "custom"];
 const notificationCenterSoundValues = ["default", "custom", "silent"];
 const notificationCenterPriorityValues = ["high", "normal", "low"];
@@ -3299,7 +3299,7 @@ async function getNotificationRecipients(targetGroup, selectedUsers = "") {
   if (targetGroup === "jee") return User.find({ isAdmin: { $ne: true }, examMode: { $in: ["JEE", "BOTH"] } }).lean();
   if (targetGroup === "active") return User.find({ isAdmin: { $ne: true }, isActive: { $ne: false }, isBlocked: { $ne: true } }).lean();
   if (targetGroup === "inactive") return User.find({ isAdmin: { $ne: true }, $or: [{ isActive: false }, { isBlocked: true }] }).lean();
-  if (targetGroup === "payment_pending") {
+  if (targetGroup === "payment_pending" || targetGroup === "remind_payment") {
     const users = await getPaymentPendingUsers();
     const values = selectedUserValues(selectedUsers);
     if (!values.length) return users;
