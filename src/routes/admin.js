@@ -7874,6 +7874,22 @@ function notificationCenterSelectedUsers(value) {
   return selectedUserValues(value);
 }
 
+async function sendNotificationCenterPushDocs(docs = [], fallbackDelivery = null, duplicateDedupeKey = "") {
+  const defaultDelivery = fallbackDelivery || { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: docs.length, skippedCount: 0, errors: [] };
+  if (!docs.length) return defaultDelivery;
+  const inserted = await insertUserNotifications(docs, { autoPush: true });
+  if (inserted.notifications?.length) return inserted.pushDelivery || defaultDelivery;
+
+  if (duplicateDedupeKey) {
+    const existing = await UserNotification.findOne({ dedupeKey: duplicateDedupeKey });
+    if (existing && existing.pushStatus !== "sent") {
+      return sendPushForNotifications([existing]);
+    }
+  }
+
+  return inserted.pushDelivery || defaultDelivery;
+}
+
 async function createNotificationHistory(payload, recipients, req, scheduledNotificationId = null) {
   let delivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: recipients.length, errors: [] };
   let emailDelivery = { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [] };
@@ -7900,8 +7916,7 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
       pushStatus: "pending",
       sentAt: new Date(),
     }));
-    const inserted = await insertUserNotifications(docs, { autoPush: true });
-    delivery = inserted.pushDelivery || delivery;
+    delivery = await sendNotificationCenterPushDocs(docs, delivery);
   } else if (!shouldNotify) {
     delivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, errors: [] };
   }
@@ -8169,14 +8184,7 @@ async function processPaymentCancelledAutoJob(job) {
 
   let pushDelivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, skippedCount: 0, errors: [] };
   try {
-    const inserted = await insertUserNotifications([notificationDoc], { autoPush: true });
-    pushDelivery = inserted.pushDelivery || pushDelivery;
-    if (!inserted.notifications?.length) {
-      const existing = await UserNotification.findOne({ dedupeKey: job.dedupeKey });
-      if (existing && existing.pushStatus !== "sent") {
-        pushDelivery = await sendPushForNotifications([existing]);
-      }
-    }
+    pushDelivery = await sendNotificationCenterPushDocs([notificationDoc], pushDelivery, job.dedupeKey);
     await paymentAutoWriteLog(job, { status: "push_processed", pushDelivery });
   } catch (error) {
     pushDelivery = { ...pushDelivery, failedCount: 1, errors: [error.message || "Push failed"] };
