@@ -8184,8 +8184,8 @@ async function processPaymentCancelledAutoJob(job) {
     type: "subscription_cancellation_reminder",
     title: paymentAutoApplyVariables(stage.inAppTitle || stage.title, user, job),
     body: paymentAutoApplyVariables(stage.inAppMessage || stage.message, user, job),
-    pushTitle: paymentAutoApplyVariables(stage.pushTitle || stage.title, user, job),
-    pushBody: paymentAutoApplyVariables(stage.pushMessage || stage.message, user, job),
+    pushTitle: paymentAutoApplyVariables(stage.pushTitle || stage.title || stage.inAppTitle, user, job),
+    pushBody: paymentAutoApplyVariables(stage.pushMessage || stage.message || stage.inAppMessage, user, job),
     dedupeKey: job.dedupeKey,
     visibleInApp: true,
     linkUrl: stage.deepLink || "/subscription",
@@ -8208,9 +8208,16 @@ async function processPaymentCancelledAutoJob(job) {
       { dedupeKey: job.dedupeKey },
       notificationDoc,
     );
-    pushDelivery = delivery || pushDelivery;
+    if (delivery) {
+      pushDelivery = delivery;
+    } else if (!wasCreated) {
+      const existingNotification = await UserNotification.findOne({ dedupeKey: job.dedupeKey });
+      if (existingNotification && String(existingNotification.pushStatus || "") !== "sent") {
+        pushDelivery = await sendPushForNotifications([existingNotification]);
+      }
+    }
     await paymentAutoWriteLog(job, {
-      status: wasCreated ? "push_processed" : "push_skipped_duplicate",
+      status: wasCreated ? "push_processed" : Number(pushDelivery.sentCount || 0) > 0 || Number(pushDelivery.noTokenCount || 0) > 0 || Number(pushDelivery.failedCount || 0) > 0 ? "push_reprocessed_existing" : "push_skipped_duplicate",
       pushDelivery,
     });
   } catch (error) {
