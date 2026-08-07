@@ -61,7 +61,6 @@ import {
   SessionAttempt,
   Subject,
   Subscription,
-  SubscriptionReminder,
   UserSubscription,
   SubscriptionPlan,
   SubscriptionFreeCard,
@@ -3257,30 +3256,23 @@ function selectedUserValues(value = "") {
 }
 
 async function getPaymentPendingUserIds() {
-  const reminderJobCollection = mongoose.connection.db?.collection("subscription_reminder_notification_center_jobs");
-  const [paymentRows, reminderRows, reminderJobRows] = await Promise.all([
+  const cancelledJobCollection = adminCollection(paymentCancelledAutoCollections.jobs);
+  const [paymentRows, cancelledJobRows] = await Promise.all([
     Subscription.find({
       $or: [
         { paymentStatus: { $in: ["PENDING", "FAILED"] } },
         { status: { $in: ["pending", "failed", "cancelled", "timeout", "timed_out", "incomplete"] } },
       ],
     }).select("userId").lean(),
-    SubscriptionReminder.find({
-      status: "pending",
+    cancelledJobCollection.find({
       purchaseCompleted: { $ne: true },
-    }).select("userId").lean(),
-    reminderJobCollection
-      ? reminderJobCollection.find({
-          purchaseCompleted: { $ne: true },
-          status: { $in: ["pending", "sent", "failed", "partial"] },
-        }).project({ userId: 1 }).toArray()
-      : [],
+      status: { $in: ["pending", "sent", "failed", "partial"] },
+    }).project({ userId: 1 }).toArray(),
   ]);
 
   const candidateIds = [...new Set([
     ...paymentRows.map((item) => String(item.userId || "")),
-    ...reminderRows.map((item) => String(item.userId || "")),
-    ...reminderJobRows.map((item) => String(item.userId || "")),
+    ...cancelledJobRows.map((item) => String(item.userId || "")),
   ].filter(Boolean))];
   if (!candidateIds.length) return [];
 

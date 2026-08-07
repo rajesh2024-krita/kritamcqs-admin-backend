@@ -78,8 +78,6 @@ export * from "./ThirdPartyScript.js";
 export * from "./MicrosoftClaritySettings.js";
 export * from "./MicrosoftClarityLog.js";
 export * from "./ReminderConfiguration.js";
-export * from "./SubscriptionReminder.js";
-export * from "./ReminderLog.js";
 export * from "./NationalCompetition.js";
 export * from "./NationalCompetitionRegistration.js";
 export * from "./NationalCompetitionAttempt.js";
