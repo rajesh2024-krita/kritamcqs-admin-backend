@@ -8569,6 +8569,20 @@ router.patch(["/notifications/payment-cancelled-auto/:id/status", "/notification
   });
 }));
 
+router.delete(["/notifications/payment-cancelled-auto/logs", "/notification-management/subscription-cancellation-reminders/logs"], asyncHandler(async (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const all = req.body?.all === true || String(req.query?.all || "") === "true";
+  const logs = adminCollection(paymentCancelledAutoCollections.logs);
+  if (all) {
+    const result = await logs.deleteMany({});
+    return res.json({ success: true, message: "Subscription cancellation logs deleted", data: { deletedCount: result.deletedCount || 0, ...(await latestPaymentCancelledAutoLogData(50)) } });
+  }
+  const objectIds = ids.map((id) => String(id || "")).filter((id) => mongoose.isValidObjectId(id)).map((id) => new mongoose.Types.ObjectId(id));
+  if (!objectIds.length) throw new AppError("Select at least one log to delete", 400);
+  const result = await logs.deleteMany({ _id: { $in: objectIds } });
+  res.json({ success: true, message: "Selected subscription cancellation logs deleted", data: { deletedCount: result.deletedCount || 0, ...(await latestPaymentCancelledAutoLogData(50)) } });
+}));
+
 router.delete(["/notifications/payment-cancelled-auto/:id", "/notification-management/subscription-cancellation-reminders/:id"], asyncHandler(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new AppError("Invalid configuration id", 400);
   const id = new mongoose.Types.ObjectId(req.params.id);
