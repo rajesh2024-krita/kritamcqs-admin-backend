@@ -96,6 +96,7 @@ import { oldUserMigrationService } from "../services/oldUserMigrationService.js"
 import {
   createUserNotification,
   insertUserNotifications,
+  sendPushForNotifications,
   upsertUserNotificationOnInsert,
 } from "../services/notificationService.js";
 import { buildPublicUploadPath, ensureDir, questionUploadsRoot, sanitizeFileName, uploadsRoot } from "../utils/uploadStorage.js";
@@ -8041,6 +8042,222 @@ async function processDueScheduledNotifications(req = {}) {
   return processed;
 }
 
+function paymentAutoApplyVariables(template = "", user = {}, job = {}) {
+  const values = {
+    user_name: user.name || user.email || user.mobile || "Learner",
+    customer_name: user.name || user.email || user.mobile || "Learner",
+    name: user.name || user.email || user.mobile || "Learner",
+    email: user.email || "",
+    mobile: user.mobile || "",
+    plan_name: job.planName || "Premium",
+    plan_id: job.planId || "",
+    payment_reference: job.paymentReference || "",
+    event_type: job.eventType || "",
+    payment_link: "/subscription",
+    button_link: "/subscription",
+    app_name: "Krita MCQs",
+    company_name: "Krita",
+    support_email: "support@krita.com",
+  };
+  return Object.entries(values).reduce(
+    (body, [key, value]) => body.replace(new RegExp(`{{\\s*${key}\\s*}}`, "gi"), String(value || "")),
+    String(template || ""),
+  );
+}
+
+async function paymentAutoWriteLog(job, payload) {
+  await adminCollection(paymentCancelledAutoCollections.logs).insertOne({
+    jobId: String(job._id),
+    userId: String(job.userId || ""),
+    configId: String(job.configId || ""),
+    stageId: String(job.stageId || ""),
+    stageName: String(job.stageName || ""),
+    eventType: String(job.eventType || ""),
+    paymentReference: String(job.paymentReference || ""),
+    ...payload,
+    createdAt: new Date(),
+  });
+}
+
+async function paymentAutoCreateHistory(config, stage, job, pushDelivery, emailResult, status) {
+  await NotificationHistory.create({
+    campaignName: `${config.name || "Payment Cancelled Auto Notification"} - ${stage.name || job.stageName}`,
+    deliveryType: "both",
+    title: stage.title || "",
+    message: stage.message || "",
+    image: stage.image || "",
+    deepLink: stage.deepLink || "/subscription",
+    ctaConfigId: stage.ctaConfigId || "",
+    ctaText: stage.ctaText || "",
+    targetScreen: "",
+    emailTemplateId: stage.emailTemplateId || "",
+    emailTemplateKey: stage.emailTemplateKey || "",
+    emailSubject: stage.emailSubject || "",
+    emailBody: stage.emailBody || "",
+    targetType: "payment_cancelled",
+    selectedUsers: [String(job.userId || "")],
+    category: "subscription",
+    sound: "default",
+    priority: "high",
+    sentCount: pushDelivery?.sentCount || 0,
+    successCount: pushDelivery?.successCount || 0,
+    failedCount: pushDelivery?.failedCount || 0,
+    noTokenCount: pushDelivery?.noTokenCount || 0,
+    emailSentCount: emailResult?.sent ? 1 : 0,
+    emailFailedCount: emailResult?.sent || emailResult?.skipped ? 0 : 1,
+    emailSkippedCount: emailResult?.skipped ? 1 : 0,
+    logs: [{ userId: String(job.userId || ""), eventType: job.eventType, paymentReference: job.paymentReference, pushDelivery, emailResult }],
+    status,
+    createdBy: "payment-cancelled-auto",
+    createdByName: "Payment Cancelled Auto Notification",
+    sentAt: new Date(),
+  });
+}
+
+async function processPaymentCancelledAutoJob(job) {
+  const configs = adminCollection(paymentCancelledAutoCollections.configs);
+  const jobs = adminCollection(paymentCancelledAutoCollections.jobs);
+  const config = await configs.findOne({ _id: new mongoose.Types.ObjectId(job.configId), status: "enabled" });
+  if (!config) {
+    await jobs.updateOne({ _id: job._id }, { $set: { status: "cancelled", stoppedReason: "Configuration disabled or missing", updatedAt: new Date() }, $unset: { sending: "" } });
+    return { id: String(job._id), status: "cancelled", reason: "Configuration disabled or missing" };
+  }
+
+  const stage = (config.reminders || []).find((item) => item.id === job.stageId && item.enabled !== false);
+  if (!stage) {
+    await jobs.updateOne({ _id: job._id }, { $set: { status: "cancelled", stoppedReason: "Reminder stage disabled or missing", updatedAt: new Date() }, $unset: { sending: "" } });
+    return { id: String(job._id), status: "cancelled", reason: "Reminder stage disabled or missing" };
+  }
+
+  const user = await User.findById(job.userId).select("name email mobile isPremium lastPurchase").lean();
+  if (!user) {
+    await jobs.updateOne({ _id: job._id }, { $set: { status: "cancelled", stoppedReason: "User not found", updatedAt: new Date() }, $unset: { sending: "" } });
+    return { id: String(job._id), status: "cancelled", reason: "User not found" };
+  }
+
+  const paymentStatus = String(user.lastPurchase?.paymentStatus || "").toLowerCase();
+  if (user.isPremium || paymentStatus === "success" || paymentStatus === "paid") {
+    await jobs.updateMany(
+      { activeKey: job.activeKey, status: "pending" },
+      { $set: { status: "cancelled", paymentCompleted: true, stoppedReason: "Payment already completed", updatedAt: new Date() }, $unset: { sending: "" } },
+    );
+    await paymentAutoWriteLog(job, { status: "skipped", reason: "Payment already completed" });
+    return { id: String(job._id), status: "skipped", reason: "Payment already completed" };
+  }
+
+  const notificationDoc = {
+    userId: String(job.userId),
+    type: "payment_cancelled_auto",
+    title: paymentAutoApplyVariables(stage.title, user, job),
+    body: paymentAutoApplyVariables(stage.message, user, job),
+    dedupeKey: job.dedupeKey,
+    visibleInApp: true,
+    linkUrl: stage.deepLink || "/subscription",
+    imageUrl: stage.image || "",
+    targetGroup: "payment_cancelled",
+    deliveryMode: "both",
+    notificationStatus: "created",
+    pushStatus: "pending",
+    senderId: "payment-cancelled-auto",
+    senderName: "Payment Cancelled Auto Notification",
+    templateKey: stage.emailTemplateKey || "",
+    ctaConfigId: stage.ctaConfigId || "",
+    ctaText: stage.ctaText || "",
+    sentAt: new Date(),
+  };
+
+  let pushDelivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, skippedCount: 0, errors: [] };
+  try {
+    const inserted = await insertUserNotifications([notificationDoc], { autoPush: true });
+    pushDelivery = inserted.pushDelivery || pushDelivery;
+    if (!inserted.notifications?.length) {
+      const existing = await UserNotification.findOne({ dedupeKey: job.dedupeKey });
+      if (existing && existing.pushStatus !== "sent") {
+        pushDelivery = await sendPushForNotifications([existing]);
+      }
+    }
+    await paymentAutoWriteLog(job, { status: "push_processed", pushDelivery });
+  } catch (error) {
+    pushDelivery = { ...pushDelivery, failedCount: 1, errors: [error.message || "Push failed"] };
+    await paymentAutoWriteLog(job, { status: "push_failed", errorMessage: pushDelivery.errors[0] });
+  }
+
+  let emailResult = { skipped: true, reason: "User email or SMTP settings missing" };
+  try {
+    const settings = await InvoiceSettings.findOne({ key: "default" });
+    const html = paymentAutoApplyVariables(stage.emailBody, user, job);
+    if (user.email && settings?.smtp?.host && settings?.smtp?.fromEmail) {
+      const result = await sendEmail({
+        smtp: settings.smtp,
+        to: user.email,
+        subject: paymentAutoApplyVariables(stage.emailSubject, user, job),
+        html,
+        text: html.replace(/<[^>]*>/g, " "),
+      });
+      emailResult = result.skipped ? result : { sent: true };
+    }
+    await paymentAutoWriteLog(job, { status: emailResult.sent ? "email_sent" : "email_skipped", emailResult });
+  } catch (error) {
+    emailResult = { sent: false, reason: error.message || "Email failed" };
+    await paymentAutoWriteLog(job, { status: "email_failed", errorMessage: emailResult.reason });
+  }
+
+  const pushOk = Number(pushDelivery.successCount || 0) > 0;
+  const emailOk = Boolean(emailResult.sent);
+  const finalStatus = pushOk && (emailOk || emailResult.skipped) ? "sent" : pushOk || emailOk ? "partial" : "failed";
+  await paymentAutoCreateHistory(config, stage, job, pushDelivery, emailResult, finalStatus);
+  await paymentAutoWriteLog(job, {
+    status: finalStatus,
+    reason: "Reminder completed",
+    pushStatus: pushOk ? "sent" : Number(pushDelivery.noTokenCount || 0) > 0 ? "no_token" : "failed",
+    emailStatus: emailOk ? "sent" : emailResult.skipped ? "skipped" : "failed",
+  });
+  await jobs.updateOne(
+    { _id: job._id },
+    {
+      $set: {
+        status: finalStatus === "failed" ? "failed" : "sent",
+        pushStatus: pushOk ? "sent" : Number(pushDelivery.noTokenCount || 0) > 0 ? "no_token" : "failed",
+        emailStatus: emailOk ? "sent" : emailResult.skipped ? "skipped" : "failed",
+        lastReminderDate: new Date(),
+        updatedAt: new Date(),
+      },
+      $unset: { sending: "" },
+    },
+  );
+  return { id: String(job._id), status: finalStatus, pushDelivery, emailResult };
+}
+
+async function processDuePaymentCancelledAutoNotifications(limit = 50) {
+  await ensurePaymentCancelledAutoIndexes();
+  const jobs = adminCollection(paymentCancelledAutoCollections.jobs);
+  const dueJobs = await jobs
+    .find({ status: "pending", paymentCompleted: { $ne: true }, dueAt: { $lte: new Date() }, sending: { $ne: true } })
+    .sort({ dueAt: 1 })
+    .limit(limit)
+    .toArray();
+  const processed = [];
+  for (const job of dueJobs) {
+    const locked = await jobs.findOneAndUpdate(
+      { _id: job._id, status: "pending", sending: { $ne: true } },
+      { $set: { sending: true, sendingAt: new Date(), updatedAt: new Date() } },
+      { returnDocument: "after" },
+    );
+    if (!locked) continue;
+    try {
+      processed.push(await processPaymentCancelledAutoJob(locked));
+    } catch (error) {
+      await paymentAutoWriteLog(locked, { status: "failed", errorMessage: error.message || "Payment cancelled auto delivery failed" });
+      await jobs.updateOne(
+        { _id: locked._id },
+        { $set: { status: "failed", errorMessage: error.message || "Payment cancelled auto delivery failed", updatedAt: new Date() }, $unset: { sending: "" } },
+      );
+      processed.push({ id: String(locked._id), status: "failed", error: error.message || "Payment cancelled auto delivery failed" });
+    }
+  }
+  return processed;
+}
+
 export function startNotificationCenterScheduler() {
   if (notificationCenterSchedulerTimer) return;
   const tick = async () => {
@@ -8048,8 +8265,12 @@ export function startNotificationCenterScheduler() {
     notificationCenterSchedulerRunning = true;
     try {
       const processed = await processDueScheduledNotifications();
+      const paymentCancelledProcessed = await processDuePaymentCancelledAutoNotifications();
       if (processed.length) {
         console.info(`[NOTIFICATION_CENTER] Processed ${processed.length} scheduled notification(s)`);
+      }
+      if (paymentCancelledProcessed.length) {
+        console.info(`[NOTIFICATION_CENTER] Processed ${paymentCancelledProcessed.length} payment cancelled auto notification(s)`);
       }
     } catch (error) {
       console.error("Notification center scheduler failed", error);
@@ -8366,8 +8587,16 @@ router.delete("/notifications/scheduled/:id", asyncHandler(async (req, res) => {
 }));
 
 router.post("/notifications/process-scheduled", asyncHandler(async (req, res) => {
-  const processed = await processDueScheduledNotifications(req);
-  res.json({ success: true, message: "Due scheduled notifications processed", data: processed });
+  const [processed, paymentCancelledProcessed] = await Promise.all([
+    processDueScheduledNotifications(req),
+    processDuePaymentCancelledAutoNotifications(),
+  ]);
+  res.json({
+    success: true,
+    message: "Due scheduled notifications processed",
+    data: processed,
+    paymentCancelledAuto: paymentCancelledProcessed,
+  });
 }));
 
 router.get("/notifications/history", asyncHandler(async (req, res) => {
