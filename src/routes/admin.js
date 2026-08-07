@@ -8337,6 +8337,88 @@ async function processDuePaymentCancelledAutoNotifications(limit = 50) {
   return processed;
 }
 
+function paymentAutoDelayMs(stage = {}) {
+  const value = Math.max(0, Number(stage.delayValue || 0));
+  if (stage.delayUnit === "Days") return value * 24 * 60 * 60 * 1000;
+  if (stage.delayUnit === "Hours") return value * 60 * 60 * 1000;
+  return value * 60 * 1000;
+}
+
+async function latestPaymentCancelledAutoLogData(limit = 50) {
+  await ensurePaymentCancelledAutoDefaultConfig();
+  const [configs, pendingJobs, logs] = await Promise.all([
+    adminCollection(paymentCancelledAutoCollections.configs).find({}).sort({ priority: 1, updatedAt: -1 }).toArray(),
+    adminCollection(paymentCancelledAutoCollections.jobs).countDocuments({ status: "pending" }),
+    adminCollection(paymentCancelledAutoCollections.logs).find({}).sort({ createdAt: -1 }).limit(limit).toArray(),
+  ]);
+  return {
+    configs: configs.map((item) => ({
+      ...serializePaymentCancelledAutoDoc(item),
+      reminders: (item.reminders || []).map(normalizePaymentCancelledAutoReminder),
+      reminderCount: (item.reminders || []).filter((reminder) => reminder.enabled !== false).length,
+    })),
+    pendingJobs,
+    logs: logs.map(serializePaymentCancelledAutoDoc),
+  };
+}
+
+async function writePaymentAutoTestLog(payload) {
+  await adminCollection(paymentCancelledAutoCollections.logs).insertOne({
+    jobId: "",
+    userId: String(payload.userId || ""),
+    configId: String(payload.configId || ""),
+    stageId: payload.stageId || "admin-test",
+    stageName: payload.stageName || "Admin Test",
+    eventType: payload.eventType || "payment_cancelled",
+    paymentReference: payload.paymentReference || "",
+    ...payload,
+    createdAt: new Date(),
+  });
+}
+
+async function schedulePaymentCancelledAutoTestJobs(user, config, reqBody = {}) {
+  const eventTime = new Date();
+  const eventType = String(reqBody.eventType || "payment_cancelled");
+  const paymentReference = String(reqBody.paymentReference || `admin-test-${Date.now()}`);
+  const activeKey = `payment-cancelled-auto:${String(user._id)}:${paymentReference}`;
+  const stages = (config.reminders || []).filter((stage) => stage.enabled !== false);
+  const jobs = stages.map((stage, index) => ({
+    configId: String(config._id),
+    userId: String(user._id),
+    eventType,
+    paymentReference,
+    planName: String(reqBody.planName || user.lastPurchase?.planId || "Premium"),
+    planId: String(reqBody.planId || user.lastPurchase?.planId || ""),
+    eventTime,
+    stageId: stage.id || `stage-${index + 1}`,
+    stageName: stage.name || `Reminder ${index + 1}`,
+    stageIndex: index,
+    dueAt: new Date(eventTime.getTime() + paymentAutoDelayMs(stage)),
+    status: "pending",
+    pushStatus: "pending",
+    emailStatus: "pending",
+    activeKey,
+    dedupeKey: `payment-cancelled-auto:${String(user._id)}:${paymentReference}:${stage.id || index}`,
+    paymentCompleted: false,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  }));
+  if (jobs.length) await adminCollection(paymentCancelledAutoCollections.jobs).insertMany(jobs, { ordered: false });
+  await writePaymentAutoTestLog({
+    userId: String(user._id),
+    configId: String(config._id),
+    stageId: "admin-test",
+    stageName: "Admin Test",
+    eventType,
+    paymentReference,
+    status: "admin_test_scheduled",
+    reason: `Admin test scheduled ${jobs.length} reminder job(s)`,
+    scheduledCount: jobs.length,
+    scheduledJobs: jobs.map((job) => ({ stageId: job.stageId, stageName: job.stageName, dueAt: job.dueAt, dedupeKey: job.dedupeKey })),
+  });
+  return { jobs, paymentReference };
+}
+
 export function startNotificationCenterScheduler() {
   if (notificationCenterSchedulerTimer) return;
   const tick = async () => {
@@ -8358,22 +8440,53 @@ export function startNotificationCenterScheduler() {
 }
 
 router.get(["/notifications/payment-cancelled-auto", "/notification-management/subscription-cancellation-reminders"], asyncHandler(async (_req, res) => {
-  await ensurePaymentCancelledAutoDefaultConfig();
-  const [configs, pendingJobs, logs] = await Promise.all([
-    adminCollection(paymentCancelledAutoCollections.configs).find({}).sort({ priority: 1, updatedAt: -1 }).toArray(),
-    adminCollection(paymentCancelledAutoCollections.jobs).countDocuments({ status: "pending" }),
-    adminCollection(paymentCancelledAutoCollections.logs).find({}).sort({ createdAt: -1 }).limit(20).toArray(),
-  ]);
   res.json({
     success: true,
+    data: await latestPaymentCancelledAutoLogData(50),
+  });
+}));
+
+router.post(["/notifications/payment-cancelled-auto/test", "/notification-management/subscription-cancellation-reminders/test"], asyncHandler(async (req, res) => {
+  await ensurePaymentCancelledAutoDefaultConfig();
+  const rawUser = String(req.body?.user || req.body?.email || req.body?.userId || req.body?.mobile || "").trim();
+  const paymentReference = String(req.body?.paymentReference || `admin-test-${Date.now()}`);
+  if (!rawUser) {
+    await writePaymentAutoTestLog({ paymentReference, status: "admin_test_failed", reason: "Enter a user email, mobile, or user id before testing" });
+    return res.json({ success: false, message: "User email, mobile, or user id is required", data: await latestPaymentCancelledAutoLogData(50) });
+  }
+
+  const lower = rawUser.toLowerCase();
+  const userFilters = [
+    { email: lower },
+    { mobile: rawUser.replace(/\D/g, "") || rawUser },
+    ...(mongoose.isValidObjectId(rawUser) ? [{ _id: new mongoose.Types.ObjectId(rawUser) }] : []),
+  ];
+  const user = await User.findOne({ $or: userFilters }).select("name email mobile isPremium lastPurchase").lean();
+  if (!user) {
+    await writePaymentAutoTestLog({ paymentReference, status: "admin_test_failed", reason: `User not found for ${rawUser}` });
+    return res.json({ success: false, message: "User not found", data: await latestPaymentCancelledAutoLogData(50) });
+  }
+
+  const config = await adminCollection(paymentCancelledAutoCollections.configs).findOne({ status: "enabled" }, { sort: { priority: 1, updatedAt: -1 } });
+  if (!config) {
+    await writePaymentAutoTestLog({ userId: String(user._id), paymentReference, status: "admin_test_failed", reason: "Subscription Cancellation Reminder is disabled or missing" });
+    return res.json({ success: false, message: "Subscription Cancellation Reminder is disabled or missing", data: await latestPaymentCancelledAutoLogData(50) });
+  }
+
+  const stages = (config.reminders || []).filter((stage) => stage.enabled !== false);
+  if (!stages.length) {
+    await writePaymentAutoTestLog({ userId: String(user._id), configId: String(config._id), paymentReference, status: "admin_test_failed", reason: "No enabled reminder stages" });
+    return res.json({ success: false, message: "No enabled reminder stages", data: await latestPaymentCancelledAutoLogData(50) });
+  }
+
+  await schedulePaymentCancelledAutoTestJobs(user, config, { ...req.body, paymentReference });
+  const processed = await processDuePaymentCancelledAutoNotifications(20);
+  res.json({
+    success: true,
+    message: "Subscription cancellation test reminder processed",
     data: {
-      configs: configs.map((item) => ({
-        ...serializePaymentCancelledAutoDoc(item),
-        reminders: (item.reminders || []).map(normalizePaymentCancelledAutoReminder),
-        reminderCount: (item.reminders || []).filter((reminder) => reminder.enabled !== false).length,
-      })),
-      pendingJobs,
-      logs: logs.map(serializePaymentCancelledAutoDoc),
+      ...(await latestPaymentCancelledAutoLogData(50)),
+      processed,
     },
   });
 }));
