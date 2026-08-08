@@ -2936,6 +2936,8 @@ const notificationCenterCategoryValues = ["exam", "offer", "subscription", "revi
 const notificationCenterSoundValues = ["default", "custom", "silent"];
 const notificationCenterPriorityValues = ["high", "normal", "low"];
 const notificationCenterTypeValues = ["standard"];
+const notificationCenterDeliveryValues = ["notification", "email", "both", "in_app", "push", "in_app_push", "in_app_email", "push_email", "all"];
+const notificationCenterTimezone = env.notificationTimezone || process.env.NOTIFICATION_TIMEZONE || process.env.TZ || "Asia/Kolkata";
 
 const reminderStageSchema = z.object({
   id: z.string().trim().optional().default(""),
@@ -2977,7 +2979,8 @@ const notificationCenterSendSchema = z.object({
   notificationType: z.enum(notificationCenterTypeValues).optional().default("standard"),
   templateId: z.string().trim().optional().default(""),
   campaignName: z.string().trim().max(160).optional().default(""),
-  deliveryType: z.enum(["notification", "email", "both"]).optional().default("notification"),
+  deliveryType: z.enum(notificationCenterDeliveryValues).optional().default("notification"),
+  deliveryChannels: z.array(z.enum(["in_app", "push", "email"])).optional().default([]),
   title: z.string().trim().max(120).optional().default(""),
   message: z.string().trim().max(500).optional().default(""),
   image: z.string().trim().max(500).optional().default(""),
@@ -3002,13 +3005,38 @@ const notificationCenterSendSchema = z.object({
   reminderStages: z.array(reminderStageSchema).optional().default([]),
   action: z.enum(["send", "schedule", "draft", "automate"]).optional().default("send"),
 }).superRefine((payload, ctx) => {
-  const shouldNotify = ["notification", "both"].includes(payload.deliveryType);
-  const shouldEmail = ["email", "both"].includes(payload.deliveryType);
+  const channels = deliveryChannelsForNotificationCenter(payload);
+  const shouldNotify = channels.includes("in_app") || channels.includes("push");
+  const shouldEmail = channels.includes("email");
   if (shouldNotify && !payload.title) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["title"], message: "Notification title is required" });
   if (shouldNotify && !payload.message) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["message"], message: "Notification message is required" });
   if (shouldEmail && !payload.emailTemplateId && !payload.emailTemplateKey) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailTemplateId"], message: "Email template is required" });
   if (shouldEmail && !payload.emailSubject) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailSubject"], message: "Email subject is required" });
   if (shouldEmail && !payload.emailBody) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["emailBody"], message: "Email body is required" });
+});
+
+const automatedNotificationSchema = notificationCenterSendSchema.and(z.object({
+  action: z.literal("automate").optional().default("automate"),
+  scheduleType: z.enum(["weekly", "monthly"]),
+  weeklyDays: z.array(z.coerce.number().int().min(0).max(6)).optional().default([]),
+  monthlyDay: z.coerce.number().int().min(1).max(31).optional(),
+  scheduleTime: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Time must use HH:mm format"),
+  timezone: z.string().trim().optional().default(notificationCenterTimezone),
+  automationEnabled: z.coerce.boolean().optional().default(true),
+})).superRefine((payload, ctx) => {
+  const channels = deliveryChannelsForNotificationCenter(payload);
+  if (!payload.campaignName && !payload.title && !payload.emailSubject) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["campaignName"], message: "Notification name is required" });
+  }
+  if (!channels.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["deliveryChannels"], message: "Select at least one delivery channel" });
+  }
+  if (payload.scheduleType === "weekly" && !payload.weeklyDays.length) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["weeklyDays"], message: "Select at least one weekly day" });
+  }
+  if (payload.scheduleType === "monthly" && !payload.monthlyDay) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["monthlyDay"], message: "Select a monthly date" });
+  }
 });
 
 const paymentCancelledAutoReminderSchema = z.object({
@@ -3392,7 +3420,7 @@ async function resolveNotificationCenterEmailTemplate(payload) {
 }
 
 async function sendCustomCampaignEmail({ payload, recipients }) {
-  const shouldEmail = ["email", "both"].includes(payload.deliveryType);
+  const shouldEmail = deliveryChannelsForNotificationCenter(payload).includes("email");
   const summary = { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [] };
   if (!shouldEmail) return summary;
 
@@ -7883,16 +7911,107 @@ function notificationCenterSelectedUsers(value) {
   return selectedUserValues(value);
 }
 
-async function sendNotificationCenterPushDocs(docs = [], fallbackDelivery = null, duplicateDedupeKey = "") {
+function deliveryChannelsForNotificationCenter(payload = {}) {
+  const explicit = Array.isArray(payload.deliveryChannels)
+    ? payload.deliveryChannels.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (explicit.length) return [...new Set(explicit.filter((item) => ["in_app", "push", "email"].includes(item)))];
+
+  const type = String(payload.deliveryType || "notification");
+  if (type === "email") return ["email"];
+  if (type === "both") return ["in_app", "push", "email"];
+  if (type === "in_app") return ["in_app"];
+  if (type === "push") return ["push"];
+  if (type === "in_app_push" || type === "notification") return ["in_app", "push"];
+  if (type === "in_app_email") return ["in_app", "email"];
+  if (type === "push_email") return ["push", "email"];
+  if (type === "all") return ["in_app", "push", "email"];
+  return ["in_app", "push"];
+}
+
+function deliveryTypeForChannels(channels = []) {
+  const values = new Set(channels);
+  if (values.has("in_app") && values.has("push") && values.has("email")) return "all";
+  if (values.has("in_app") && values.has("push")) return "in_app_push";
+  if (values.has("in_app") && values.has("email")) return "in_app_email";
+  if (values.has("push") && values.has("email")) return "push_email";
+  if (values.has("email")) return "email";
+  if (values.has("push")) return "push";
+  return "in_app";
+}
+
+function normalizeAutomationDays(days = []) {
+  return [...new Set(days.map((day) => Number(day)).filter((day) => Number.isInteger(day) && day >= 0 && day <= 6))]
+    .sort((left, right) => left - right);
+}
+
+function dateWithScheduleTime(baseDate, scheduleTime) {
+  const [hours, minutes] = String(scheduleTime || "00:00").split(":").map(Number);
+  const next = new Date(baseDate);
+  next.setHours(Number(hours || 0), Number(minutes || 0), 0, 0);
+  return next;
+}
+
+function nextWeeklyAutomationDate({ weeklyDays = [], scheduleTime, from = new Date() }) {
+  const days = normalizeAutomationDays(weeklyDays);
+  if (!days.length) return null;
+  for (let offset = 0; offset <= 14; offset += 1) {
+    const candidate = dateWithScheduleTime(new Date(from.getFullYear(), from.getMonth(), from.getDate() + offset), scheduleTime);
+    if (days.includes(candidate.getDay()) && candidate.getTime() > from.getTime()) return candidate;
+  }
+  return null;
+}
+
+function nextMonthlyAutomationDate({ monthlyDay, scheduleTime, from = new Date() }) {
+  const day = Math.max(1, Math.min(31, Number(monthlyDay || 1)));
+  for (let offset = 0; offset <= 14; offset += 1) {
+    const year = from.getFullYear();
+    const month = from.getMonth() + offset;
+    const lastDay = new Date(year, month + 1, 0).getDate();
+    if (day > lastDay) continue;
+    const candidate = dateWithScheduleTime(new Date(year, month, day), scheduleTime);
+    if (candidate.getTime() > from.getTime()) return candidate;
+  }
+  return null;
+}
+
+function nextAutomatedNotificationDate(item, from = new Date()) {
+  if (item.scheduleType === "weekly") {
+    return nextWeeklyAutomationDate({ weeklyDays: item.weeklyDays || [], scheduleTime: item.scheduleTime, from });
+  }
+  if (item.scheduleType === "monthly") {
+    return nextMonthlyAutomationDate({ monthlyDay: item.monthlyDay, scheduleTime: item.scheduleTime, from });
+  }
+  return nextRecurringScheduleDate(item);
+}
+
+function automationScheduleLabel(item = {}) {
+  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  if (item.scheduleType === "weekly") {
+    return `Weekly: ${normalizeAutomationDays(item.weeklyDays || []).map((day) => dayNames[day]).join(", ")} at ${item.scheduleTime || "--:--"}`;
+  }
+  if (item.scheduleType === "monthly") return `Monthly: day ${item.monthlyDay || "-"} at ${item.scheduleTime || "--:--"}`;
+  return item.scheduleDate ? new Date(item.scheduleDate).toISOString() : "-";
+}
+
+function automationExecutionKey(item, scheduledFor) {
+  return `scheduled-notification:${String(item._id || item.id)}:${new Date(scheduledFor).toISOString()}`;
+}
+
+async function sendNotificationCenterPushDocs(docs = [], fallbackDelivery = null, duplicateDedupeKey = "", options = {}) {
+  const shouldSendPush = options.sendPush !== false;
   const defaultDelivery = fallbackDelivery || { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: docs.length, skippedCount: 0, errors: [] };
   if (!docs.length) return defaultDelivery;
-  const inserted = await insertUserNotifications(docs, { autoPush: true });
-  if (inserted.notifications?.length) return inserted.pushDelivery || defaultDelivery;
+  const inserted = await insertUserNotifications(docs, { autoPush: false });
+  if (inserted.notifications?.length && shouldSendPush) {
+    return sendPushForNotifications(inserted.notifications, { includeHidden: true });
+  }
+  if (inserted.notifications?.length) return { ...defaultDelivery, noTokenCount: 0, skippedCount: docs.length };
 
   if (duplicateDedupeKey) {
     const existing = await UserNotification.findOne({ dedupeKey: duplicateDedupeKey });
-    if (existing && existing.pushStatus !== "sent") {
-      return sendPushForNotifications([existing]);
+    if (existing && existing.pushStatus !== "sent" && shouldSendPush) {
+      return sendPushForNotifications([existing], { includeHidden: true });
     }
   }
 
@@ -7900,9 +8019,44 @@ async function sendNotificationCenterPushDocs(docs = [], fallbackDelivery = null
 }
 
 async function createNotificationHistory(payload, recipients, req, scheduledNotificationId = null) {
+  if (payload.executionKey) {
+    const lockResult = await NotificationHistory.updateOne(
+      { executionKey: payload.executionKey },
+      {
+        $setOnInsert: {
+          campaignName: payload.campaignName || payload.title || payload.emailSubject || "Notification Campaign",
+          notificationType: payload.notificationType || "standard",
+          deliveryType: payload.deliveryType || "notification",
+          deliveryChannels: deliveryChannelsForNotificationCenter(payload),
+          targetType: payload.targetType || "all",
+          selectedUsers: notificationCenterSelectedUsers(payload.selectedUsers),
+          status: "scheduled",
+          scheduledFor: payload.scheduledFor,
+          executionKey: payload.executionKey,
+          scheduledNotificationId,
+          createdBy: String(req.admin?._id || ""),
+          createdByName: req.admin?.name || req.admin?.email || "Admin",
+        },
+      },
+      { upsert: true },
+    );
+    if (!lockResult.upsertedCount) {
+      const existing = await NotificationHistory.findOne({ executionKey: payload.executionKey });
+      return {
+        history: existing,
+        delivery: { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, skippedCount: recipients.length, errors: [] },
+        emailDelivery: { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [{ status: "skipped", error: "Scheduled occurrence already processed" }] },
+        duplicate: true,
+      };
+    }
+  }
+
   let delivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: recipients.length, errors: [] };
   let emailDelivery = { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [] };
-  const shouldNotify = ["notification", "both"].includes(payload.deliveryType || "notification");
+  const deliveryChannels = deliveryChannelsForNotificationCenter(payload);
+  const shouldCreateInApp = deliveryChannels.includes("in_app");
+  const shouldPush = deliveryChannels.includes("push");
+  const shouldNotify = shouldCreateInApp || shouldPush;
 
   if (payload.action === "send" && shouldNotify) {
     const dedupePrefix = payload.dedupeKeyPrefix || `notification-center:${scheduledNotificationId || Date.now()}:${crypto.randomBytes(4).toString("hex")}`;
@@ -7912,20 +8066,20 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
       title: payload.title,
       body: payload.message,
       dedupeKey: `${dedupePrefix}:${String(user._id || user.id || "")}`,
-      visibleInApp: true,
+      visibleInApp: shouldCreateInApp,
       linkUrl: payload.deepLink || "/notifications",
       ctaConfigId: payload.ctaConfigId || "",
       ctaText: payload.ctaText || "",
       imageUrl: payload.image || "",
       targetGroup: payload.targetType || "all",
-      deliveryMode: "notification",
-      notificationStatus: "created",
+      deliveryMode: deliveryTypeForChannels(deliveryChannels),
+      notificationStatus: shouldCreateInApp ? "created" : "not_requested",
       senderId: String(req.admin?._id || ""),
       senderName: req.admin?.name || req.admin?.email || "Admin",
-      pushStatus: "pending",
+      pushStatus: shouldPush ? "pending" : "not_requested",
       sentAt: new Date(),
     }));
-    delivery = await sendNotificationCenterPushDocs(docs, delivery);
+    delivery = await sendNotificationCenterPushDocs(docs, delivery, `${dedupePrefix}:${String(recipients[0]?._id || recipients[0]?.id || "")}`, { sendPush: shouldPush });
   } else if (!shouldNotify) {
     delivery = { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, errors: [] };
   }
@@ -7945,10 +8099,11 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
         ? "failed"
         : "sent";
 
-  const history = await NotificationHistory.create({
+  const historyPayload = {
     campaignName: payload.campaignName || payload.title || payload.emailSubject || "Notification Campaign",
     notificationType: payload.notificationType || "standard",
     deliveryType: payload.deliveryType || "notification",
+    deliveryChannels,
     title: payload.title || "",
     message: payload.message || "",
     image: payload.image || "",
@@ -7977,8 +8132,15 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
     createdBy: String(req.admin?._id || ""),
     createdByName: req.admin?.name || req.admin?.email || "Admin",
     sentAt: payload.action === "send" ? new Date() : undefined,
+    scheduledFor: payload.scheduledFor,
+    executedAt: payload.action === "send" ? new Date() : undefined,
+    executionKey: payload.executionKey || undefined,
     scheduledNotificationId,
-  });
+  };
+
+  const history = payload.executionKey
+    ? await NotificationHistory.findOneAndUpdate({ executionKey: payload.executionKey }, { $set: historyPayload }, { new: true })
+    : await NotificationHistory.create(historyPayload);
 
   return { history, delivery, emailDelivery };
 }
@@ -8004,10 +8166,12 @@ function nextRecurringScheduleDate(item) {
 }
 
 async function processScheduledNotification(item, req = {}) {
+  const scheduledFor = item.nextSendAt || item.scheduleDate;
   const recipients = await getNotificationRecipients(item.targetType, item.selectedUsers || []);
   const payload = {
     campaignName: item.campaignName,
     deliveryType: item.deliveryType || "notification",
+    deliveryChannels: deliveryChannelsForNotificationCenter(item),
     title: item.title,
     message: item.message,
     image: item.image,
@@ -8025,13 +8189,23 @@ async function processScheduledNotification(item, req = {}) {
     sound: item.sound,
     priority: item.priority,
     action: "send",
+    scheduledFor,
+    executionKey: scheduledFor ? automationExecutionKey(item, scheduledFor) : undefined,
+    dedupeKeyPrefix: scheduledFor ? automationExecutionKey(item, scheduledFor) : undefined,
   };
 
   const { history, delivery, emailDelivery } = await createNotificationHistory(payload, recipients, req, item._id);
-  const nextSchedule = nextRecurringScheduleDate(item);
+  const nextSchedule = item.automationEnabled || item.scheduleType === "weekly" || item.scheduleType === "monthly"
+    ? nextAutomatedNotificationDate(item, new Date((scheduledFor || new Date()).getTime() + 1000))
+    : nextRecurringScheduleDate(item);
   item.status = nextSchedule ? "pending" : history.status === "failed" ? "failed" : "sent";
-  if (nextSchedule) item.scheduleDate = nextSchedule;
+  if (nextSchedule) {
+    item.scheduleDate = nextSchedule;
+    item.nextSendAt = nextSchedule;
+  }
   item.sentAt = new Date();
+  item.lastSentAt = new Date();
+  item.audienceCount = recipients.length;
   item.lastError = delivery.errors?.[0] || emailDelivery.logs?.find((log) => log.status === "failed" || log.status === "skipped")?.error || "";
   item.logs = [...(delivery.errors || []).map((error) => ({ channel: "notification", status: "failed", error })), ...(emailDelivery.logs || [])];
   await item.save();
@@ -8043,7 +8217,14 @@ let notificationCenterSchedulerTimer = null;
 let notificationCenterSchedulerRunning = false;
 
 async function processDueScheduledNotifications(req = {}) {
-  const items = await ScheduledNotification.find({ status: "pending", scheduleDate: { $lte: new Date() } }).sort({ scheduleDate: 1 }).limit(50);
+  const now = new Date();
+  const items = await ScheduledNotification.find({
+    status: "pending",
+    $or: [
+      { scheduleDate: { $lte: now } },
+      { nextSendAt: { $lte: now }, automationEnabled: true },
+    ],
+  }).sort({ scheduleDate: 1, nextSendAt: 1 }).limit(50);
   const processed = [];
   for (const item of items) {
     try {
@@ -8058,8 +8239,13 @@ async function processDueScheduledNotifications(req = {}) {
         emailSkippedCount: result.emailDelivery.emailSkippedCount,
       });
     } catch (error) {
-      item.status = "failed";
+      item.status = item.automationEnabled ? "pending" : "failed";
       item.lastError = error.message || "Failed to process scheduled notification";
+      if (item.automationEnabled) {
+        const nextSchedule = nextAutomatedNotificationDate(item, new Date(Date.now() + 1000));
+        item.scheduleDate = nextSchedule;
+        item.nextSendAt = nextSchedule;
+      }
       await item.save();
       processed.push({ id: String(item._id), status: "failed", error: item.lastError });
     }
@@ -8675,6 +8861,15 @@ router.get("/notifications/audiences", asyncHandler(async (_req, res) => {
   res.json({ success: true, data: entries });
 }));
 
+router.post("/notifications/audience-count", asyncHandler(async (req, res) => {
+  const targetType = notificationCenterTargetValues.includes(String(req.body?.targetType || ""))
+    ? String(req.body.targetType)
+    : "all";
+  const selectedUsers = notificationCenterSelectedUsers(req.body?.selectedUsers || "");
+  const users = await getNotificationRecipients(targetType, selectedUsers);
+  res.json({ success: true, data: { targetType, count: users.length } });
+}));
+
 router.post("/notifications/test", asyncHandler(async (req, res) => {
   const testTarget = String(req.body?.testTarget || "selected");
   const payload = notificationCenterSendSchema.parse({
@@ -8761,8 +8956,99 @@ router.post("/notifications/send", asyncHandler(async (req, res) => {
   });
 }));
 
+function automatedNotificationDocument(payload, req, existing = null) {
+  const deliveryChannels = deliveryChannelsForNotificationCenter(payload);
+  const scheduleDate = nextAutomatedNotificationDate(payload);
+  return {
+    ...payload,
+    campaignName: payload.campaignName || payload.title || payload.emailSubject || "Automated Notification",
+    deliveryType: deliveryTypeForChannels(deliveryChannels),
+    deliveryChannels,
+    selectedUsers: notificationCenterSelectedUsers(payload.selectedUsers),
+    scheduleType: payload.scheduleType,
+    weeklyDays: normalizeAutomationDays(payload.weeklyDays || []),
+    monthlyDay: payload.scheduleType === "monthly" ? payload.monthlyDay : undefined,
+    scheduleTime: payload.scheduleTime,
+    timezone: payload.timezone || notificationCenterTimezone,
+    recurring: true,
+    recurrence: payload.scheduleType,
+    automationEnabled: payload.automationEnabled !== false,
+    status: payload.automationEnabled === false ? "paused" : "pending",
+    scheduleDate,
+    nextSendAt: scheduleDate,
+    createdBy: existing?.createdBy || String(req.admin?._id || ""),
+    createdByName: existing?.createdByName || req.admin?.name || req.admin?.email || "Admin",
+  };
+}
+
+router.get("/notifications/automations", asyncHandler(async (_req, res) => {
+  const items = await ScheduledNotification.find({ scheduleType: { $in: ["weekly", "monthly"] } }).sort({ updatedAt: -1, createdAt: -1 }).limit(300);
+  const serialized = await Promise.all(items.map(async (item) => {
+    const json = serializeNotificationDoc(item);
+    const count = await getNotificationRecipients(json.targetType, json.selectedUsers || []);
+    return {
+      ...json,
+      audienceCount: count.length,
+      scheduleLabel: automationScheduleLabel(json),
+      nextSendAt: json.nextSendAt || json.scheduleDate,
+    };
+  }));
+  res.json({ success: true, data: serialized, timezone: notificationCenterTimezone });
+}));
+
+router.post("/notifications/automations", asyncHandler(async (req, res) => {
+  const payload = automatedNotificationSchema.parse({ ...(req.body || {}), action: "automate" });
+  const recipients = await getNotificationRecipients(payload.targetType, notificationCenterSelectedUsers(payload.selectedUsers));
+  const doc = automatedNotificationDocument({ ...payload, audienceCount: recipients.length }, req);
+  const item = await ScheduledNotification.create({ ...doc, audienceCount: recipients.length });
+  res.status(201).json({ success: true, message: "Automated notification saved", data: serializeNotificationDoc(item) });
+}));
+
+router.put("/notifications/automations/:id", asyncHandler(async (req, res) => {
+  const existing = await ScheduledNotification.findById(req.params.id);
+  if (!existing) throw new AppError("Automated notification not found", 404);
+  const payload = automatedNotificationSchema.parse({ ...(req.body || {}), action: "automate" });
+  const recipients = await getNotificationRecipients(payload.targetType, notificationCenterSelectedUsers(payload.selectedUsers));
+  const doc = automatedNotificationDocument({ ...payload, audienceCount: recipients.length }, req, existing);
+  Object.assign(existing, doc, { audienceCount: recipients.length, lastError: "" });
+  await existing.save();
+  res.json({ success: true, message: "Automated notification updated", data: serializeNotificationDoc(existing) });
+}));
+
+router.patch("/notifications/automations/:id/status", asyncHandler(async (req, res) => {
+  const enabled = req.body?.enabled === true || String(req.body?.status || "") === "enabled";
+  const item = await ScheduledNotification.findById(req.params.id);
+  if (!item) throw new AppError("Automated notification not found", 404);
+  item.automationEnabled = enabled;
+  item.status = enabled ? "pending" : "paused";
+  item.pausedAt = enabled ? undefined : new Date();
+  if (enabled) {
+    const nextSchedule = nextAutomatedNotificationDate(item);
+    item.scheduleDate = nextSchedule;
+    item.nextSendAt = nextSchedule;
+  }
+  await item.save();
+  res.json({ success: true, message: enabled ? "Automation enabled" : "Automation disabled", data: serializeNotificationDoc(item) });
+}));
+
+router.delete("/notifications/automations/:id", asyncHandler(async (req, res) => {
+  const item = await ScheduledNotification.findById(req.params.id);
+  if (!item) throw new AppError("Automated notification not found", 404);
+  item.status = "cancelled";
+  item.automationEnabled = false;
+  item.pausedAt = new Date();
+  await item.save();
+  res.json({ success: true, message: "Automated notification deleted", data: serializeNotificationDoc(item) });
+}));
+
+router.get("/notifications/automations/:id/history", asyncHandler(async (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 50)));
+  const items = await NotificationHistory.find({ scheduledNotificationId: req.params.id }).sort({ createdAt: -1 }).limit(limit);
+  res.json({ success: true, data: items.map(serializeNotificationDoc) });
+}));
+
 router.get("/notifications/scheduled", asyncHandler(async (_req, res) => {
-  const items = await ScheduledNotification.find().sort({ scheduleDate: -1 }).limit(200);
+  const items = await ScheduledNotification.find({ $or: [{ scheduleType: { $exists: false } }, { scheduleType: "once" }, { scheduleType: null }] }).sort({ scheduleDate: -1 }).limit(200);
   res.json({ success: true, data: items.map(serializeNotificationDoc) });
 }));
 

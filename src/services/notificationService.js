@@ -75,8 +75,10 @@ async function insertedDocsFromBulkError(error) {
   return UserNotification.find({ _id: { $in: insertedIds } });
 }
 
-export async function sendPushForNotifications(notifications = []) {
-  const visibleNotifications = notifications.filter((item) => item && item.visibleInApp !== false);
+export async function sendPushForNotifications(notifications = [], options = {}) {
+  const visibleNotifications = options.includeHidden
+    ? notifications.filter(Boolean)
+    : notifications.filter((item) => item && item.visibleInApp !== false);
   const result = {
     sentCount: 0,
     successCount: 0,
