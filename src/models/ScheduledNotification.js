@@ -33,6 +33,7 @@ const scheduledNotificationSchema = new Schema(
     monthlyDay: { type: Number, min: 1, max: 31 },
     scheduleTime: { type: String, trim: true, default: "" },
     timezone: { type: String, trim: true, default: "Asia/Kolkata" },
+    nextScheduledAt: { type: Date, index: true },
     nextSendAt: { type: Date, index: true },
     lastSentAt: { type: Date },
     audienceCount: { type: Number, default: 0 },

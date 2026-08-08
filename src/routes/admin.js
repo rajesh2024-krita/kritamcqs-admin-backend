@@ -7946,31 +7946,52 @@ function normalizeAutomationDays(days = []) {
     .sort((left, right) => left - right);
 }
 
-function dateWithScheduleTime(baseDate, scheduleTime) {
+const ASIA_KOLKATA_OFFSET_MS = 330 * 60 * 1000;
+
+function parseScheduleTime(scheduleTime) {
   const [hours, minutes] = String(scheduleTime || "00:00").split(":").map(Number);
-  const next = new Date(baseDate);
-  next.setHours(Number(hours || 0), Number(minutes || 0), 0, 0);
-  return next;
+  return {
+    hours: Math.max(0, Math.min(23, Number(hours || 0))),
+    minutes: Math.max(0, Math.min(59, Number(minutes || 0))),
+  };
+}
+
+function asiaKolkataParts(date = new Date()) {
+  const shifted = new Date(date.getTime() + ASIA_KOLKATA_OFFSET_MS);
+  return {
+    year: shifted.getUTCFullYear(),
+    month: shifted.getUTCMonth(),
+    date: shifted.getUTCDate(),
+    day: shifted.getUTCDay(),
+  };
+}
+
+function dateFromAsiaKolkataParts(year, month, date, scheduleTime) {
+  const { hours, minutes } = parseScheduleTime(scheduleTime);
+  return new Date(Date.UTC(year, month, date, hours, minutes, 0, 0) - ASIA_KOLKATA_OFFSET_MS);
 }
 
 function nextWeeklyAutomationDate({ weeklyDays = [], scheduleTime, from = new Date() }) {
   const days = normalizeAutomationDays(weeklyDays);
   if (!days.length) return null;
+  const parts = asiaKolkataParts(from);
   for (let offset = 0; offset <= 14; offset += 1) {
-    const candidate = dateWithScheduleTime(new Date(from.getFullYear(), from.getMonth(), from.getDate() + offset), scheduleTime);
-    if (days.includes(candidate.getDay()) && candidate.getTime() > from.getTime()) return candidate;
+    const candidate = dateFromAsiaKolkataParts(parts.year, parts.month, parts.date + offset, scheduleTime);
+    if (days.includes(asiaKolkataParts(candidate).day) && candidate.getTime() > from.getTime()) return candidate;
   }
   return null;
 }
 
 function nextMonthlyAutomationDate({ monthlyDay, scheduleTime, from = new Date() }) {
   const day = Math.max(1, Math.min(31, Number(monthlyDay || 1)));
+  const parts = asiaKolkataParts(from);
   for (let offset = 0; offset <= 14; offset += 1) {
-    const year = from.getFullYear();
-    const month = from.getMonth() + offset;
-    const lastDay = new Date(year, month + 1, 0).getDate();
+    const monthStart = new Date(Date.UTC(parts.year, parts.month + offset, 1));
+    const year = monthStart.getUTCFullYear();
+    const month = monthStart.getUTCMonth();
+    const lastDay = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
     if (day > lastDay) continue;
-    const candidate = dateWithScheduleTime(new Date(year, month, day), scheduleTime);
+    const candidate = dateFromAsiaKolkataParts(year, month, day, scheduleTime);
     if (candidate.getTime() > from.getTime()) return candidate;
   }
   return null;
@@ -7988,10 +8009,16 @@ function nextAutomatedNotificationDate(item, from = new Date()) {
 
 function automationScheduleLabel(item = {}) {
   const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const formatTime = (value) => {
+    const { hours, minutes } = parseScheduleTime(value);
+    const suffix = hours >= 12 ? "PM" : "AM";
+    const displayHour = hours % 12 || 12;
+    return `${displayHour}:${String(minutes).padStart(2, "0")} ${suffix}`;
+  };
   if (item.scheduleType === "weekly") {
-    return `Weekly: ${normalizeAutomationDays(item.weeklyDays || []).map((day) => dayNames[day]).join(", ")} at ${item.scheduleTime || "--:--"}`;
+    return `Every ${normalizeAutomationDays(item.weeklyDays || []).map((day) => dayNames[day]).join(", ")} at ${formatTime(item.scheduleTime)}`;
   }
-  if (item.scheduleType === "monthly") return `Monthly: day ${item.monthlyDay || "-"} at ${item.scheduleTime || "--:--"}`;
+  if (item.scheduleType === "monthly") return `Every month on day ${item.monthlyDay || "-"} at ${formatTime(item.scheduleTime)}`;
   return item.scheduleDate ? new Date(item.scheduleDate).toISOString() : "-";
 }
 
@@ -8179,7 +8206,7 @@ function nextRecurringScheduleDate(item) {
 }
 
 async function processScheduledNotification(item, req = {}) {
-  const scheduledFor = item.nextSendAt || item.scheduleDate;
+  const scheduledFor = item.nextScheduledAt || item.nextSendAt || item.scheduleDate;
   const executionKey = scheduledFor ? automationExecutionKey(item, scheduledFor) : "";
   if (executionKey && item.logsEnabled === false) {
     const lockResult = await ScheduledNotification.updateOne(
@@ -8230,6 +8257,7 @@ async function processScheduledNotification(item, req = {}) {
   item.status = nextSchedule ? "pending" : history.status === "failed" ? "failed" : "sent";
   if (nextSchedule) {
     item.scheduleDate = nextSchedule;
+    item.nextScheduledAt = nextSchedule;
     item.nextSendAt = nextSchedule;
   }
   item.sentAt = new Date();
@@ -8241,7 +8269,7 @@ async function processScheduledNotification(item, req = {}) {
   return { history, delivery, emailDelivery };
 }
 
-const NOTIFICATION_CENTER_SCHEDULER_INTERVAL_MS = 60 * 1000;
+const NOTIFICATION_CENTER_SCHEDULER_INTERVAL_MS = 15 * 1000;
 let notificationCenterSchedulerTimer = null;
 let notificationCenterSchedulerRunning = false;
 
@@ -8251,6 +8279,7 @@ async function processDueScheduledNotifications(req = {}) {
     status: "pending",
     $or: [
       { scheduleDate: { $lte: now } },
+      { nextScheduledAt: { $lte: now }, automationEnabled: true },
       { nextSendAt: { $lte: now }, automationEnabled: true },
     ],
   }).sort({ scheduleDate: 1, nextSendAt: 1 }).limit(50);
@@ -8273,6 +8302,7 @@ async function processDueScheduledNotifications(req = {}) {
       if (item.automationEnabled) {
         const nextSchedule = nextAutomatedNotificationDate(item, new Date(Date.now() + 1000));
         item.scheduleDate = nextSchedule;
+        item.nextScheduledAt = nextSchedule;
         item.nextSendAt = nextSchedule;
       }
       await item.save();
@@ -9005,6 +9035,7 @@ function automatedNotificationDocument(payload, req, existing = null) {
     logsEnabled: payload.logsEnabled !== false,
     status: payload.automationEnabled === false ? "paused" : "pending",
     scheduleDate,
+    nextScheduledAt: scheduleDate,
     nextSendAt: scheduleDate,
     createdBy: existing?.createdBy || String(req.admin?._id || ""),
     createdByName: existing?.createdByName || req.admin?.name || req.admin?.email || "Admin",
@@ -9015,12 +9046,29 @@ router.get("/notifications/automations", asyncHandler(async (_req, res) => {
   const items = await ScheduledNotification.find({ scheduleType: { $in: ["weekly", "monthly"] } }).sort({ updatedAt: -1, createdAt: -1 }).limit(300);
   const serialized = await Promise.all(items.map(async (item) => {
     const json = serializeNotificationDoc(item);
+    const recalculatedNext = json.automationEnabled !== false && json.status === "pending"
+      ? nextAutomatedNotificationDate(json)
+      : null;
+    if (recalculatedNext) {
+      const currentNext = json.nextScheduledAt || json.nextSendAt || json.scheduleDate;
+      const currentMs = currentNext ? new Date(currentNext).getTime() : 0;
+      if (!currentMs || Math.abs(currentMs - recalculatedNext.getTime()) > 30 * 1000) {
+        await ScheduledNotification.updateOne(
+          { _id: item._id },
+          { $set: { scheduleDate: recalculatedNext, nextScheduledAt: recalculatedNext, nextSendAt: recalculatedNext } },
+        );
+        json.scheduleDate = recalculatedNext;
+        json.nextScheduledAt = recalculatedNext;
+        json.nextSendAt = recalculatedNext;
+      }
+    }
     const count = await getNotificationRecipients(json.targetType, json.selectedUsers || []);
     return {
       ...json,
       audienceCount: count.length,
       scheduleLabel: automationScheduleLabel(json),
-      nextSendAt: json.nextSendAt || json.scheduleDate,
+      nextScheduledAt: json.nextScheduledAt || json.nextSendAt || json.scheduleDate,
+      nextSendAt: json.nextScheduledAt || json.nextSendAt || json.scheduleDate,
     };
   }));
   res.json({ success: true, data: serialized, timezone: notificationCenterTimezone });
@@ -9055,6 +9103,7 @@ router.patch("/notifications/automations/:id/status", asyncHandler(async (req, r
   if (enabled) {
     const nextSchedule = nextAutomatedNotificationDate(item);
     item.scheduleDate = nextSchedule;
+    item.nextScheduledAt = nextSchedule;
     item.nextSendAt = nextSchedule;
   }
   await item.save();
