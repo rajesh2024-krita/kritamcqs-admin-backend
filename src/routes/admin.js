@@ -2299,6 +2299,39 @@ const freeUserSubscriptionCtaDefaults = {
   ctaLink: "/subscription",
 };
 
+const dynamicCtaCardScreens = ["dashboard", "daily-test", "daily-test-result", "profile"];
+
+const dynamicCtaCardDefaults = {
+  dashboard: freeUserSubscriptionCtaDefaults,
+  "daily-test": {
+    enabled: true,
+    eyebrow: "NEET & JEE Unlock",
+    title: "Go Premium",
+    description: "Unlock unlimited questions, weak area analysis, and smart revision.",
+    imageUrl: "",
+    ctaText: "View Plans",
+    ctaLink: "/subscription",
+  },
+  "daily-test-result": {
+    enabled: true,
+    eyebrow: "Score Booster",
+    title: "Improve Faster",
+    description: "Upgrade for deeper result insights, weak area practice, and unlimited revision.",
+    imageUrl: "",
+    ctaText: "Upgrade Now",
+    ctaLink: "/subscription",
+  },
+  profile: {
+    enabled: true,
+    eyebrow: "Unlock Your Potential",
+    title: "Go Premium",
+    description: "Access premium features, exclusive content, and smarter practice tools.",
+    imageUrl: "",
+    ctaText: "Buy Now",
+    ctaLink: "/subscription",
+  },
+};
+
 function sanitizeFreeUserSubscriptionCta(value = {}) {
   return {
     enabled: value.enabled !== false,
@@ -2309,6 +2342,24 @@ function sanitizeFreeUserSubscriptionCta(value = {}) {
     ctaText: String(value.ctaText || freeUserSubscriptionCtaDefaults.ctaText).trim().slice(0, 80),
     ctaLink: String(value.ctaLink || freeUserSubscriptionCtaDefaults.ctaLink).trim().slice(0, 500),
   };
+}
+
+function sanitizeDynamicCtaCard(value = {}, screen = "dashboard") {
+  const defaults = dynamicCtaCardDefaults[screen] || freeUserSubscriptionCtaDefaults;
+  return sanitizeFreeUserSubscriptionCta({ ...defaults, ...(value || {}) });
+}
+
+function sanitizeDynamicCtaCards(value = {}) {
+  return dynamicCtaCardScreens.reduce((cards, screen) => {
+    cards[screen] = sanitizeDynamicCtaCard(value?.[screen], screen);
+    return cards;
+  }, {});
+}
+
+async function getDynamicCtaCardSeed() {
+  const legacy = await WebsiteContent.findOne({ key: "free-user-subscription-cta" }).lean();
+  const legacyDashboard = sanitizeFreeUserSubscriptionCta(legacy?.content || {});
+  return { ...dynamicCtaCardDefaults, dashboard: legacyDashboard };
 }
 
 router.get("/free-user-subscription-cta", asyncHandler(async (_req, res) => {
@@ -2328,6 +2379,34 @@ router.put("/free-user-subscription-cta", requireMainAdmin, asyncHandler(async (
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
   res.json({ success: true, message: "Free user subscription CTA saved", data: sanitizeFreeUserSubscriptionCta(item.content || {}) });
+}));
+
+router.get("/dynamic-cta-cards", requireMainAdmin, asyncHandler(async (_req, res) => {
+  const seed = await getDynamicCtaCardSeed();
+  const item = await WebsiteContent.findOneAndUpdate(
+    { key: "dynamic-cta-cards" },
+    { $setOnInsert: { key: "dynamic-cta-cards", content: seed, status: "published" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  res.json({ success: true, data: sanitizeDynamicCtaCards(item.content || {}) });
+}));
+
+router.put("/dynamic-cta-cards/:screen", requireMainAdmin, asyncHandler(async (req, res) => {
+  const screen = String(req.params.screen || "").trim();
+  if (!dynamicCtaCardScreens.includes(screen)) throw new AppError("Invalid CTA card screen", 400);
+  const seed = await getDynamicCtaCardSeed();
+  const item = await WebsiteContent.findOneAndUpdate(
+    { key: "dynamic-cta-cards" },
+    { $setOnInsert: { key: "dynamic-cta-cards", content: seed, status: "published" } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  const cards = sanitizeDynamicCtaCards(item.content || {});
+  cards[screen] = sanitizeDynamicCtaCard(req.body || {}, screen);
+  item.content = cards;
+  item.status = "published";
+  item.updatedById = req.admin?._id;
+  await item.save();
+  res.json({ success: true, message: "CTA card saved", data: cards[screen] });
 }));
 
 const offerTimerSettingsSchema = z.object({
