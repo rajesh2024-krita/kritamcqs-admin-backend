@@ -37,6 +37,8 @@ const scheduledNotificationSchema = new Schema(
     lastSentAt: { type: Date },
     audienceCount: { type: Number, default: 0 },
     automationEnabled: { type: Boolean, default: false, index: true },
+    logsEnabled: { type: Boolean, default: true, index: true },
+    executionKeys: { type: [String], default: [] },
     recurring: { type: Boolean, default: false, index: true },
     recurrence: { type: String, enum: ["none", "daily", "weekly", "monthly", "custom"], default: "none", index: true },
     recurrenceInterval: { type: Number, default: 1 },

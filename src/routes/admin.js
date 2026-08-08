@@ -3023,6 +3023,7 @@ const automatedNotificationSchema = notificationCenterSendSchema.and(z.object({
   scheduleTime: z.string().trim().regex(/^([01]\d|2[0-3]):[0-5]\d$/, "Time must use HH:mm format"),
   timezone: z.string().trim().optional().default(notificationCenterTimezone),
   automationEnabled: z.coerce.boolean().optional().default(true),
+  logsEnabled: z.coerce.boolean().optional().default(true),
 })).superRefine((payload, ctx) => {
   const channels = deliveryChannelsForNotificationCenter(payload);
   if (!payload.campaignName && !payload.title && !payload.emailSubject) {
@@ -8019,7 +8020,7 @@ async function sendNotificationCenterPushDocs(docs = [], fallbackDelivery = null
 }
 
 async function createNotificationHistory(payload, recipients, req, scheduledNotificationId = null) {
-  if (payload.executionKey) {
+  if (payload.executionKey && payload.logsEnabled !== false) {
     const lockResult = await NotificationHistory.updateOne(
       { executionKey: payload.executionKey },
       {
@@ -8099,6 +8100,18 @@ async function createNotificationHistory(payload, recipients, req, scheduledNoti
         ? "failed"
         : "sent";
 
+  if (payload.logsEnabled === false) {
+    return {
+      history: {
+        status,
+        campaignName: payload.campaignName || payload.title || payload.emailSubject || "Notification Campaign",
+      },
+      delivery,
+      emailDelivery,
+      logsSkipped: true,
+    };
+  }
+
   const historyPayload = {
     campaignName: payload.campaignName || payload.title || payload.emailSubject || "Notification Campaign",
     notificationType: payload.notificationType || "standard",
@@ -8167,6 +8180,21 @@ function nextRecurringScheduleDate(item) {
 
 async function processScheduledNotification(item, req = {}) {
   const scheduledFor = item.nextSendAt || item.scheduleDate;
+  const executionKey = scheduledFor ? automationExecutionKey(item, scheduledFor) : "";
+  if (executionKey && item.logsEnabled === false) {
+    const lockResult = await ScheduledNotification.updateOne(
+      { _id: item._id, executionKeys: { $ne: executionKey } },
+      { $addToSet: { executionKeys: executionKey } },
+    );
+    if (!lockResult.modifiedCount) {
+      return {
+        history: { status: "skipped", campaignName: item.campaignName || item.title || "Automated Notification" },
+        delivery: { sentCount: 0, successCount: 0, failedCount: 0, noTokenCount: 0, skippedCount: 0, errors: [] },
+        emailDelivery: { emailSentCount: 0, emailFailedCount: 0, emailSkippedCount: 0, logs: [] },
+        duplicate: true,
+      };
+    }
+  }
   const recipients = await getNotificationRecipients(item.targetType, item.selectedUsers || []);
   const payload = {
     campaignName: item.campaignName,
@@ -8190,8 +8218,9 @@ async function processScheduledNotification(item, req = {}) {
     priority: item.priority,
     action: "send",
     scheduledFor,
-    executionKey: scheduledFor ? automationExecutionKey(item, scheduledFor) : undefined,
-    dedupeKeyPrefix: scheduledFor ? automationExecutionKey(item, scheduledFor) : undefined,
+    executionKey: executionKey || undefined,
+    dedupeKeyPrefix: executionKey || undefined,
+    logsEnabled: item.logsEnabled !== false,
   };
 
   const { history, delivery, emailDelivery } = await createNotificationHistory(payload, recipients, req, item._id);
@@ -8973,6 +9002,7 @@ function automatedNotificationDocument(payload, req, existing = null) {
     recurring: true,
     recurrence: payload.scheduleType,
     automationEnabled: payload.automationEnabled !== false,
+    logsEnabled: payload.logsEnabled !== false,
     status: payload.automationEnabled === false ? "paused" : "pending",
     scheduleDate,
     nextSendAt: scheduleDate,
