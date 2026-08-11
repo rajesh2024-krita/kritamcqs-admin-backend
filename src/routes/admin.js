@@ -2838,6 +2838,13 @@ router.get("/users/migration/logs", asyncHandler(async (_req, res) => {
     data: await oldUserMigrationService.logs(),
   });
 }));
+router.post("/users/export", requireModulePermission("users", "view"), asyncHandler(async (req, res) => {
+  const buffer = await exportUsersWorkbook(req.body || {});
+  const stamp = new Date().toISOString().slice(0, 10);
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", `attachment; filename=users-export-${stamp}.xlsx`);
+  res.send(buffer);
+}));
 
 const revisionConfigSchema = z.object({
   wrongQuestionLimit: z.coerce.number().int().min(1).max(100).optional(),
@@ -11058,24 +11065,38 @@ async function unsetOtherDefaultListStyles(defaultId) {
   await ListStyle.updateMany({ _id: { $ne: defaultId }, isDefault: true }, { $set: { isDefault: false } });
 }
 
+function userDateRangeFilter(query = {}) {
+  const fromValue = query.fromDate || query.dateFrom || query.createdFrom;
+  const toValue = query.toDate || query.dateTo || query.createdTo;
+  const createdAt = {};
+  if (fromValue) {
+    const from = new Date(fromValue);
+    if (!Number.isNaN(from.getTime())) createdAt.$gte = from;
+  }
+  if (toValue) {
+    const to = new Date(toValue);
+    if (!Number.isNaN(to.getTime())) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(String(toValue))) to.setHours(23, 59, 59, 999);
+      createdAt.$lte = to;
+    }
+  }
+  return Object.keys(createdAt).length ? { createdAt } : null;
+}
+
 function buildUserProviderFilter(query, filters = {}) {
   const provider = String(query.provider || query.loginProvider || "").trim().toUpperCase();
-  if (!provider) return {};
-
   const existingSearch = Array.isArray(filters.$or) ? filters.$or : null;
   delete filters.provider;
   delete filters.loginProvider;
   delete filters.$or;
 
-  const combineWithSearch = (providerFilter) => {
-    if (!existingSearch) return providerFilter;
-    return { $and: [{ $or: existingSearch }, providerFilter] };
-  };
   const exactProvider = (value) => ({ loginProvider: new RegExp(`^${value}$`, "i") });
   const authType = (value) => ({ authTypes: new RegExp(`^${value}$`, "i") });
+  const customFilters = [];
+  if (existingSearch) customFilters.push({ $or: existingSearch });
 
   if (provider === "GOOGLE") {
-    return combineWithSearch({
+    customFilters.push({
       $or: [
         exactProvider("GOOGLE"),
         { googleId: { $exists: true, $nin: ["", null] } },
@@ -11085,7 +11106,7 @@ function buildUserProviderFilter(query, filters = {}) {
   }
 
   if (provider === "APPLE") {
-    return combineWithSearch({
+    customFilters.push({
       $or: [
         exactProvider("APPLE"),
         { isAppleLogin: true },
@@ -11097,7 +11118,7 @@ function buildUserProviderFilter(query, filters = {}) {
   }
 
   if (provider === "EMAIL") {
-    return combineWithSearch({
+    customFilters.push({
       $and: [
         {
           $or: [
@@ -11118,7 +11139,7 @@ function buildUserProviderFilter(query, filters = {}) {
   }
 
   if (provider === "PHONE") {
-    return combineWithSearch({
+    customFilters.push({
       $or: [
         exactProvider("PHONE"),
         authType("phone"),
@@ -11138,7 +11159,7 @@ function buildUserProviderFilter(query, filters = {}) {
   }
 
   if (provider === "GUEST") {
-    return combineWithSearch({
+    customFilters.push({
       $or: [
         exactProvider("GUEST"),
         authType("guest"),
@@ -11158,7 +11179,7 @@ function buildUserProviderFilter(query, filters = {}) {
   }
 
   if (provider === "FACEBOOK") {
-    return combineWithSearch({
+    customFilters.push({
       $or: [
         exactProvider("FACEBOOK"),
         authType("facebook"),
@@ -11167,7 +11188,98 @@ function buildUserProviderFilter(query, filters = {}) {
     });
   }
 
-  return existingSearch ? { $or: existingSearch } : {};
+  if (query.mobileAvailable === true || query.mobileAvailable === "true" || query.exportType === "mobile") {
+    customFilters.push({ mobile: { $exists: true, $nin: ["", null] } });
+  }
+
+  const examAudience = String(query.examAudience || "").trim().toUpperCase();
+  if (examAudience === "NEET" || query.exportType === "neet") {
+    customFilters.push({ examMode: { $in: ["NEET", "BOTH"] } });
+  }
+  if (examAudience === "JEE" || query.exportType === "jee") {
+    customFilters.push({ examMode: { $in: ["JEE", "BOTH"] } });
+  }
+
+  const dateRange = userDateRangeFilter(query);
+  if (dateRange) customFilters.push(dateRange);
+
+  return customFilters.length ? { $and: customFilters } : {};
+}
+
+function exportUserQuery(raw = {}) {
+  const query = { ...raw, page: 1, limit: 500, format: undefined };
+  const exportType = String(raw.exportType || "filtered").trim().toLowerCase();
+  if (exportType === "google") query.loginProvider = "GOOGLE";
+  if (exportType === "email") query.loginProvider = "EMAIL";
+  if (exportType === "apple") query.loginProvider = "APPLE";
+  if (exportType === "mobile") query.mobileAvailable = true;
+  if (exportType === "neet") query.examAudience = "NEET";
+  if (exportType === "jee") query.examAudience = "JEE";
+  if (exportType === "date_range" && !userDateRangeFilter(query)) {
+    throw new AppError("Select a from date or to date before exporting by date range", 400);
+  }
+  return query;
+}
+
+function flattenUserForExport(user = {}) {
+  const source = user.toObject ? user.toObject({ depopulate: true }) : user;
+  const row = {};
+  const addValue = (key, value) => {
+    if (key === "passwordHash" || key === "__v") return;
+    if (value instanceof Date) {
+      row[key] = value.toISOString();
+      return;
+    }
+    if (mongoose.Types.ObjectId.isValid(value) && value?._bsontype === "ObjectId") {
+      row[key] = String(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      row[key] = value.join(", ");
+      return;
+    }
+    if (value && typeof value === "object") {
+      Object.entries(value).forEach(([childKey, childValue]) => addValue(`${key}.${childKey}`, childValue));
+      return;
+    }
+    row[key] = value ?? "";
+  };
+  Object.entries(source).forEach(([key, value]) => addValue(key === "_id" ? "id" : key, value));
+  return row;
+}
+
+function userExportColumns(rows = []) {
+  const schemaColumns = Object.keys(User.schema.paths)
+    .filter((key) => !["passwordHash", "__v"].includes(key))
+    .map((key) => key === "_id" ? "id" : key);
+  return [...new Set([...schemaColumns, ...rows.flatMap((row) => Object.keys(row))])];
+}
+
+async function exportUsersWorkbook(payload = {}) {
+  const query = exportUserQuery(payload);
+  const { items, filters } = await userService.listAll(query);
+  let exportItems = items;
+  const exportType = String(payload.exportType || "filtered").trim().toLowerCase();
+  const selectedIds = Array.isArray(payload.selectedIds)
+    ? payload.selectedIds.map((id) => String(id || "").trim()).filter(Boolean)
+    : [];
+  if (exportType === "selected") {
+    if (!selectedIds.length) throw new AppError("Select at least one user to export", 400);
+    selectedIds.forEach((id) => {
+      if (!mongoose.isValidObjectId(id)) throw new AppError("Invalid selected user id", 400);
+    });
+    const selectedSet = new Set(selectedIds);
+    exportItems = await User.find({ ...filters, _id: { $in: selectedIds } }).sort({ createdAt: -1 }).lean();
+    exportItems = exportItems.sort((a, b) => selectedIds.indexOf(String(a._id)) - selectedIds.indexOf(String(b._id)));
+    exportItems = exportItems.filter((item) => selectedSet.has(String(item._id)));
+  }
+
+  const rows = exportItems.map(flattenUserForExport);
+  const columns = userExportColumns(rows);
+  const worksheet = XLSX.utils.json_to_sheet(rows, { header: columns.length ? columns : ["id"] });
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, worksheet, "Users");
+  return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
 }
 
 const userService = createCrudService({
