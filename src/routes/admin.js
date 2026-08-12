@@ -151,11 +151,6 @@ const employeeBodySchema = z.object({
     edit: z.boolean().optional().default(false),
     delete: z.boolean().optional().default(false),
     bulkUpload: z.boolean().optional().default(false),
-    viewAll: z.boolean().optional().default(false),
-    assign: z.boolean().optional().default(false),
-    changeStatus: z.boolean().optional().default(false),
-    export: z.boolean().optional().default(false),
-    manageSettings: z.boolean().optional().default(false),
   })).optional().default({}),
 });
 const employeeCreateSchema = z.object({ body: employeeBodySchema.extend({ password: z.string().min(8).max(128) }) });
@@ -223,11 +218,6 @@ function sanitizeModulePermissions(input = {}, employeePermissions = {}) {
       edit: Boolean(value.edit),
       delete: Boolean(value.delete),
       bulkUpload: Boolean(value.bulkUpload),
-      viewAll: Boolean(value.viewAll),
-      assign: Boolean(value.assign),
-      changeStatus: Boolean(value.changeStatus),
-      export: Boolean(value.export),
-      manageSettings: Boolean(value.manageSettings),
     };
   });
   if (!normalized.questions) normalized.questions = {};
