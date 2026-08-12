@@ -74,7 +74,7 @@ clientManagementRouter.get("/employees/options", permit("clients"), asyncHandler
 
 clientManagementRouter.get("/clients", permit("clients"), asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(10, Number(req.query.limit) || 25));
+  const limit = Math.min(5000, Math.max(10, Number(req.query.limit) || 25));
   const userMatch = { isAdmin: { $ne: true } };
   const search = String(req.query.search || "").trim();
   if (search) userMatch.$or = ["name", "email", "mobile"].map((key) => ({ [key]: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" } }));
@@ -130,7 +130,7 @@ clientManagementRouter.get("/clients/:id", permit("clients"), asyncHandler(async
 }));
 
 clientManagementRouter.put("/clients/:id/settings", permit("clients", "edit"), asyncHandler(async (req, res) => {
-  const body = z.object({ followUpEnabled: z.boolean().optional(), assignedEmployeeId: objectId.nullish(), clientStatus: z.enum(["ACTIVE", "INACTIVE", "CONVERTED", "DO_NOT_CONTACT"]).optional() }).parse(req.body);
+  const body = z.object({ followUpEnabled: z.boolean().optional(), followUpStatus: z.enum(["ACTIVE_PENDING", "COMPLETED", "CANCELLED"]).optional(), assignedEmployeeId: objectId.nullish(), clientStatus: z.enum(["ACTIVE", "INACTIVE", "CONVERTED", "DO_NOT_CONTACT"]).optional() }).parse(req.body);
   const previous = await ClientProfile.findOne({ clientId: req.params.id }).lean();
   const profile = await ClientProfile.findOneAndUpdate({ clientId: req.params.id }, { $set: body }, { upsert: true, new: true, runValidators: true }).populate("assignedEmployeeId", "name email");
   await audit(req, req.params.id, "CLIENT_SETTINGS_UPDATED", previous, profile.toObject());
@@ -153,7 +153,9 @@ clientManagementRouter.get("/follow-ups", permit("follow-ups"), asyncHandler(asy
   const tasks = await FollowUpTask.find(query).sort({ followUpAt: 1 }).populate("clientId", "name email mobile examMode").populate("assignedEmployeeId", "name email").populate("createdBy", "name").lean();
   const enabledProfiles = await ClientProfile.find({ clientId: { $in: tasks.map((task) => task.clientId?._id).filter(Boolean) }, followUpEnabled: { $ne: false } }).distinct("clientId");
   const enabled = new Set(enabledProfiles.map(String));
-  const data = tasks.filter((task) => enabled.has(String(task.clientId?._id)));
+  const taskProfiles = await ClientProfile.find({ clientId: { $in: tasks.map((task) => task.clientId?._id).filter(Boolean) } }).select("clientId followUpStatus followUpEnabled assignedEmployeeId").lean();
+  const taskProfileMap = new Map(taskProfiles.map((profile) => [String(profile.clientId), profile]));
+  const data = tasks.filter((task) => enabled.has(String(task.clientId?._id))).map((task) => ({ ...task, clientProfile: taskProfileMap.get(String(task.clientId?._id)) || { followUpStatus: "ACTIVE_PENDING", followUpEnabled: true } }));
   const all = await FollowUpTask.find(clientScope(req.admin)).select("status followUpAt").lean();
   const stats = { total: all.length, notStarted: 0, inProgress: 0, completed: 0, cancelled: 0, pending: 0, today: 0, overdue: 0 };
   all.forEach((task) => { const key = { NOT_STARTED: "notStarted", IN_PROGRESS: "inProgress", COMPLETED: "completed", CANCELLED: "cancelled" }[task.status] || "pending"; stats[key] += 1; if (task.followUpAt >= start && task.followUpAt < end) stats.today += 1; if (task.followUpAt < now && !["COMPLETED", "CANCELLED"].includes(task.status)) stats.overdue += 1; });
