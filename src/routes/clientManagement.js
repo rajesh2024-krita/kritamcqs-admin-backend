@@ -2,7 +2,7 @@ import { Router } from "express";
 import mongoose from "mongoose";
 import { z } from "zod";
 import { requireAdmin, hasModulePermission, isMainAdmin } from "../middlewares/auth.js";
-import { AdminNotification, ClientAuditLog, ClientProfile, FollowUpTask, User, FOLLOW_UP_STATUSES, COMMUNICATION_TYPES } from "../models/index.js";
+import { AdminNotification, AppUsageSession, ClientAuditLog, ClientProfile, FollowUpTask, PushDeviceToken, User, FOLLOW_UP_STATUSES, COMMUNICATION_TYPES } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { sendResponse } from "../utils/apiResponse.js";
@@ -94,6 +94,18 @@ clientManagementRouter.get("/clients", permit("clients"), asyncHandler(async (re
   const filteredTotal = users.length;
   users = users.slice((page - 1) * limit, page * limit);
   const visibleIds = users.map((user) => user._id);
+  const visibleIdStrings = visibleIds.map(String);
+  const deviceSessions = await AppUsageSession.aggregate([
+    { $match: { userId: { $in: visibleIdStrings } } },
+    { $sort: { lastActiveAt: -1, startedAt: -1 } },
+    { $group: { _id: "$userId", platform: { $first: "$platform" }, deviceBrand: { $first: "$deviceBrand" }, deviceModel: { $first: "$deviceModel" }, osVersion: { $first: "$osVersion" }, appVersion: { $first: "$appVersion" }, lastActiveAt: { $first: "$lastActiveAt" } } },
+  ]);
+  const deviceMap = new Map(deviceSessions.map((device) => [String(device._id), device]));
+  const missingDeviceIds = visibleIdStrings.filter((id) => !deviceMap.has(id));
+  if (missingDeviceIds.length) {
+    const tokens = await PushDeviceToken.find({ userId: { $in: missingDeviceIds }, active: { $ne: false } }).sort({ lastSeenAt: -1 }).lean();
+    tokens.forEach((token) => { if (!deviceMap.has(String(token.userId))) deviceMap.set(String(token.userId), { platform: token.platform, deviceModel: token.deviceId, appVersion: token.appVersion, lastActiveAt: token.lastSeenAt }); });
+  }
   const summaries = await FollowUpTask.aggregate([
     { $match: { clientId: { $in: visibleIds } } },
     { $group: { _id: "$clientId", total: { $sum: 1 }, completed: { $sum: { $cond: [{ $eq: ["$status", "COMPLETED"] }, 1, 0] } }, cancelled: { $sum: { $cond: [{ $eq: ["$status", "CANCELLED"] }, 1, 0] } }, lastFollowUpAt: { $max: "$followUpAt" } } },
@@ -101,7 +113,7 @@ clientManagementRouter.get("/clients", permit("clients"), asyncHandler(async (re
   const summaryMap = new Map(summaries.map((item) => [String(item._id), item]));
   const latest = await FollowUpTask.find({ clientId: { $in: visibleIds } }).sort({ followUpAt: -1 }).populate("assignedEmployeeId", "name").lean();
   const latestMap = new Map(); latest.forEach((item) => { if (!latestMap.has(String(item.clientId))) latestMap.set(String(item.clientId), item); });
-  const data = users.map((user) => ({ ...user, id: String(user._id), profile: profileMap.get(String(user._id)) || { followUpEnabled: true }, summary: summaryMap.get(String(user._id)) || { total: 0, completed: 0, cancelled: 0 }, latestFollowUp: latestMap.get(String(user._id)) || null }));
+  const data = users.map((user) => ({ ...user, id: String(user._id), plan: user.isPremium ? "Premium" : "Free", device: deviceMap.get(String(user._id)) || null, profile: profileMap.get(String(user._id)) || { followUpEnabled: true }, summary: summaryMap.get(String(user._id)) || { total: 0, completed: 0, cancelled: 0 }, latestFollowUp: latestMap.get(String(user._id)) || null }));
   sendResponse(res, { data, meta: { page, limit, total: filteredTotal, pages: Math.ceil(filteredTotal / limit) } });
 }));
 
@@ -112,7 +124,9 @@ clientManagementRouter.get("/clients/:id", permit("clients"), asyncHandler(async
   if (!canViewAll(req.admin) && String(profile?.assignedEmployeeId?._id || "") !== String(req.admin._id)) throw new AppError("This client is not assigned to you", 403);
   const followUps = await FollowUpTask.find({ clientId: client._id }).sort({ followUpAt: -1 }).populate("assignedEmployeeId createdBy updatedBy", "name email").lean();
   const auditLogs = await ClientAuditLog.find({ clientId: client._id }).sort({ createdAt: -1 }).limit(200).lean();
-  sendResponse(res, { data: { client: { ...client, id: String(client._id) }, profile: profile || { followUpEnabled: true }, followUps, auditLogs } });
+  const device = await AppUsageSession.findOne({ userId: String(client._id) }).sort({ lastActiveAt: -1, startedAt: -1 }).select("platform deviceBrand deviceModel osVersion androidVersion appVersion lastActiveAt").lean()
+    || await PushDeviceToken.findOne({ userId: String(client._id), active: { $ne: false } }).sort({ lastSeenAt: -1 }).select("platform deviceId appVersion lastSeenAt").lean();
+  sendResponse(res, { data: { client: { ...client, id: String(client._id), plan: client.isPremium ? "Premium" : "Free", device: device || null }, profile: profile || { followUpEnabled: true }, followUps, auditLogs } });
 }));
 
 clientManagementRouter.put("/clients/:id/settings", permit("clients", "edit"), asyncHandler(async (req, res) => {
