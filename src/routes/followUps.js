@@ -86,7 +86,10 @@ followUpsAdminRouter.get("/follow-ups", asyncHandler(async (req,res) => {
 
 followUpsAdminRouter.get("/follow-ups/:id", asyncHandler(async(req,res)=>{ assertCan(req,"follow-ups"); const row=await FollowUp.findOne({_id:req.params.id,...employeeScope(req)}); if(!row) throw new AppError("Follow-up not found",404); res.json({success:true,data:(await hydrate([row]))[0]}); }));
 followUpsAdminRouter.post("/follow-ups/assign", asyncHandler(async(req,res)=>{
-  assertCan(req,"user-management","create");
+  // Employees with User Management access may claim an unassigned user for
+  // themselves. Main admins retain the broader create/reassign permission.
+  if (isMainAdmin(req.admin)) assertCan(req,"user-management","create");
+  else assertCan(req,"user-management","view");
   const {userId}=req.body||{};
   if (!mongoose.isValidObjectId(userId) || !await User.exists({_id:userId,isAdmin:{$ne:true}})) throw new AppError("User not found",404);
   const mainAdmin=isMainAdmin(req.admin);
