@@ -7,6 +7,7 @@ import adminAuthRoutes from "./routes/adminAuth.js";
 import appPublicRoutes from "./routes/appPublic.js";
 import { adminScriptRouter } from "./routes/scriptManagement.js";
 import { nationalCompetitionsAdminRouter } from "./routes/nationalCompetitions.js";
+import { followUpsAdminRouter } from "./routes/followUps.js";
 import { uploadsRoot } from "./utils/uploadStorage.js";
 
 export const app = express();
@@ -83,6 +84,7 @@ app.get("/api/healthz", (_req, res) => {
 app.use("/api/admin-auth", adminAuthRoutes);
 app.use("/api/admin", adminScriptRouter);
 app.use("/api/admin", nationalCompetitionsAdminRouter);
+app.use("/api/admin", followUpsAdminRouter);
 app.use("/api/admin", adminRoutes);
 app.use("/api", appPublicRoutes);
 
