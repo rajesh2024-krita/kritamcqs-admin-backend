@@ -37,13 +37,28 @@ followUpsAdminRouter.get("/user-management", asyncHandler(async (req, res) => {
   if (req.query.plan === "Free") filter.isPremium = { $ne: true };
   if (req.query.from || req.query.to) { filter.createdAt = {}; if (req.query.from) filter.createdAt.$gte = new Date(req.query.from); if (req.query.to) { const d = new Date(req.query.to); d.setUTCHours(23,59,59,999); filter.createdAt.$lte = d; } }
   let followMap = new Map();
-  if (req.query.followUpStatus || req.query.employeeId || !isMainAdmin(req.admin)) {
-    const ff = { ...employeeScope(req) };
-    if (req.query.followUpStatus === "Unassigned") ff._id = null;
-    else if (req.query.followUpStatus) ff.status = req.query.followUpStatus;
-    if (isMainAdmin(req.admin) && mongoose.isValidObjectId(req.query.employeeId)) ff["assignedEmployee.employeeId"] = req.query.employeeId;
-    const matches = ff._id === null ? [] : await FollowUp.find(ff).select("userId").lean();
-    filter._id = req.query.followUpStatus === "Unassigned" ? { $nin: (await FollowUp.find().distinct("userId")) } : { $in: matches.map((x) => x.userId) };
+  const mainAdmin = isMainAdmin(req.admin);
+  const requestedStatus = String(req.query.followUpStatus || "");
+  const allAssignedUserIds = await FollowUp.distinct("userId");
+  if (!mainAdmin) {
+    if (requestedStatus === "Unassigned") {
+      filter._id = { $nin: allAssignedUserIds };
+    } else {
+      const ownFilter = { "assignedEmployee.employeeId": req.admin._id };
+      if (statuses.includes(requestedStatus)) ownFilter.status = requestedStatus;
+      const ownUserIds = await FollowUp.find(ownFilter).distinct("userId");
+      // Employees can discover unassigned users, but never users owned by another employee.
+      filter._id = requestedStatus ? { $in: ownUserIds } : { $in: [...ownUserIds, ...await User.find({ _id: { $nin: allAssignedUserIds }, isAdmin: { $ne: true } }).distinct("_id")] };
+    }
+  } else if (requestedStatus || req.query.employeeId) {
+    if (requestedStatus === "Unassigned") {
+      filter._id = { $nin: allAssignedUserIds };
+    } else {
+      const followFilter = {};
+      if (statuses.includes(requestedStatus)) followFilter.status = requestedStatus;
+      if (mongoose.isValidObjectId(req.query.employeeId)) followFilter["assignedEmployee.employeeId"] = req.query.employeeId;
+      filter._id = { $in: await FollowUp.find(followFilter).distinct("userId") };
+    }
   }
   const [users, total] = await Promise.all([User.find(filter).sort({ createdAt: -1 }).skip((page-1)*limit).limit(limit).lean(), User.countDocuments(filter)]);
   const ids = users.map((u) => u._id);
@@ -54,7 +69,10 @@ followUpsAdminRouter.get("/user-management", asyncHandler(async (req, res) => {
 
 followUpsAdminRouter.get("/follow-up-employees", asyncHandler(async (req,res) => {
   if (!can(req,"user-management") && !can(req,"follow-ups")) throw new AppError("You do not have permission to view employees",403);
-  const employees=await User.find({isAdmin:true,adminRole:"employee",isActive:{$ne:false}}).select("name email").sort({name:1}).lean();
+  const employeeFilter = isMainAdmin(req.admin)
+    ? {isAdmin:true,adminRole:"employee",isActive:{$ne:false}}
+    : {_id:req.admin._id,isAdmin:true,adminRole:"employee",isActive:{$ne:false}};
+  const employees=await User.find(employeeFilter).select("name email").sort({name:1}).lean();
   res.json({success:true,data:employees.map(e=>({id:String(e._id),name:e.name||"",email:e.email||""}))});
 }));
 
@@ -67,7 +85,28 @@ followUpsAdminRouter.get("/follow-ups", asyncHandler(async (req,res) => {
 }));
 
 followUpsAdminRouter.get("/follow-ups/:id", asyncHandler(async(req,res)=>{ assertCan(req,"follow-ups"); const row=await FollowUp.findOne({_id:req.params.id,...employeeScope(req)}); if(!row) throw new AppError("Follow-up not found",404); res.json({success:true,data:(await hydrate([row]))[0]}); }));
-followUpsAdminRouter.post("/follow-ups/assign", asyncHandler(async(req,res)=>{ assertCan(req,"user-management","create"); const {userId,employeeId}=req.body||{}; const employee=await User.findOne({_id:employeeId,isAdmin:true,adminRole:"employee",isActive:{$ne:false}}); if(!employee) throw new AppError("Active employee not found",404); const now=new Date(); const existing=await FollowUp.findOne({userId}); if(existing){ if(!isMainAdmin(req.admin)) throw new AppError("Only main admins can reassign follow-ups",403); existing.assignedEmployee=actor(employee); existing.assignedBy=actor(req.admin); existing.assignedAt=now; await existing.save(); return res.json({success:true,data:existing}); } const item=await FollowUp.create({userId,assignedEmployee:actor(employee),assignedBy:actor(req.admin),assignedAt:now,status:"Pending",statusHistory:[{from:null,to:"Pending",changedAt:now,changedBy:actor(req.admin)}]}); res.status(201).json({success:true,data:item}); }));
+followUpsAdminRouter.post("/follow-ups/assign", asyncHandler(async(req,res)=>{
+  assertCan(req,"user-management","create");
+  const {userId}=req.body||{};
+  if (!mongoose.isValidObjectId(userId) || !await User.exists({_id:userId,isAdmin:{$ne:true}})) throw new AppError("User not found",404);
+  const mainAdmin=isMainAdmin(req.admin);
+  const targetEmployeeId=mainAdmin?req.body?.employeeId:req.admin._id;
+  const employee=await User.findOne({_id:targetEmployeeId,isAdmin:true,adminRole:"employee",isActive:{$ne:false}});
+  if(!employee) throw new AppError("Active employee not found",404);
+  const now=new Date(); const existing=await FollowUp.findOne({userId});
+  if(existing){
+    if(!mainAdmin) throw new AppError("This user is already assigned and cannot be claimed",409);
+    existing.assignedEmployee=actor(employee); existing.assignedBy=actor(req.admin); existing.assignedAt=now; await existing.save();
+    return res.json({success:true,data:existing});
+  }
+  try {
+    const item=await FollowUp.create({userId,assignedEmployee:actor(employee),assignedBy:actor(req.admin),assignedAt:now,status:"Pending",statusHistory:[{from:null,to:"Pending",changedAt:now,changedBy:actor(req.admin)}]});
+    res.status(201).json({success:true,data:item});
+  } catch (error) {
+    if (error?.code === 11000) throw new AppError("This user was just assigned to another employee",409);
+    throw error;
+  }
+}));
 followUpsAdminRouter.post("/follow-ups/:id/conversations", asyncHandler(async(req,res)=>{ assertCan(req,"follow-ups","create"); const row=await FollowUp.findOne({_id:req.params.id,...employeeScope(req)}); if(!row) throw new AppError("Follow-up not found",404); const type=String(req.body?.type||""); const notes=String(req.body?.notes||"").trim(); if(!["Call","Chat","Email","Other"].includes(type)||!notes) throw new AppError("Conversation type and notes are required",400); const occurredAt=req.body.occurredAt?new Date(req.body.occurredAt):new Date(); const next=req.body.nextFollowUpAt?new Date(req.body.nextFollowUpAt):undefined; const nextStatus=statuses.includes(req.body.status)?req.body.status:(row.status==="Pending"?"Progress":row.status); row.conversations.push({occurredAt,type,notes,nextFollowUpAt:next,status:nextStatus,handledBy:actor(req.admin)}); row.lastFollowUpAt=occurredAt; row.nextFollowUpAt=next; if(nextStatus!==row.status){row.statusHistory.push({from:row.status,to:nextStatus,changedAt:new Date(),changedBy:actor(req.admin)});row.status=nextStatus;} await row.save(); res.status(201).json({success:true,data:row}); }));
 followUpsAdminRouter.patch("/follow-ups/:id/status", asyncHandler(async(req,res)=>{ assertCan(req,"follow-ups","edit"); const next=String(req.body?.status||""); if(!statuses.includes(next)) throw new AppError("Invalid follow-up status",400); const row=await FollowUp.findOne({_id:req.params.id,...employeeScope(req)}); if(!row) throw new AppError("Follow-up not found",404); if(row.status!==next){row.statusHistory.push({from:row.status,to:next,changedAt:new Date(),changedBy:actor(req.admin)});row.status=next;await row.save();} res.json({success:true,data:row}); }));
 
