@@ -148,11 +148,17 @@ clientManagementRouter.get("/follow-ups", permit("follow-ups"), asyncHandler(asy
 
 clientManagementRouter.post("/follow-ups", permit("follow-ups", "create"), asyncHandler(async (req, res) => {
   const body = taskBody.parse(req.body);
+  const client = await User.findOne({ _id: body.clientId, isAdmin: { $ne: true } }).select("name email").lean();
+  if (!client) throw new AppError("The selected client no longer exists", 404);
+  if (body.assignedEmployeeId) {
+    const employee = await User.exists({ _id: body.assignedEmployeeId, isAdmin: true, adminRole: "employee", isActive: { $ne: false }, isBlocked: { $ne: true } });
+    if (!employee) throw new AppError("Please select an active employee", 400);
+  }
   const profile = await ClientProfile.findOneAndUpdate({ clientId: body.clientId }, { $setOnInsert: { followUpEnabled: true }, ...(body.assignedEmployeeId ? { $set: { assignedEmployeeId: body.assignedEmployeeId } } : {}) }, { upsert: true, new: true });
   if (profile.followUpEnabled === false) throw new AppError("Follow-up is disabled for this client", 409);
   const task = await FollowUpTask.create({ ...body, assignedEmployeeId: body.assignedEmployeeId || profile.assignedEmployeeId || null, createdBy: req.admin._id, updatedBy: req.admin._id });
   await audit(req, body.clientId, "FOLLOW_UP_CREATED", null, task.toObject(), task._id);
-  if (task.assignedEmployeeId) { const client = await User.findById(body.clientId).select("name email").lean(); await notify({ recipientUserId: task.assignedEmployeeId, clientId: body.clientId, followUpId: task._id, type: "FOLLOW_UP_ASSIGNED", title: "New Follow-Up Assigned", message: `New follow-up assigned for ${client?.name || client?.email || "client"}.`, sourceKey: `follow-up-assigned:${task._id}:${task.assignedEmployeeId}` }); }
+  if (task.assignedEmployeeId) await notify({ recipientUserId: task.assignedEmployeeId, clientId: body.clientId, followUpId: task._id, type: "FOLLOW_UP_ASSIGNED", title: "New Follow-Up Assigned", message: `New follow-up assigned for ${client.name || client.email || "client"}.`, sourceKey: `follow-up-assigned:${task._id}:${task.assignedEmployeeId}` });
   sendResponse(res, { status: 201, data: task, message: "Follow-up created" });
 }));
 

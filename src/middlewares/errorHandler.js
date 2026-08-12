@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { ZodError } from "zod";
 import { AppError } from "../utils/AppError.js";
 
 export function notFound(_req, _res, next) {
@@ -10,6 +11,11 @@ export function errorHandler(error, _req, res, _next) {
 
   if (error instanceof mongoose.Error.CastError) {
     return res.status(400).json({ success: false, message: "Invalid resource id" });
+  }
+
+  if (error instanceof ZodError) {
+    const message = error.issues?.[0]?.message || "Invalid request data";
+    return res.status(400).json({ success: false, message, details: error.flatten() });
   }
 
   if (error?.code === 11000) {
