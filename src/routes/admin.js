@@ -4873,10 +4873,22 @@ router.get("/app-usage/export", asyncHandler(async (req, res) => {
   const format = String(req.query.format || "csv").toLowerCase();
   const dataset = String(req.query.dataset || "events").toLowerCase();
   const filter = dataset === "sessions" ? appUsageFilter(req.query, "startedAt") : appUsageFilter(req.query);
-  const rows = dataset === "sessions"
-    ? await AppUsageSession.find(filter).sort({ startedAt: -1 }).limit(10000).lean()
-    : await AppUsageEvent.find(filter).sort({ timestamp: -1 }).limit(20000).lean();
-  const flatRows = rows.map((row) => dataset === "sessions" ? formatAppUsageSession(row) : {
+  Object.assign(filter, appUsageSearchFilter(req.query.search, dataset === "sessions"
+    ? ["userName", "email", "mobile", "userId", "sessionId", "entryScreen", "exitScreen", "deviceModel", "appVersion"]
+    : ["userName", "email", "mobile", "userId", "sessionId", "screen", "eventType", "componentName", "componentType", "action", "deviceModel"]));
+  const sourceRows = dataset === "sessions"
+    ? await AppUsageSession.find(filter).sort({ startedAt: -1 }).lean()
+    : await AppUsageEvent.find(filter).sort({ timestamp: -1 }).lean();
+  const rows = dataset === "user-analytics" ? await enrichUserAnalytics(sourceRows, filter) : sourceRows;
+  const flatRows = rows.map((row) => dataset === "sessions" ? formatAppUsageSession(row) : dataset === "user-analytics" ? {
+    ...row,
+    authTypes: JSON.stringify(row.authTypes || []),
+    eventMetadata: JSON.stringify(row.eventMetadata || {}),
+    sessions: JSON.stringify(row.sessions || []),
+    transactions: JSON.stringify(row.transactions || []),
+    appleTransactions: JSON.stringify(row.appleTransactions || []),
+    invoices: JSON.stringify(row.invoices || []),
+  } : {
     eventId: row.eventId,
     sessionId: row.sessionId,
     userId: row.userId,
@@ -4904,9 +4916,19 @@ router.get("/app-usage/export", asyncHandler(async (req, res) => {
     durationSeconds: row.durationSeconds,
   });
   if (format === "xlsx" || format === "excel") {
-    const worksheet = XLSX.utils.json_to_sheet(flatRows);
     const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, dataset);
+    if (dataset === "user-analytics") {
+      const summaryRows = flatRows.map(({ sessions: _sessions, transactions: _transactions, appleTransactions: _appleTransactions, invoices: _invoices, ...row }) => row);
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(summaryRows), "User Activity");
+      const unique = (items, key) => [...new Map(items.map((item) => [String(item[key] || item.id || item._id), item])).values()];
+      const childRows = (field) => rows.flatMap((row) => (row[field] || []).map((item) => ({ userId: row.userId, userName: row.name, email: row.email, ...item, _id: item._id ? String(item._id) : undefined })));
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(unique(childRows("sessions"), "sessionId")), "Sessions");
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(unique(childRows("transactions"), "razorpayPaymentId")), "Transactions");
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(unique(childRows("appleTransactions"), "transactionId")), "Apple Purchases");
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(unique(childRows("invoices"), "invoiceNumber")), "Invoices");
+    } else {
+      XLSX.utils.book_append_sheet(workbook, XLSX.utils.json_to_sheet(flatRows), dataset);
+    }
     const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename=app-usage-${dataset}.xlsx`);
@@ -8767,6 +8789,104 @@ router.get(["/notifications/payment-cancelled-auto", "/notification-management/s
     success: true,
     data: await latestPaymentCancelledAutoLogData(50),
   });
+}));
+
+function analyticsIdentityQuery(userIds = [], emails = []) {
+  const clauses = [];
+  if (userIds.length) clauses.push({ userId: { $in: userIds } });
+  if (emails.length) clauses.push({ email: { $in: emails } });
+  return clauses.length ? { $or: clauses } : { userId: { $in: [] } };
+}
+
+async function enrichUserAnalytics(events, eventFilter) {
+  if (!events.length) return [];
+  const userIds = [...new Set(events.map((row) => String(row.userId || "")).filter(Boolean))];
+  const emails = [...new Set(events.map((row) => String(row.email || "").toLowerCase()).filter(Boolean))];
+  const objectIds = userIds.filter((id) => mongoose.isValidObjectId(id));
+  const userQuery = [
+    ...(objectIds.length ? [{ _id: { $in: objectIds } }] : []),
+    ...(emails.length ? [{ email: { $in: emails } }] : []),
+  ];
+  const identityQuery = analyticsIdentityQuery(userIds, emails);
+  const [users, sessions, subscriptions, appleSubscriptions, invoices, eventTotals] = await Promise.all([
+    userQuery.length ? User.find({ $or: userQuery, isAdmin: { $ne: true } }).select("-passwordHash").lean() : [],
+    AppUsageSession.find(identityQuery).lean(),
+    Subscription.find({ userId: { $in: userIds } }).sort({ transactionDate: -1, createdAt: -1 }).lean(),
+    UserSubscription.find({ userId: { $in: userIds } }).sort({ purchaseDate: -1 }).lean(),
+    Invoice.find({ userId: { $in: userIds } }).sort({ invoiceDate: -1, createdAt: -1 }).lean(),
+    AppUsageEvent.aggregate([
+      { $match: eventFilter },
+      { $group: { _id: appUsageIdentityExpression(), totalEvents: { $sum: 1 }, pageVisits: { $sum: { $cond: [{ $eq: ["$eventType", "ScreenView"] }, 1, 0] } }, firstActivityAt: { $min: "$timestamp" }, lastActivityAt: { $max: "$timestamp" } } },
+    ]),
+  ]);
+  const keyOf = (row) => String(row?.email || row?.userId || row?._id || "").toLowerCase();
+  const userMap = new Map();
+  users.forEach((user) => {
+    userMap.set(String(user._id), user);
+    if (user.email) userMap.set(String(user.email).toLowerCase(), user);
+  });
+  const group = (rows) => rows.reduce((map, row) => {
+    const key = String(row.userId || "");
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(row);
+    return map;
+  }, new Map());
+  const sessionGroups = group(sessions);
+  const subscriptionGroups = group(subscriptions);
+  const appleGroups = group(appleSubscriptions);
+  const invoiceGroups = group(invoices);
+  const totalsMap = new Map(eventTotals.map((row) => [String(row._id).toLowerCase(), row]));
+  return events.map((event) => {
+    const user = userMap.get(String(event.userId)) || userMap.get(String(event.email || "").toLowerCase()) || {};
+    const id = String(user._id || event.userId || "");
+    const userSessions = sessionGroups.get(id) || sessionGroups.get(String(event.userId)) || [];
+    const purchases = subscriptionGroups.get(id) || subscriptionGroups.get(String(event.userId)) || [];
+    const iosPurchases = appleGroups.get(id) || appleGroups.get(String(event.userId)) || [];
+    const userInvoices = invoiceGroups.get(id) || invoiceGroups.get(String(event.userId)) || [];
+    const totals = totalsMap.get(keyOf(event)) || {};
+    const paidPurchases = purchases.filter((item) => item.paymentStatus === "PAID" || String(item.status).toLowerCase() === "active");
+    const paidInvoices = userInvoices.filter((item) => item.status === "paid");
+    const totalSpent = paidPurchases.reduce((sum, item) => sum + Number(item.finalAmount ?? item.amount ?? 0), 0)
+      || paidInvoices.reduce((sum, item) => sum + Number(item.grandTotal ?? item.amount ?? 0), 0);
+    return {
+      id: String(event._id), eventId: event.eventId, eventTimestamp: event.timestamp, eventType: event.eventType,
+      screen: event.screen, previousScreen: event.previousScreen, nextScreen: event.nextScreen,
+      componentName: event.componentName, componentType: event.componentType, action: event.action,
+      eventDurationSeconds: Number(event.durationSeconds || 0), eventMetadata: event.metadata || {},
+      sessionId: event.sessionId, userId: id || event.userId, name: user.name || event.userName || "",
+      email: user.email || event.email || "", mobile: user.mobile || event.mobile || "", address: user.address || "",
+      country: user.country || "", state: user.state || "", city: user.city || "", examMode: user.examMode || "", level: user.level || "",
+      loginProvider: user.loginProvider || event.loginMethod || "", authTypes: user.authTypes || [],
+      userType: event.userType || (user.isPremium ? "Premium" : "Free"), isActive: user.isActive,
+      isBlocked: user.isBlocked, emailVerified: user.emailVerified, mobileVerified: user.mobileVerified,
+      onboardingComplete: user.onboardingComplete, registeredAt: user.createdAt, lastLoginAt: user.lastLoginAt,
+      premiumExpiresAt: user.premiumExpiresAt || user.premiumExpiry, premiumPlan: user.premiumPlan || "",
+      visitCount: Number(totals.pageVisits || 0), totalEvents: Number(totals.totalEvents || 0),
+      totalSessions: userSessions.length, totalTimeSpentSeconds: userSessions.reduce((sum, item) => sum + Number(item.durationSeconds || 0), 0),
+      firstActivityAt: totals.firstActivityAt, lastActivityAt: totals.lastActivityAt,
+      totalSpent, currency: purchases[0]?.currency || user.lastPurchase?.currency || userInvoices[0]?.currency || "",
+      transactionCount: purchases.length + iosPurchases.length, invoiceCount: userInvoices.length,
+      latestTransactionId: purchases[0]?.razorpayPaymentId || purchases[0]?.appleTransactionId || iosPurchases[0]?.transactionId || userInvoices[0]?.transactionId || "",
+      latestTransactionStatus: purchases[0]?.paymentStatus || iosPurchases[0]?.subscriptionStatus || userInvoices[0]?.status || "",
+      latestTransactionAt: purchases[0]?.transactionDate || purchases[0]?.createdAt || iosPurchases[0]?.purchaseDate || userInvoices[0]?.invoiceDate,
+      sessions: userSessions.map(formatAppUsageSession), transactions: purchases, appleTransactions: iosPurchases, invoices: userInvoices,
+      platform: event.platform, appVersion: event.appVersion, deviceId: event.deviceId, deviceBrand: event.deviceBrand,
+      deviceModel: event.deviceModel, osVersion: event.osVersion, androidVersion: event.androidVersion,
+      screenResolution: event.screenResolution, networkType: event.networkType, ipAddress: event.ipAddress,
+      batteryLevel: event.batteryLevel, batteryCharging: event.batteryCharging, ramGb: event.ramGb,
+    };
+  });
+}
+
+router.get("/app-usage/user-analytics", asyncHandler(async (req, res) => {
+  const { page, limit, skip, sort } = appUsagePageOptions(req.query, ["timestamp", "eventType", "screen", "userName", "email"], "timestamp");
+  const filter = appUsageFilter(req.query);
+  Object.assign(filter, appUsageSearchFilter(req.query.search, ["userName", "email", "mobile", "userId", "eventType", "screen", "componentName", "action"]));
+  const [events, total] = await Promise.all([
+    AppUsageEvent.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+    AppUsageEvent.countDocuments(filter),
+  ]);
+  res.json({ success: true, data: await enrichUserAnalytics(events, filter), meta: appUsageMeta(total, page, limit) });
 }));
 
 router.post(["/notifications/payment-cancelled-auto/test", "/notification-management/subscription-cancellation-reminders/test"], asyncHandler(async (req, res) => {
