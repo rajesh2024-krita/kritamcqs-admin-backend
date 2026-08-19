@@ -8,7 +8,7 @@ const mockTestGenerationScheduleSchema = new Schema(
     monthlyDay: { type: Number, default: 1, min: 1, max: 31 },
     generationTime: { type: String, default: "09:00" },
     timezone: { type: String, default: "local" },
-    examType: { type: String, enum: ["NEET", "JEE"], default: "NEET" },
+    examType: { type: String, enum: ["NEET", "JEE"], required: true, index: true },
     subjectIds: { type: [String], default: [] },
     chapterIds: { type: [String], default: [] },
     difficulty: { type: String, default: "mixed" },
@@ -23,6 +23,8 @@ const mockTestGenerationScheduleSchema = new Schema(
   },
   baseJsonOptions,
 );
+
+mockTestGenerationScheduleSchema.index({ examType: 1 }, { unique: true });
 
 export const MockTestGenerationSchedule =
   models.MockTestGenerationSchedule || model("MockTestGenerationSchedule", mockTestGenerationScheduleSchema);

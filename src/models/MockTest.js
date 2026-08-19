@@ -28,6 +28,7 @@ const mockTestSchema = new Schema(
     totalAttemptQuestions: { type: Number, min: 1 },
     sectionGroups: { type: [Schema.Types.Mixed], default: [] },
     generationSource: { type: String, enum: ["manual", "auto"], default: "manual", index: true },
+    generationScheduleType: { type: String, enum: ["daily", "weekly", "monthly", "manual", ""], default: "", index: true },
     generationConfig: { type: Schema.Types.Mixed },
     generationHistory: { type: [Schema.Types.Mixed], default: [] },
     selectionMix: { type: Schema.Types.Mixed },
@@ -47,5 +48,6 @@ const mockTestSchema = new Schema(
 );
 
 mockTestSchema.index({ examType: 1, isActive: 1, createdAt: -1 });
+mockTestSchema.index({ examType: 1, generationScheduleType: 1, createdAt: -1 });
 
 export const MockTest = models.MockTest || model("MockTest", mockTestSchema);

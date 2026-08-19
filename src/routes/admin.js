@@ -5330,6 +5330,7 @@ const DEFAULT_MOCK_GENERATION_SCHEDULE = {
   includedQuestionIds: [],
   titlePrefix: "Premium Auto Mock",
 };
+const MOCK_GENERATION_EXAMS = ["NEET", "JEE"];
 
 const DEFAULT_MOCK_PATTERN_BLUEPRINTS = {
   NEET: {
@@ -6437,10 +6438,15 @@ function normalizeMockGenerationSchedulePayload(payload = {}, existing = {}) {
   };
 }
 
-async function getOrCreateMockGenerationSchedule() {
-  const existing = await MockTestGenerationSchedule.findOne().sort({ createdAt: 1 });
+async function getOrCreateMockGenerationSchedule(examType) {
+  const normalizedExamType = normalizeExamType(examType);
+  const existing = await MockTestGenerationSchedule.findOne({ examType: normalizedExamType });
   if (existing) return existing;
-  return MockTestGenerationSchedule.create(DEFAULT_MOCK_GENERATION_SCHEDULE);
+  return MockTestGenerationSchedule.create({ ...DEFAULT_MOCK_GENERATION_SCHEDULE, examType: normalizedExamType });
+}
+
+async function getMockGenerationSchedules() {
+  return Promise.all(MOCK_GENERATION_EXAMS.map((examType) => getOrCreateMockGenerationSchedule(examType)));
 }
 
 function serializeMockGenerationSchedule(doc) {
@@ -6491,14 +6497,13 @@ function getScheduleDueState(schedule, now = new Date()) {
   return { due: Number(parts.day) === targetDay, runKey: `monthly:${monthKey}` };
 }
 
-async function runMockGenerationFromSchedule({ force = false, actorId = null } = {}) {
-  const scheduleDoc = await getOrCreateMockGenerationSchedule();
+async function runMockGenerationFromSchedule(scheduleDoc, { force = false, actorId = null } = {}) {
   const schedule = serializeMockGenerationSchedule(scheduleDoc);
   const now = new Date();
   const dueState = getScheduleDueState(schedule, now);
   const runKey = force ? `manual:${now.toISOString()}` : dueState.runKey;
 
-  if (!force && (!schedule.enabled || !dueState.due || schedule.lastRunKey === dueState.runKey)) {
+  if (!schedule.enabled || (!force && (!dueState.due || schedule.lastRunKey === dueState.runKey))) {
     return { skipped: true, reason: !schedule.enabled ? "disabled" : schedule.lastRunKey === dueState.runKey ? "already_run" : "not_due" };
   }
 
@@ -6523,9 +6528,10 @@ async function runMockGenerationFromSchedule({ force = false, actorId = null } =
       },
       actorId,
     );
-    const item = await MockTest.create(payload);
+    const item = await MockTest.create({ ...payload, generationScheduleType: force ? "manual" : schedule.recurrenceType });
     await MockTestGenerationLog.create({
       generatedAt: now,
+      examType: schedule.examType,
       scheduleType: force ? "manual" : schedule.recurrenceType,
       testName: item.title,
       mockTestId: String(item._id),
@@ -6540,6 +6546,7 @@ async function runMockGenerationFromSchedule({ force = false, actorId = null } =
   } catch (error) {
     await MockTestGenerationLog.create({
       generatedAt: now,
+      examType: schedule.examType,
       scheduleType: force ? "manual" : schedule.recurrenceType,
       testName: "",
       status: "failed",
@@ -6554,6 +6561,17 @@ async function runMockGenerationFromSchedule({ force = false, actorId = null } =
   }
 }
 
+async function runEnabledMockGenerationSchedules(options = {}) {
+  const schedules = await getMockGenerationSchedules();
+  return Promise.all(schedules.map(async (schedule) => {
+    try {
+      return await runMockGenerationFromSchedule(schedule, options);
+    } catch (error) {
+      return { skipped: false, status: "failed", examType: schedule.examType, error };
+    }
+  }));
+}
+
 let mockSchedulerTimer = null;
 let mockSchedulerRunning = false;
 
@@ -6563,7 +6581,7 @@ export function startMockTestGenerationScheduler() {
     if (mockSchedulerRunning) return;
     mockSchedulerRunning = true;
     try {
-      await runMockGenerationFromSchedule();
+      await runEnabledMockGenerationSchedules();
     } catch (error) {
       console.error("Automatic mock test scheduler failed", error);
     } finally {
@@ -10325,16 +10343,17 @@ router.post(
 router.get(
   "/mock-tests/generation-schedule",
   asyncHandler(async (_req, res) => {
-    const schedule = await getOrCreateMockGenerationSchedule();
-    res.json({ success: true, data: serializeMockGenerationSchedule(schedule) });
+    const schedules = await getMockGenerationSchedules();
+    res.json({ success: true, data: schedules.map(serializeMockGenerationSchedule) });
   }),
 );
 
 router.put(
   "/mock-tests/generation-schedule",
   asyncHandler(async (req, res) => {
-    const existing = await getOrCreateMockGenerationSchedule();
-    const payload = normalizeMockGenerationSchedulePayload(req.body || {}, existing);
+    const examType = normalizeExamType(req.body?.examType);
+    const existing = await getOrCreateMockGenerationSchedule(examType);
+    const payload = normalizeMockGenerationSchedulePayload({ ...(req.body || {}), examType }, existing);
     Object.assign(existing, payload);
     await existing.save();
     res.json({ success: true, message: "Mock generation schedule saved", data: serializeMockGenerationSchedule(existing) });
@@ -10344,9 +10363,17 @@ router.put(
 router.post(
   "/mock-tests/generation-schedule/run-now",
   asyncHandler(async (req, res) => {
-    const result = await runMockGenerationFromSchedule({ force: true, actorId: req.userId });
-    const data = result.item ? (await serializeMockTests([result.item]))[0] : null;
-    res.json({ success: true, message: "Premium mock test generated and published", data });
+    const results = await runEnabledMockGenerationSchedules({ force: true, actorId: req.userId });
+    const generatedItems = results.flatMap((result) => result.item ? [result.item] : []);
+    const data = await serializeMockTests(generatedItems);
+    const failures = results.filter((result) => result.status === "failed");
+    res.json({
+      success: failures.length === 0,
+      message: data.length
+        ? `${data.length} enabled premium mock test${data.length === 1 ? "" : "s"} generated and published${failures.length ? `; ${failures.length} exam generation failed` : ""}`
+        : failures.length ? "Enabled exam generation failed" : "No exam generation is enabled",
+      data,
+    });
   }),
 );
 
@@ -10360,6 +10387,7 @@ router.get(
       data: logs.map((item) => ({
         id: String(item._id),
         generatedAt: item.generatedAt,
+        examType: item.examType || item.configSnapshot?.examType || "NEET",
         scheduleType: item.scheduleType,
         testName: item.testName || "-",
         mockTestId: item.mockTestId || "",
