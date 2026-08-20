@@ -5713,6 +5713,11 @@ async function buildMockTestPayload(payload, existing = null) {
   const patternPreset = String(payload.patternPreset || existing?.patternPreset || "CUSTOM").toUpperCase();
   const preset = MOCK_TEST_PRESETS[patternPreset] || MOCK_TEST_PRESETS.CUSTOM;
   const examType = normalizeExamType(payload.examType || existing?.examType || preset.examType);
+  const testType = String(payload.testType || existing?.testType || "full").toLowerCase();
+  const requestedSubjectId = String(payload.subjectId || existing?.subjectId || "").trim();
+  const validSubjectNames = examType === "NEET"
+    ? new Set(["biology", "physics", "chemistry"])
+    : new Set(["mathematics", "maths", "physics", "chemistry"]);
   const blueprintConfig = patternPreset === "NEET_REAL" || patternPreset === "JEE_REAL"
     ? await getPatternBlueprintConfig(examType, AUTO_MOCK_PRESET_BY_EXAM[examType])
     : null;
@@ -5759,6 +5764,9 @@ async function buildMockTestPayload(payload, existing = null) {
   const availableWeekdays = [...new Set((Array.isArray(payload.availableWeekdays) ? payload.availableWeekdays : existing?.availableWeekdays || []).map((value) => String(value).toUpperCase()).filter((value) => WEEKDAY_OPTIONS.includes(value)))];
 
   if (!title) throw new AppError("Title is required", 400);
+  if (!["full", "subject"].includes(testType)) throw new AppError("Test type is invalid", 400);
+  if (testType === "subject" && examType === "BOTH") throw new AppError("Subject mock tests must use either NEET or JEE", 400);
+  if (testType === "subject" && !requestedSubjectId) throw new AppError("Subject is required for a subject mock test", 400);
   if (questionIds.length < 2) throw new AppError("Select at least two questions", 400);
   const requiredPresetQuestions = blueprintConfig?.totalQuestions || 0;
   if (requiredPresetQuestions && questionIds.length !== requiredPresetQuestions) {
@@ -5780,12 +5788,26 @@ async function buildMockTestPayload(payload, existing = null) {
 
   const subjects = await Subject.find({ _id: { $in: [...new Set(questions.map((item) => String(item.subjectId)).filter(Boolean))] } }).select("_id examType");
   const subjectMap = new Map(subjects.map((item) => [String(item._id), item]));
+  const selectedSubject = testType === "subject"
+    ? await Subject.findById(requestedSubjectId).select("_id name examType")
+    : null;
+  if (testType === "subject" && (!selectedSubject || selectedSubject.examType !== examType || !validSubjectNames.has(String(selectedSubject.name || "").trim().toLowerCase()))) {
+    throw new AppError("Invalid subject for the selected exam mode", 400);
+  }
+  const startDate = payload.startDate ? new Date(payload.startDate) : existing?.startDate ?? null;
+  const endDate = payload.endDate ? new Date(payload.endDate) : existing?.endDate ?? null;
+  if (startDate && Number.isNaN(startDate.getTime())) throw new AppError("Start date is invalid", 400);
+  if (endDate && Number.isNaN(endDate.getTime())) throw new AppError("End date is invalid", 400);
+  if (startDate && endDate && endDate < startDate) throw new AppError("End date must be after the start date", 400);
 
   questions.forEach((question) => {
     const subject = subjectMap.get(String(question.subjectId));
     if (!subject) throw new AppError("Mock test includes a question with an invalid subject", 400);
     if (examType !== "BOTH" && subject.examType !== examType) {
       throw new AppError("All selected questions must match the mock test exam type", 400);
+    }
+    if (testType === "subject" && String(question.subjectId) !== requestedSubjectId) {
+      throw new AppError("All selected questions must match the subject mock test subject", 400);
     }
   });
   const questionMarkingRules = buildQuestionMarkingRules(questionIds, questionMap, effectiveMarkingScheme);
@@ -5801,6 +5823,12 @@ async function buildMockTestPayload(payload, existing = null) {
     slug: await ensureUniqueMockTestSlug(title, existing?._id),
     description: String(payload.description ?? existing?.description ?? "").trim() || undefined,
     examType,
+    testType,
+    subjectId: testType === "subject" ? requestedSubjectId : null,
+    subject: testType === "subject" ? selectedSubject.name : null,
+    difficulty: String(payload.difficulty ?? existing?.difficulty ?? "mixed").trim() || "mixed",
+    startDate,
+    endDate,
     patternPreset,
     durationMinutes,
     totalQuestions: questionIds.length,
@@ -5902,6 +5930,12 @@ async function serializeMockTests(items) {
       slug: raw.slug,
       description: raw.description || "",
       examType: raw.examType,
+      testType: raw.testType || "full",
+      subjectId: raw.subjectId || null,
+      subject: raw.subject || null,
+      difficulty: raw.difficulty || "mixed",
+      startDate: raw.startDate || null,
+      endDate: raw.endDate || null,
       patternPreset: raw.patternPreset || "CUSTOM",
       durationMinutes: Number(raw.durationMinutes || 0),
       totalQuestions: Number(raw.totalQuestions || raw.questionIds?.length || 0),
@@ -10235,6 +10269,11 @@ router.get(
     const filters = {};
 
     if (req.query.examType) filters.examType = normalizeExamType(req.query.examType);
+    if (req.query.testType) {
+      const testType = String(req.query.testType).toLowerCase();
+      filters.testType = testType === "full" ? { $in: ["full", null] } : testType;
+    }
+    if (req.query.subjectId) filters.subjectId = String(req.query.subjectId);
     if (req.query.isActive === "true" || req.query.isActive === "false") filters.isActive = req.query.isActive === "true";
     if (req.query.isPremiumOnly === "true" || req.query.isPremiumOnly === "false") filters.isPremiumOnly = req.query.isPremiumOnly === "true";
     if (req.query.createdDate) {
