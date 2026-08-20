@@ -5715,6 +5715,7 @@ async function buildMockTestPayload(payload, existing = null) {
   const examType = normalizeExamType(payload.examType || existing?.examType || preset.examType);
   const testType = String(payload.testType || existing?.testType || "full").toLowerCase();
   const requestedSubjectId = String(payload.subjectId || existing?.subjectId || "").trim();
+  const generationMode = String(payload.generationMode || existing?.generationMode || "fixed").toLowerCase();
   const validSubjectNames = examType === "NEET"
     ? new Set(["biology", "physics", "chemistry"])
     : new Set(["mathematics", "maths", "physics", "chemistry"]);
@@ -5765,6 +5766,7 @@ async function buildMockTestPayload(payload, existing = null) {
 
   if (!title) throw new AppError("Title is required", 400);
   if (!["full", "subject"].includes(testType)) throw new AppError("Test type is invalid", 400);
+  if (!["fixed", "automatic"].includes(generationMode)) throw new AppError("Generation mode is invalid", 400);
   if (testType === "subject" && examType === "BOTH") throw new AppError("Subject mock tests must use either NEET or JEE", 400);
   if (testType === "subject" && !requestedSubjectId) throw new AppError("Subject is required for a subject mock test", 400);
   if (questionIds.length < 2) throw new AppError("Select at least two questions", 400);
@@ -5829,6 +5831,11 @@ async function buildMockTestPayload(payload, existing = null) {
     difficulty: String(payload.difficulty ?? existing?.difficulty ?? "mixed").trim() || "mixed",
     startDate,
     endDate,
+    generationMode: testType === "subject" ? generationMode : "fixed",
+    generationFrequency: "daily",
+    generationTime: /^\d{2}:\d{2}$/.test(String(payload.generationTime || existing?.generationTime || "")) ? String(payload.generationTime || existing?.generationTime) : "00:00",
+    isGenerationTemplate: testType === "subject" && generationMode === "automatic" && !existing?.parentTemplateId,
+    isOneTimeFree: testType === "subject" && generationMode === "fixed" ? Boolean(payload.isOneTimeFree ?? existing?.isOneTimeFree) : false,
     patternPreset,
     durationMinutes,
     totalQuestions: questionIds.length,
@@ -5936,6 +5943,12 @@ async function serializeMockTests(items) {
       difficulty: raw.difficulty || "mixed",
       startDate: raw.startDate || null,
       endDate: raw.endDate || null,
+      generationMode: raw.generationMode || "fixed",
+      generationFrequency: raw.generationFrequency || "daily",
+      generationTime: raw.generationTime || "00:00",
+      isGenerationTemplate: Boolean(raw.isGenerationTemplate),
+      parentTemplateId: raw.parentTemplateId || null,
+      isOneTimeFree: Boolean(raw.isOneTimeFree),
       patternPreset: raw.patternPreset || "CUSTOM",
       durationMinutes: Number(raw.durationMinutes || 0),
       totalQuestions: Number(raw.totalQuestions || raw.questionIds?.length || 0),
@@ -6606,6 +6619,57 @@ async function runEnabledMockGenerationSchedules(options = {}) {
   }));
 }
 
+async function runSubjectMockGenerationTemplates(now = new Date()) {
+  const dateKey = formatLocalDateKey(now);
+  const parts = zonedDateTimeParts(now);
+  const currentMinutes = Number(parts.hour) * 60 + Number(parts.minute);
+  const templates = await MockTest.find({
+    testType: "subject",
+    generationMode: "automatic",
+    generationFrequency: "daily",
+    isGenerationTemplate: true,
+    isActive: true,
+    lastScheduledGenerationKey: { $ne: dateKey },
+  });
+
+  for (const template of templates) {
+    const [hour, minute] = String(template.generationTime || "00:00").split(":").map(Number);
+    if (currentMinutes < (Number(hour || 0) * 60 + Number(minute || 0))) continue;
+    try {
+      const generated = await buildAutoMockTestPayload({
+        title: `${template.title} ${dateKey}`,
+        examType: template.examType,
+        subjectIds: [String(template.subjectId)],
+        difficulty: template.difficulty === "mixed" ? "" : template.difficulty,
+        questionCount: Number(template.totalQuestions || template.questionIds?.length || 1),
+        isPremiumOnly: true,
+        isActive: true,
+        autoDailyQuestionGeneration: false,
+        autoDailyQuestionRearrangement: false,
+      }, null);
+      await MockTest.create({
+        ...generated,
+        testType: "subject",
+        subjectId: String(template.subjectId),
+        subject: template.subject,
+        difficulty: template.difficulty || "mixed",
+        generationMode: "automatic",
+        generationFrequency: "daily",
+        generationTime: template.generationTime || "00:00",
+        isGenerationTemplate: false,
+        parentTemplateId: String(template._id),
+        isOneTimeFree: false,
+        isPremiumOnly: true,
+        generationScheduleType: "daily",
+      });
+      template.lastScheduledGenerationKey = dateKey;
+      await template.save();
+    } catch (error) {
+      console.error(`Subject mock generation failed for ${template.title}`, error);
+    }
+  }
+}
+
 let mockSchedulerTimer = null;
 let mockSchedulerRunning = false;
 
@@ -6615,7 +6679,7 @@ export function startMockTestGenerationScheduler() {
     if (mockSchedulerRunning) return;
     mockSchedulerRunning = true;
     try {
-      await runEnabledMockGenerationSchedules();
+      await Promise.all([runEnabledMockGenerationSchedules(), runSubjectMockGenerationTemplates()]);
     } catch (error) {
       console.error("Automatic mock test scheduler failed", error);
     } finally {
