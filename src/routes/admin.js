@@ -5758,7 +5758,8 @@ async function buildMockTestPayload(payload, existing = null) {
   const marksPerQuestion = Number(effectiveMarkingScheme?.mcq?.correct ?? payload.marksPerQuestion ?? existing?.marksPerQuestion ?? preset.marksPerQuestion);
   const negativeMarks = Math.abs(Number(effectiveMarkingScheme?.mcq?.wrong ?? -(payload.negativeMarks ?? existing?.negativeMarks ?? preset.negativeMarks)));
   const availabilityMode = String(payload.availabilityMode ?? existing?.availabilityMode ?? "all").toLowerCase();
-  const questionIds = [...new Set((Array.isArray(payload.questionIds) ? payload.questionIds : existing?.questionIds || []).map(String).filter(Boolean))];
+  let questionIds = [...new Set((Array.isArray(payload.questionIds) ? payload.questionIds : existing?.questionIds || []).map(String).filter(Boolean))];
+  const automaticQuestionCount = Number(payload.questionCount ?? existing?.totalQuestions ?? 0);
   const selectionMix = payload.selectionMix ?? existing?.selectionMix ?? existing?.generationConfig?.selectionMix;
   const includedQuestionIds = normalizeIncludedQuestionIds(payload, existing);
   const availableDaysOfMonth = [...new Set((Array.isArray(payload.availableDaysOfMonth) ? payload.availableDaysOfMonth : existing?.availableDaysOfMonth || []).map(Number).filter((value) => value >= 1 && value <= 31))];
@@ -5769,6 +5770,31 @@ async function buildMockTestPayload(payload, existing = null) {
   if (!["fixed", "automatic"].includes(generationMode)) throw new AppError("Generation mode is invalid", 400);
   if (testType === "subject" && examType === "BOTH") throw new AppError("Subject mock tests must use either NEET or JEE", 400);
   if (testType === "subject" && !requestedSubjectId) throw new AppError("Subject is required for a subject mock test", 400);
+  const selectedSubject = testType === "subject"
+    ? await Subject.findById(requestedSubjectId).select("_id name examType")
+    : null;
+  if (testType === "subject" && (!selectedSubject || selectedSubject.examType !== examType || !validSubjectNames.has(String(selectedSubject.name || "").trim().toLowerCase()))) {
+    throw new AppError("Invalid subject for the selected exam mode", 400);
+  }
+  if (testType === "subject" && generationMode === "automatic") {
+    if (!Number.isInteger(automaticQuestionCount) || automaticQuestionCount < 2 || automaticQuestionCount > 300) {
+      throw new AppError("Automatic question count must be between 2 and 300", 400);
+    }
+    const automaticMatch = {
+      subjectId: new mongoose.Types.ObjectId(requestedSubjectId),
+      examMode: examType,
+      ...(String(payload.difficulty || "mixed").toLowerCase() !== "mixed" ? { difficulty: String(payload.difficulty).toLowerCase() } : {}),
+    };
+    const automaticallySelected = await Question.aggregate([
+      { $match: automaticMatch },
+      { $sample: { size: automaticQuestionCount } },
+      { $project: { _id: 1 } },
+    ]);
+    if (automaticallySelected.length !== automaticQuestionCount) {
+      throw new AppError(`Only ${automaticallySelected.length} matching questions are available; ${automaticQuestionCount} requested`, 400);
+    }
+    questionIds = automaticallySelected.map((question) => String(question._id));
+  }
   if (questionIds.length < 2) throw new AppError("Select at least two questions", 400);
   const requiredPresetQuestions = blueprintConfig?.totalQuestions || 0;
   if (requiredPresetQuestions && questionIds.length !== requiredPresetQuestions) {
@@ -5790,12 +5816,6 @@ async function buildMockTestPayload(payload, existing = null) {
 
   const subjects = await Subject.find({ _id: { $in: [...new Set(questions.map((item) => String(item.subjectId)).filter(Boolean))] } }).select("_id examType");
   const subjectMap = new Map(subjects.map((item) => [String(item._id), item]));
-  const selectedSubject = testType === "subject"
-    ? await Subject.findById(requestedSubjectId).select("_id name examType")
-    : null;
-  if (testType === "subject" && (!selectedSubject || selectedSubject.examType !== examType || !validSubjectNames.has(String(selectedSubject.name || "").trim().toLowerCase()))) {
-    throw new AppError("Invalid subject for the selected exam mode", 400);
-  }
   const startDate = payload.startDate ? new Date(payload.startDate) : existing?.startDate ?? null;
   const endDate = payload.endDate ? new Date(payload.endDate) : existing?.endDate ?? null;
   if (startDate && Number.isNaN(startDate.getTime())) throw new AppError("Start date is invalid", 400);
@@ -5813,9 +5833,13 @@ async function buildMockTestPayload(payload, existing = null) {
     }
   });
   const questionMarkingRules = buildQuestionMarkingRules(questionIds, questionMap, effectiveMarkingScheme);
-  const totalAttemptQuestions = Number(payload.totalAttemptQuestions ?? existing?.totalAttemptQuestions ?? questionIds.length);
+  const totalAttemptQuestions = generationMode === "automatic"
+    ? questionIds.length
+    : Number(payload.totalAttemptQuestions ?? existing?.totalAttemptQuestions ?? questionIds.length);
   const computedMaxScore = calculateMaxScoreFromRules(questionMarkingRules, totalAttemptQuestions);
-  const maxScore = Number(payload.maxScore ?? existing?.maxScore ?? blueprintConfig?.maxScore ?? computedMaxScore ?? preset.maxScore);
+  const maxScore = generationMode === "automatic"
+    ? Number(computedMaxScore)
+    : Number(payload.maxScore ?? existing?.maxScore ?? blueprintConfig?.maxScore ?? computedMaxScore ?? preset.maxScore);
   if (!Number.isFinite(maxScore) || maxScore <= 0) {
     throw new AppError("Max score must be greater than 0", 400);
   }
