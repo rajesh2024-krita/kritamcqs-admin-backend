@@ -6632,13 +6632,13 @@ async function runMockGenerationFromSchedule(scheduleDoc, { force = false, actor
       ),
     };
     const title = `${schedule.titlePrefix} ${schedule.examType} ${formatLocalDateTimeForTitle(now)}`;
-    const payload = await buildAutoMockTestPayload(
+    const buildScheduledPayload = (filters, difficulty = schedule.difficulty) => buildAutoMockTestPayload(
       {
         title,
         examType: schedule.examType,
-        subjectIds: generationFilters.subjectIds,
-        chapterIds: generationFilters.chapterIds,
-        difficulty: schedule.difficulty === "mixed" ? "" : schedule.difficulty,
+        subjectIds: filters.subjectIds,
+        chapterIds: filters.chapterIds,
+        difficulty: difficulty === "mixed" ? "" : difficulty,
         questionCount: schedule.questionCount,
         unusedQuestionPercentage: schedule.unusedQuestionPercentage,
         incorrectQuestionPercentage: schedule.incorrectQuestionPercentage,
@@ -6653,6 +6653,30 @@ async function runMockGenerationFromSchedule(scheduleDoc, { force = false, actor
       },
       actorId,
     );
+    let payload;
+    if (schedule.examType === "JEE") {
+      try {
+        payload = await buildScheduledPayload(generationFilters);
+      } catch (error) {
+        // A stale JEE-only filter must not stop the Friday paper. Retry with the
+        // complete JEE pool; NEET never enters this fallback path.
+        payload = await buildScheduledPayload({ subjectIds: [], chapterIds: [] }, "mixed");
+        configSnapshot.jeeFallbackReason = error?.message || "Configured JEE filters failed";
+        configSnapshot.filtersAutomaticallyCompleted = true;
+      }
+
+      const shortages = Array.isArray(payload?.generationConfig?.shortages)
+        ? payload.generationConfig.shortages
+        : [];
+      if (shortages.length && (generationFilters.subjectIds.length || generationFilters.chapterIds.length || schedule.difficulty !== "mixed")) {
+        payload = await buildScheduledPayload({ subjectIds: [], chapterIds: [] }, "mixed");
+        configSnapshot.jeeFallbackReason = "Configured JEE filters produced an incomplete blueprint";
+        configSnapshot.filtersAutomaticallyCompleted = true;
+      }
+    } else {
+      // Preserve the already-working NEET generation behavior exactly.
+      payload = await buildScheduledPayload(generationFilters);
+    }
     const item = await MockTest.create({
       ...payload,
       testType: "full",
