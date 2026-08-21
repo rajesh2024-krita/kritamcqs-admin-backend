@@ -5867,6 +5867,7 @@ async function buildMockTestPayload(payload, existing = null) {
     questionIds,
     subjectIds: [...new Set(questions.map((item) => String(item.subjectId)).filter(Boolean))],
     chapterIds: [...new Set(questions.map((item) => String(item.chapterId)).filter(Boolean))],
+    topicIds: [...new Set(questions.map((item) => String(item.topicId)).filter(Boolean))],
     instructions: (Array.isArray(payload.instructions) ? payload.instructions : String(payload.instructions ?? existing?.instructions ?? "").split("\n"))
       .map((item) => String(item).trim())
       .filter(Boolean).length
@@ -5903,7 +5904,7 @@ async function buildMockTestPayload(payload, existing = null) {
     premiumValidityDays: Math.max(1, Number(payload.premiumValidityDays ?? existing?.premiumValidityDays ?? 1)),
     autoDailyQuestionRearrangement: payload.autoDailyQuestionRearrangement !== undefined ? Boolean(payload.autoDailyQuestionRearrangement) : Boolean(existing?.autoDailyQuestionRearrangement),
     autoDailyQuestionGeneration: payload.autoDailyQuestionGeneration !== undefined ? Boolean(payload.autoDailyQuestionGeneration) : Boolean(existing?.autoDailyQuestionGeneration),
-    isPremiumOnly: payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : Boolean(existing?.isPremiumOnly),
+    isPremiumOnly: testType === "subject" ? true : payload.isPremiumOnly !== undefined ? Boolean(payload.isPremiumOnly) : Boolean(existing?.isPremiumOnly),
     isActive: payload.isActive !== undefined ? Boolean(payload.isActive) : existing ? Boolean(existing.isActive) : true,
   };
 }

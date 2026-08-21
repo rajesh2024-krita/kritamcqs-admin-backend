@@ -26,6 +26,7 @@ const mockTestSchema = new Schema(
     questionIds: { type: [String], default: [] },
     subjectIds: { type: [String], default: [] },
     chapterIds: { type: [String], default: [] },
+    topicIds: { type: [String], default: [] },
     instructions: { type: [String], default: [] },
     marksPerQuestion: { type: Number, default: 4 },
     negativeMarks: { type: Number, default: 1 },
