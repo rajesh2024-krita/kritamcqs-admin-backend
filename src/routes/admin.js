@@ -6558,8 +6558,13 @@ function getScheduleDueState(schedule, now = new Date()) {
   if (schedule.recurrenceType === "daily") return { due: true, runKey: `daily:${dayKey}` };
 
   if (schedule.recurrenceType === "weekly") {
-    const zonedMidnight = new Date(`${dayKey}T00:00:00.000+05:30`);
-    const dayCode = WEEKDAY_OPTIONS[zonedMidnight.getUTCDay()];
+    // `getUTCDay()` on an IST midnight returns the previous UTC weekday.
+    // Use Intl in the same application timezone as the date/time comparison.
+    const weekday = new Intl.DateTimeFormat("en-US", {
+      timeZone: APP_TIME_ZONE,
+      weekday: "short",
+    }).format(now).toUpperCase();
+    const dayCode = WEEKDAY_OPTIONS.includes(weekday) ? weekday : "";
     const allowedDays = Array.isArray(schedule.weeklyDays) && schedule.weeklyDays.length ? schedule.weeklyDays : DEFAULT_MOCK_GENERATION_SCHEDULE.weeklyDays;
     return { due: allowedDays.includes(dayCode), runKey: `weekly:${dayKey}` };
   }
@@ -6596,11 +6601,20 @@ async function runMockGenerationFromSchedule(scheduleDoc, { force = false, actor
         includedQuestionIds: schedule.includedQuestionIds,
         isPremiumOnly: true,
         isActive: true,
-        autoDailyQuestionGeneration: true,
+        // Weekly schedule generation and per-paper daily regeneration are
+        // different features. A weekly paper must remain stable after publish.
+        autoDailyQuestionGeneration: false,
+        autoDailyQuestionRearrangement: false,
       },
       actorId,
     );
-    const item = await MockTest.create({ ...payload, generationScheduleType: force ? "manual" : schedule.recurrenceType });
+    const item = await MockTest.create({
+      ...payload,
+      testType: "full",
+      subjectId: null,
+      subject: null,
+      generationScheduleType: force ? "manual" : schedule.recurrenceType,
+    });
     await MockTestGenerationLog.create({
       generatedAt: now,
       examType: schedule.examType,
@@ -6625,9 +6639,8 @@ async function runMockGenerationFromSchedule(scheduleDoc, { force = false, actor
       message: error?.message || "Mock test generation failed",
       configSnapshot,
     });
-    scheduleDoc.lastRunKey = runKey;
-    scheduleDoc.lastRunAt = now;
-    await scheduleDoc.save();
+    // Do not consume the weekly run key on failure. The minute scheduler can
+    // retry after a transient database/question-pool error.
     if (force) throw error;
     return { skipped: false, status: "failed", error };
   }
