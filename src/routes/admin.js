@@ -10558,6 +10558,68 @@ router.get(
   }),
 );
 
+const SUBJECT_MOCK_SETTINGS_DEFAULTS = {
+  key: "default",
+  enabled: true,
+  premiumAccess: true,
+  freeAccess: false,
+  defaultQuestionCount: 10,
+  maximumQuestionCount: 50,
+  prioritizeUnseenQuestions: true,
+  allowQuestionReuse: true,
+};
+
+router.get("/mock-tests/subject-settings", asyncHandler(async (_req, res) => {
+  const collection = mongoose.connection.collection("subjectmocktestsettings");
+  const settings = await collection.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { ...SUBJECT_MOCK_SETTINGS_DEFAULTS, createdAt: new Date() } },
+    { upsert: true, returnDocument: "after" },
+  );
+  res.json({ success: true, data: settings || SUBJECT_MOCK_SETTINGS_DEFAULTS });
+}));
+
+router.put("/mock-tests/subject-settings", asyncHandler(async (req, res) => {
+  const maximumQuestionCount = Math.max(1, Math.min(200, Number(req.body?.maximumQuestionCount || 50)));
+  const payload = {
+    enabled: req.body?.enabled !== false,
+    premiumAccess: req.body?.premiumAccess !== false,
+    freeAccess: req.body?.freeAccess === true,
+    maximumQuestionCount,
+    defaultQuestionCount: Math.max(1, Math.min(maximumQuestionCount, Number(req.body?.defaultQuestionCount || 10))),
+    prioritizeUnseenQuestions: req.body?.prioritizeUnseenQuestions !== false,
+    allowQuestionReuse: req.body?.allowQuestionReuse !== false,
+    updatedAt: new Date(),
+  };
+  const data = await mongoose.connection.collection("subjectmocktestsettings").findOneAndUpdate(
+    { key: "default" },
+    { $set: payload, $setOnInsert: { key: "default", createdAt: new Date() } },
+    { upsert: true, returnDocument: "after" },
+  );
+  res.json({ success: true, message: "Subject mock test settings saved", data });
+}));
+
+router.get("/mock-tests/subject-access/users", asyncHandler(async (req, res) => {
+  const search = String(req.query.search || "").trim();
+  const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const filters = {
+    isAdmin: { $ne: true },
+    isPremium: { $ne: true },
+    ...(search ? { $or: [{ name: new RegExp(escaped, "i") }, { email: new RegExp(escaped, "i") }, { mobile: new RegExp(escaped, "i") }] } : {}),
+  };
+  const users = await User.find(filters).select("name email mobile isPremium subjectMockTestAccess").sort({ updatedAt: -1 }).limit(30).lean();
+  res.json({ success: true, data: users.map((user) => ({ ...user, id: String(user._id) })) });
+}));
+
+router.put("/mock-tests/subject-access/users/:userId", asyncHandler(async (req, res) => {
+  const access = req.body?.access;
+  if (![true, false, null].includes(access)) throw new AppError("Access must be enabled, disabled, or inherited", 400);
+  const user = await User.findByIdAndUpdate(req.params.userId, { $set: { subjectMockTestAccess: access } }, { new: true })
+    .select("name email mobile isPremium subjectMockTestAccess").lean();
+  if (!user) throw new AppError("User not found", 404);
+  res.json({ success: true, message: "Individual subject mock access updated", data: { ...user, id: String(user._id) } });
+}));
+
 router.put(
   "/mock-tests/generation-schedule",
   asyncHandler(async (req, res) => {

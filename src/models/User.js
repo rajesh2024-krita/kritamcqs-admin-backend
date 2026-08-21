@@ -31,6 +31,7 @@ const userSchema = new Schema(
     isBlocked: { type: Boolean, default: false, index: true },
     lastLoginAt: { type: Date },
     isPremium: { type: Boolean, default: false, index: true },
+    subjectMockTestAccess: { type: Boolean, default: null, index: true },
     premiumExpiresAt: { type: Date },
     premiumPlan: { type: String },
     premiumExpiry: { type: Date },
