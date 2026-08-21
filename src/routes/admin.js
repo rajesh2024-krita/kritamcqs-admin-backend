@@ -6574,25 +6574,70 @@ function getScheduleDueState(schedule, now = new Date()) {
   return { due: Number(parts.day) === targetDay, runKey: `monthly:${monthKey}` };
 }
 
+async function resolveJeeWeeklyScheduleFilters(schedule) {
+  if (schedule.examType !== "JEE") {
+    return { subjectIds: schedule.subjectIds, chapterIds: schedule.chapterIds };
+  }
+
+  const requiredKeys = new Set(["PHYSICS", "CHEMISTRY", "MATHEMATICS"]);
+  const selectedSubjectIds = Array.isArray(schedule.subjectIds) ? schedule.subjectIds.map(String).filter(Boolean) : [];
+  const selectedSubjects = selectedSubjectIds.length
+    ? await Subject.find({ _id: { $in: selectedSubjectIds }, examType: "JEE" }).select("_id name").lean()
+    : [];
+  const selectedKeys = new Set(selectedSubjects.map((subject) => normalizeSubjectKey(subject.name)));
+  const hasCompleteSubjectPool = [...requiredKeys].every((key) => selectedKeys.has(key));
+
+  // An empty subject filter means all JEE subjects. A partial saved filter cannot
+  // satisfy the full JEE blueprint, so safely restore the complete pool.
+  const subjectIds = !selectedSubjectIds.length || hasCompleteSubjectPool ? selectedSubjectIds : [];
+  const selectedChapterIds = Array.isArray(schedule.chapterIds) ? schedule.chapterIds.map(String).filter(Boolean) : [];
+  if (!selectedChapterIds.length || !hasCompleteSubjectPool) return { subjectIds, chapterIds: [] };
+
+  const chapters = await Chapter.find({ _id: { $in: selectedChapterIds } }).select("_id subjectId").lean();
+  const subjectKeyById = new Map(selectedSubjects.map((subject) => [String(subject._id), normalizeSubjectKey(subject.name)]));
+  const chapterKeys = new Set(chapters.map((chapter) => subjectKeyById.get(String(chapter.subjectId))).filter(Boolean));
+  const hasCompleteChapterPool = [...requiredKeys].every((key) => chapterKeys.has(key));
+
+  return { subjectIds, chapterIds: hasCompleteChapterPool ? selectedChapterIds : [] };
+}
+
 async function runMockGenerationFromSchedule(scheduleDoc, { force = false, actorId = null } = {}) {
   const schedule = serializeMockGenerationSchedule(scheduleDoc);
   const now = new Date();
   const dueState = getScheduleDueState(schedule, now);
   const runKey = force ? `manual:${now.toISOString()}` : dueState.runKey;
 
-  if (!schedule.enabled || (!force && (!dueState.due || schedule.lastRunKey === dueState.runKey))) {
-    return { skipped: true, reason: !schedule.enabled ? "disabled" : schedule.lastRunKey === dueState.runKey ? "already_run" : "not_due" };
+  if (!schedule.enabled || (!force && !dueState.due)) {
+    return { skipped: true, reason: !schedule.enabled ? "disabled" : "not_due" };
+  }
+  if (!force && schedule.lastRunKey === dueState.runKey) {
+    const successfulRun = await MockTestGenerationLog.exists({
+      examType: schedule.examType,
+      status: "success",
+      "configSnapshot.runKey": dueState.runKey,
+    });
+    if (successfulRun) return { skipped: true, reason: "already_run" };
   }
 
-  const configSnapshot = { ...schedule, runKey };
+  let configSnapshot = { ...schedule, runKey };
   try {
+    const generationFilters = await resolveJeeWeeklyScheduleFilters(schedule);
+    configSnapshot = {
+      ...configSnapshot,
+      effectiveSubjectIds: generationFilters.subjectIds,
+      effectiveChapterIds: generationFilters.chapterIds,
+      filtersAutomaticallyCompleted: schedule.examType === "JEE" && (
+        generationFilters.subjectIds.length !== schedule.subjectIds.length
+        || generationFilters.chapterIds.length !== schedule.chapterIds.length
+      ),
+    };
     const title = `${schedule.titlePrefix} ${schedule.examType} ${formatLocalDateTimeForTitle(now)}`;
     const payload = await buildAutoMockTestPayload(
       {
         title,
         examType: schedule.examType,
-        subjectIds: schedule.subjectIds,
-        chapterIds: schedule.chapterIds,
+        subjectIds: generationFilters.subjectIds,
+        chapterIds: generationFilters.chapterIds,
         difficulty: schedule.difficulty === "mixed" ? "" : schedule.difficulty,
         questionCount: schedule.questionCount,
         unusedQuestionPercentage: schedule.unusedQuestionPercentage,
