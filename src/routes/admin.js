@@ -10599,6 +10599,67 @@ router.put("/mock-tests/subject-settings", asyncHandler(async (req, res) => {
   res.json({ success: true, message: "Subject mock test settings saved", data });
 }));
 
+router.get("/mock-tests/subject-generated", asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page || 1));
+  const limit = Math.max(1, Math.min(100, Number(req.query.limit || 25)));
+  const search = String(req.query.search || "").trim();
+  const sessionsCollection = mongoose.connection.collection("learningsessions");
+  const sessionFilter = { origin: "mock_test", "filterSnapshot.testType": "subject" };
+  const [sessions, total] = await Promise.all([
+    sessionsCollection.find(sessionFilter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).toArray(),
+    sessionsCollection.countDocuments(sessionFilter),
+  ]);
+  const sessionIds = sessions.map((session) => String(session._id));
+  const rawUserIds = [...new Set(sessions.map((session) => String(session.userId || "")).filter(Boolean))];
+  const userObjectIds = rawUserIds.filter((id) => mongoose.isValidObjectId(id)).map((id) => new mongoose.Types.ObjectId(id));
+  const [attempts, users] = await Promise.all([
+    sessionIds.length ? SessionAttempt.find({ sessionId: { $in: sessionIds } }).sort({ completedAt: -1, createdAt: -1 }).lean() : [],
+    userObjectIds.length ? User.find({ _id: { $in: userObjectIds } }).select("name email mobile username").lean() : [],
+  ]);
+  const userMap = new Map(users.map((user) => [String(user._id), user]));
+  const attemptsBySession = new Map();
+  attempts.forEach((attempt) => {
+    const key = String(attempt.sessionId);
+    if (!attemptsBySession.has(key)) attemptsBySession.set(key, []);
+    attemptsBySession.get(key).push(attempt);
+  });
+  const rows = sessions.flatMap((session) => {
+    const snapshot = session.filterSnapshot || {};
+    const user = userMap.get(String(session.userId));
+    const sessionAttempts = attemptsBySession.get(String(session._id)) || [];
+    const base = {
+      generatedTestId: String(session._id),
+      generatedTestKey: snapshot.generatedTestKey || session.sourceSessionId || String(session._id),
+      mockTestId: snapshot.mockTestId || null,
+      title: session.title || "Subject-Based Mock Test",
+      examType: snapshot.examType || session.modeKey || "",
+      subjects: snapshot.subjectNames || [snapshot.subjectName].filter(Boolean),
+      chapters: snapshot.chapterNames || [],
+      topics: snapshot.topicNames || [],
+      questionIds: (session.questionIds || []).map(String),
+      questionCount: (session.questionIds || []).length,
+      generatedAt: snapshot.generatedAt || session.createdAt,
+      user: user ? { id: String(user._id), name: user.name || user.username || "", email: user.email || "", mobile: user.mobile || "" } : { id: String(session.userId || ""), name: "", email: "", mobile: "" },
+    };
+    if (!sessionAttempts.length) return [{ ...base, attemptId: null, attemptNumber: 0, status: "generated" }];
+    return sessionAttempts.map((attempt) => ({
+      ...base,
+      attemptId: String(attempt._id),
+      attemptNumber: Number(attempt.attemptNumber || 1),
+      status: attempt.completedAt ? "completed" : "started",
+      totalQuestions: Number(attempt.totalQuestions || base.questionCount),
+      correctAnswers: Number(attempt.correctCount || 0),
+      wrongAnswers: Number(attempt.incorrectCount || 0),
+      unansweredQuestions: Number(attempt.skippedCount || 0),
+      score: Number(attempt.score || 0),
+      percentage: Number(attempt.totalQuestions || 0) > 0 ? Math.round((Number(attempt.score || 0) / (Number(attempt.totalQuestions) * Number(snapshot.marksPerQuestion || 4))) * 10000) / 100 : 0,
+      timeTaken: Number(attempt.timeTaken || 0),
+      attemptedAt: attempt.completedAt || attempt.createdAt,
+    }));
+  }).filter((row) => !search || [row.user?.name, row.user?.email, row.user?.mobile, row.examType, ...(row.subjects || []), ...(row.chapters || []), ...(row.topics || [])].some((value) => String(value || "").toLowerCase().includes(search.toLowerCase())));
+  res.json({ success: true, data: rows, meta: { page, limit, total } });
+}));
+
 router.get("/mock-tests/subject-access/users", asyncHandler(async (req, res) => {
   const search = String(req.query.search || "").trim();
   const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
