@@ -10565,6 +10565,7 @@ const SUBJECT_MOCK_SETTINGS_DEFAULTS = {
   freeAccess: false,
   defaultQuestionCount: 10,
   maximumQuestionCount: 50,
+  unlimitedQuestions: false,
   prioritizeUnseenQuestions: true,
   allowQuestionReuse: true,
 };
@@ -10585,6 +10586,7 @@ router.put("/mock-tests/subject-settings", asyncHandler(async (req, res) => {
     enabled: req.body?.enabled !== false,
     premiumAccess: req.body?.premiumAccess !== false,
     freeAccess: req.body?.freeAccess === true,
+    unlimitedQuestions: req.body?.unlimitedQuestions === true,
     maximumQuestionCount,
     defaultQuestionCount: Math.max(1, Math.min(maximumQuestionCount, Number(req.body?.defaultQuestionCount || 10))),
     prioritizeUnseenQuestions: req.body?.prioritizeUnseenQuestions !== false,
