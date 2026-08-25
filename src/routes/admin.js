@@ -10568,6 +10568,10 @@ const SUBJECT_MOCK_SETTINGS_DEFAULTS = {
   unlimitedQuestions: false,
   prioritizeUnseenQuestions: true,
   allowQuestionReuse: true,
+  accessCardTitle: "Subject-Based Mock Test",
+  accessCardMessage: "Subject-based mock test access is not enabled for this account.",
+  accessCardCtaText: "View Plans",
+  accessCardSubscriptionUrl: "/subscription",
 };
 
 router.get("/mock-tests/subject-settings", asyncHandler(async (_req, res) => {
@@ -10591,6 +10595,10 @@ router.put("/mock-tests/subject-settings", asyncHandler(async (req, res) => {
     defaultQuestionCount: Math.max(1, Math.min(maximumQuestionCount, Number(req.body?.defaultQuestionCount || 10))),
     prioritizeUnseenQuestions: req.body?.prioritizeUnseenQuestions !== false,
     allowQuestionReuse: req.body?.allowQuestionReuse !== false,
+    accessCardTitle: String(req.body?.accessCardTitle || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardTitle).trim().slice(0, 120),
+    accessCardMessage: String(req.body?.accessCardMessage || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardMessage).trim().slice(0, 500),
+    accessCardCtaText: String(req.body?.accessCardCtaText || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardCtaText).trim().slice(0, 80),
+    accessCardSubscriptionUrl: String(req.body?.accessCardSubscriptionUrl || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardSubscriptionUrl).trim().slice(0, 500),
     updatedAt: new Date(),
   };
   const data = await mongoose.connection.collection("subjectmocktestsettings").findOneAndUpdate(
