@@ -32,6 +32,25 @@ function parseBoolean(value, fallback) {
   return fallback;
 }
 
+function resolvePremiumExpiry(value, enabled) {
+  if (!enabled) return undefined;
+  if (String(value || "").trim()) {
+    const configured = new Date(String(value));
+    if (Number.isNaN(configured.getTime())) throw new AppError("Premium expiry date is invalid", 400);
+    configured.setHours(23, 59, 59, 999);
+    if (configured <= new Date()) throw new AppError("Premium expiry date must be in the future", 400);
+    return configured;
+  }
+  const expiry = new Date();
+  const originalDay = expiry.getDate();
+  expiry.setDate(1);
+  expiry.setMonth(expiry.getMonth() + 6);
+  const daysInExpiryMonth = new Date(expiry.getFullYear(), expiry.getMonth() + 1, 0).getDate();
+  expiry.setDate(Math.min(originalDay, daysInExpiryMonth));
+  expiry.setHours(23, 59, 59, 999);
+  return expiry;
+}
+
 function validateRow(row, modeKeys, levelKeys) {
   const reasons = [];
   if (row.name.length < 2 || row.name.length > 80) reasons.push("Name must contain 2-80 characters");
@@ -82,6 +101,7 @@ export async function importProfileUsers(file, options = {}) {
   const onboardingComplete = parseBoolean(options.onboardingComplete, false);
   const isPremium = parseBoolean(options.isPremium, false);
   const isActive = parseBoolean(options.isActive, true);
+  const premiumExpiresAt = resolvePremiumExpiry(options.premiumExpiresAt, isPremium);
   const failedRecords = [];
   const candidates = [];
   const seenEmails = new Set();
@@ -126,6 +146,7 @@ export async function importProfileUsers(file, options = {}) {
         address: item.row.address, country: item.row.country, state: item.row.state, district: item.row.district,
         city: item.row.city, userType: item.row.userType, profileImage: item.row.profileImage,
         examMode: item.examMode, level: item.level, onboardingComplete, isPremium, isActive,
+        ...(premiumExpiresAt ? { premiumExpiresAt, premiumExpiry: premiumExpiresAt } : {}),
         isBlocked: false, emailVerified: false, mobileVerified: false,
         requiresProfileCompletion: false,
       })));
@@ -146,6 +167,6 @@ export async function importProfileUsers(file, options = {}) {
     insertedUsers,
     failedUsers: failedRecords.length,
     failedRecords,
-    appliedSettings: { onboardingComplete, isPremium, isActive },
+    appliedSettings: { onboardingComplete, isPremium, isActive, premiumExpiresAt: premiumExpiresAt || null },
   };
 }
