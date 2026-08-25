@@ -10572,6 +10572,11 @@ const SUBJECT_MOCK_SETTINGS_DEFAULTS = {
   accessCardMessage: "Subject-based mock test access is not enabled for this account.",
   accessCardCtaText: "View Plans",
   accessCardSubscriptionUrl: "/subscription",
+  accessCardHtml: `<div class="subject-mock-access-card__icon" aria-hidden="true">&#128274;</div>
+<h2 id="subject-mock-access-title">{{title}}</h2>
+<p>{{message}}</p>
+<a href="{{subscriptionUrl}}">{{ctaText}}</a>`,
+  accessCardCss: `.subject-mock-access-card{box-sizing:border-box;width:min(100%,680px);margin:24px auto;padding:32px;border:1px solid #ddd6fe;border-radius:24px;background:linear-gradient(135deg,#faf5ff,#eff6ff);color:#1e1b4b;text-align:center;font-family:system-ui,sans-serif}.subject-mock-access-card__icon{font-size:28px}.subject-mock-access-card h2{font-size:clamp(1.25rem,4vw,1.8rem)}.subject-mock-access-card p{color:#475569;line-height:1.65}.subject-mock-access-card a{display:inline-flex;min-height:48px;align-items:center;border-radius:14px;background:#6d28d9;padding:12px 28px;color:#fff;text-decoration:none;font-weight:800}@media(max-width:480px){.subject-mock-access-card{margin:12px 0;padding:22px 16px}.subject-mock-access-card a{width:100%;justify-content:center}}`,
 };
 
 router.get("/mock-tests/subject-settings", asyncHandler(async (_req, res) => {
@@ -10599,6 +10604,8 @@ router.put("/mock-tests/subject-settings", asyncHandler(async (req, res) => {
     accessCardMessage: String(req.body?.accessCardMessage || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardMessage).trim().slice(0, 500),
     accessCardCtaText: String(req.body?.accessCardCtaText || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardCtaText).trim().slice(0, 80),
     accessCardSubscriptionUrl: String(req.body?.accessCardSubscriptionUrl || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardSubscriptionUrl).trim().slice(0, 500),
+    accessCardHtml: String(req.body?.accessCardHtml || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardHtml).slice(0, 50000),
+    accessCardCss: String(req.body?.accessCardCss || SUBJECT_MOCK_SETTINGS_DEFAULTS.accessCardCss).slice(0, 50000),
     updatedAt: new Date(),
   };
   const data = await mongoose.connection.collection("subjectmocktestsettings").findOneAndUpdate(
