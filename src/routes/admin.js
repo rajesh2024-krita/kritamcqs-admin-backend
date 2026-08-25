@@ -92,6 +92,7 @@ import { questionBulkUploadService } from "../services/questionBulkUploadService
 import { katexAuditService } from "../services/katexAuditService.js";
 import { aiAuditService } from "../services/aiAuditService.js";
 import { oldUserMigrationService } from "../services/oldUserMigrationService.js";
+import { createUserBulkTemplate, importProfileUsers } from "../services/userBulkUploadService.js";
 import {
   createUserNotification,
   insertUserNotifications,
@@ -2813,6 +2814,19 @@ export function startAppNotificationReminderScheduler() {
 }
 router.get("/daily-test-analytics", asyncHandler(dashboardController.dailyTestAnalytics));
 router.get("/users/:id/overview", asyncHandler(userInsightsController.overview));
+router.get("/users/bulk/template", requireModulePermission("users", "view"), asyncHandler(async (req, res) => {
+  const format = String(req.query.format || "xlsx").toLowerCase() === "csv" ? "csv" : "xlsx";
+  const template = createUserBulkTemplate(format);
+  res.setHeader("Content-Type", template.contentType);
+  res.setHeader("Content-Disposition", `attachment; filename=user-profile-template.${template.extension}`);
+  res.send(template.buffer);
+}));
+router.post("/users/bulk/import", requireModulePermission("users", "create"), upload.single("file"), asyncHandler(async (req, res) => {
+  sendResponse(res, {
+    message: "Bulk user upload processed",
+    data: await importProfileUsers(req.file, req.body || {}),
+  });
+}));
 router.post("/users/:id/truncate", asyncHandler(async (req, res) => {
   const result = await truncateUserData(req.params.id);
   sendResponse(res, {

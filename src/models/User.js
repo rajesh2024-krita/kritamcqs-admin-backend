@@ -24,6 +24,7 @@ const userSchema = new Schema(
     requiresProfileCompletion: { type: Boolean, default: false },
     country: { type: String, default: "" },
     state: { type: String, default: "" },
+    district: { type: String, default: "" },
     city: { type: String, default: "" },
     userType: { type: String, default: "" },
     profileImage: { type: String, default: "" },

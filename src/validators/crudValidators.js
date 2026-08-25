@@ -107,6 +107,13 @@ export const topicBodySchema = z.object({
 export const difficultyBodySchema = z.object({
   key: z.string().min(2).max(40),
   name: z.string().min(2).max(80),
+  address: z.string().max(500).optional().default(""),
+  country: z.string().max(100).optional().default(""),
+  state: z.string().max(100).optional().default(""),
+  district: z.string().max(100).optional().default(""),
+  city: z.string().max(100).optional().default(""),
+  userType: z.string().max(80).optional().default(""),
+  profileImage: z.string().max(2000).optional().default(""),
   description: z.string().max(500).optional().or(z.literal("")),
   sortOrder: z.coerce.number().int().min(0).optional().default(0),
 });
