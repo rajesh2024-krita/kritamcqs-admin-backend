@@ -9,7 +9,15 @@ import { hashPassword } from "../utils/password.js";
 export const affiliateMarketingRouter = Router();
 affiliateMarketingRouter.use(requireAdmin, requireMainAdmin);
 const actor = (req) => req.admin?._id?.toString();
-const settings = () => AffiliateSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default" } }, { upsert: true, new: true });
+async function settings() {
+  let value = await AffiliateSettings.findOneAndUpdate({ key: "default" }, { $setOnInsert: { key: "default" } }, { upsert: true, new: true });
+  if (value.referralBaseUrl === "https://kritamcqs.com") {
+    value = await AffiliateSettings.findOneAndUpdate({ key: "default" }, { $set: { referralBaseUrl: "https://app.kritamcqs.com/affiliate" } }, { new: true });
+    const affiliates = await Affiliate.find().select("affiliateCode");
+    await Promise.all(affiliates.map((item) => Affiliate.updateOne({ _id: item._id }, { $set: { referralLink: `https://app.kritamcqs.com/affiliate?ref=${item.affiliateCode}` } })));
+  }
+  return value;
+}
 async function metrics(affiliateId) { const referralMatch = affiliateId ? { affiliateId } : {}; const purchaseMatch = affiliateId ? { affiliateId, paymentStatus: "PAID", subscriptionStatus: { $ne: "REFUNDED" } } : { paymentStatus: "PAID", subscriptionStatus: { $ne: "REFUNDED" } }; const [clicks, registrations, result] = await Promise.all([AffiliateReferral.countDocuments(referralMatch), AffiliateReferral.countDocuments({ ...referralMatch, userId: { $exists: true } }), AffiliatePurchase.aggregate([{ $match: purchaseMatch }, { $group: { _id: null, count: { $sum: 1 }, amount: { $sum: "$amount" } } }])]); const successfulPurchases = result[0]?.count || 0; const totalPurchaseAmount = result[0]?.amount || 0; return { clicks, registrations, successfulPurchases, totalPurchaseAmount, averagePurchaseValue: successfulPurchases ? totalPurchaseAmount / successfulPurchases : 0, conversionRate: registrations ? successfulPurchases / registrations * 100 : 0 }; }
 
 affiliateMarketingRouter.get("/affiliate-marketing/dashboard", asyncHandler(async (_req, res) => { const [totalAffiliates, activeAffiliates, performance] = await Promise.all([Affiliate.countDocuments(), Affiliate.countDocuments({ status: "ACTIVE" }), metrics()]); res.json({ success: true, data: { totalAffiliates, activeAffiliates, ...performance } }); }));
