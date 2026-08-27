@@ -2,6 +2,8 @@
 
 The admin backend runs the database scheduler; it does not depend on an open browser. At the configured UTC hour it creates one compressed MongoDB archive and removes completed manual/automatic archives older than the retention window.
 
+The Database Backup page shows the most recent completed backup and the next scheduled run in the browser's local time. A main admin can persistently enable or disable automatic backups with the page toggle; the environment value supplies its initial default.
+
 ## VPS prerequisites
 
 Install a MongoDB Database Tools release compatible with the server so `mongodump` and `mongorestore` are available to the backend process. The service account running Node must have read/write access to `DATABASE_BACKUP_DIR`; use a persistent volume with restrictive filesystem permissions and enough capacity for at least eight full database archives.

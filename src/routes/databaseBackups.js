@@ -5,7 +5,7 @@ import { requireAdmin, requireMainAdmin } from "../middlewares/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { AppError } from "../utils/AppError.js";
 import { verifyPassword } from "../utils/password.js";
-import { queueBackup, queueRestore, resolveBackup } from "../services/databaseBackupService.js";
+import { getBackupSchedule, queueBackup, queueRestore, resolveBackup, updateBackupSchedule } from "../services/databaseBackupService.js";
 
 export const databaseBackupsRouter = Router();
 const restoreAuthorizations = new Map();
@@ -26,7 +26,15 @@ function cleanExpiredAuthorizations() {
 databaseBackupsRouter.get("/database-backups", asyncHandler(async (req, res) => {
   const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
   const operations = await DatabaseOperation.find().sort({ startedAt: -1 }).limit(limit);
-  res.json({ success: true, data: operations });
+  const schedule = await getBackupSchedule();
+  res.json({ success: true, data: operations, schedule });
+}));
+
+databaseBackupsRouter.patch("/database-backups/settings", asyncHandler(async (req, res) => {
+  if (typeof req.body?.automaticEnabled !== "boolean") throw new AppError("automaticEnabled must be true or false", 400);
+  const settings = await updateBackupSchedule({ automaticEnabled: req.body.automaticEnabled, actor: req.admin });
+  const schedule = await getBackupSchedule();
+  res.json({ success: true, data: settings, schedule, message: `Automatic backups ${settings.automaticEnabled ? "enabled" : "disabled"}` });
 }));
 
 databaseBackupsRouter.post("/database-backups", asyncHandler(async (req, res) => {

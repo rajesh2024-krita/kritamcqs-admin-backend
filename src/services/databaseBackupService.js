@@ -5,11 +5,12 @@ import path from "node:path";
 import { promisify } from "node:util";
 import mongoose from "mongoose";
 import { env } from "../config/env.js";
-import { DatabaseOperation } from "../models/index.js";
+import { DatabaseBackupSettings, DatabaseOperation } from "../models/index.js";
 import { AppError } from "../utils/AppError.js";
 
 const execFileAsync = promisify(execFile);
 const METADATA_COLLECTION = "databaseoperations";
+const SETTINGS_COLLECTION = "databasebackupsettings";
 let activeOperation = null;
 let schedulerTimer = null;
 
@@ -29,6 +30,43 @@ function archiveName(prefix, date = new Date()) {
 
 async function runTool(binary, args) {
   return execFileAsync(binary, args, { maxBuffer: 10 * 1024 * 1024, windowsHide: true });
+}
+
+export async function getBackupSchedule() {
+  const settings = await DatabaseBackupSettings.findOneAndUpdate(
+    { key: "default" },
+    { $setOnInsert: { automaticEnabled: env.databaseBackupEnabled, backupHourUtc: env.databaseBackupHourUtc } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  const lastAutomaticBackup = await DatabaseOperation.findOne({ kind: "backup", backupType: "automatic" }).sort({ startedAt: -1 });
+  let nextAutomaticBackupAt = null;
+  if (settings.automaticEnabled) {
+    const now = new Date();
+    const next = new Date(now);
+    next.setUTCHours(settings.backupHourUtc, 0, 0, 0);
+    const todayStart = new Date(now); todayStart.setUTCHours(0, 0, 0, 0);
+    const alreadyRanToday = lastAutomaticBackup?.startedAt >= todayStart;
+    if (now.getUTCHours() === settings.backupHourUtc && !alreadyRanToday) next.setTime(now.getTime());
+    else if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+    nextAutomaticBackupAt = next;
+  }
+  return { settings, lastAutomaticBackup, nextAutomaticBackupAt };
+}
+
+export async function updateBackupSchedule({ automaticEnabled, actor }) {
+  const settings = await DatabaseBackupSettings.findOneAndUpdate(
+    { key: "default" },
+    {
+      $set: {
+        automaticEnabled: Boolean(automaticEnabled),
+        backupHourUtc: env.databaseBackupHourUtc,
+        updatedById: actor?._id,
+        updatedByName: actor?.name || actor?.username || actor?.email || "Admin",
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+  return settings;
 }
 
 async function createOperation(type, actor = null) {
@@ -56,6 +94,7 @@ export async function createBackup({ type = "manual", actor = null } = {}) {
       `--archive=${filePath}`,
       "--gzip",
       `--excludeCollection=${METADATA_COLLECTION}`,
+      `--excludeCollection=${SETTINGS_COLLECTION}`,
     ]);
     const stats = await fs.stat(filePath);
     const completedAt = new Date();
@@ -117,6 +156,7 @@ export async function restoreBackup({ backupId, actor }) {
     await runTool(env.mongoRestoreBinary, [
       `--uri=${env.mongoUri}`, `--archive=${resolved}`, "--gzip", "--drop",
       `--nsExclude=${mongoose.connection.name}.${METADATA_COLLECTION}`,
+      `--nsExclude=${mongoose.connection.name}.${SETTINGS_COLLECTION}`,
     ]);
     const completedAt = new Date();
     await DatabaseOperation.findByIdAndUpdate(operation._id, {
@@ -144,13 +184,18 @@ export function queueRestore(options) {
 }
 
 export function startDatabaseBackupScheduler() {
-  if (!env.databaseBackupEnabled || schedulerTimer) return;
+  if (schedulerTimer) return;
   const tick = async () => {
-    const now = new Date();
-    if (now.getUTCHours() !== env.databaseBackupHourUtc || activeOperation) return;
-    const start = new Date(now); start.setUTCHours(0, 0, 0, 0);
-    const exists = await DatabaseOperation.exists({ kind: "backup", backupType: "automatic", startedAt: { $gte: start } });
-    if (!exists) void createBackup({ type: "automatic" }).catch((error) => console.error("Automatic database backup failed to start", safeError(error)));
+    try {
+      const now = new Date();
+      const { settings } = await getBackupSchedule();
+      if (!settings.automaticEnabled || now.getUTCHours() !== settings.backupHourUtc || activeOperation) return;
+      const start = new Date(now); start.setUTCHours(0, 0, 0, 0);
+      const exists = await DatabaseOperation.exists({ kind: "backup", backupType: "automatic", startedAt: { $gte: start } });
+      if (!exists) void createBackup({ type: "automatic" }).catch((error) => console.error("Automatic database backup failed to start", safeError(error)));
+    } catch (error) {
+      console.error("Database backup scheduler check failed", safeError(error));
+    }
   };
   void tick();
   schedulerTimer = setInterval(() => void tick(), 5 * 60 * 1000);
