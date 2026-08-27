@@ -6,12 +6,14 @@ import {
   startMockTestGenerationScheduler,
   startNotificationCenterScheduler,
 } from "./routes/admin.js";
+import { startDatabaseBackupScheduler } from "./services/databaseBackupService.js";
 
 async function start() {
   await connectDb();
   startMockTestGenerationScheduler();
   startAppNotificationReminderScheduler();
   startNotificationCenterScheduler();
+  startDatabaseBackupScheduler();
   app.listen(env.port, () => {
     console.log(`Admin backend running on http://localhost:${env.port}`);
   });

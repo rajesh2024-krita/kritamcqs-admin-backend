@@ -87,3 +87,4 @@ export * from "./NationalLeaderboardEntry.js";
 export * from "./NationalCompetitionReward.js";
 export * from "./NationalCompetitionNotification.js";
 export * from "./NationalCompetitionAuditLog.js";
+export * from "./DatabaseOperation.js";

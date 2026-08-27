@@ -23,4 +23,10 @@ export const env = {
   firebasePrivateKey: process.env.FIREBASE_PRIVATE_KEY || "",
   firebaseServiceAccountJson: process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "",
   firebaseServiceAccountBase64: process.env.FIREBASE_SERVICE_ACCOUNT_BASE64 || "",
+  databaseBackupDir: process.env.DATABASE_BACKUP_DIR || "./backups/database",
+  databaseBackupRetentionDays: Math.max(1, Number(process.env.DATABASE_BACKUP_RETENTION_DAYS || 7)),
+  databaseBackupHourUtc: Math.min(23, Math.max(0, Number(process.env.DATABASE_BACKUP_HOUR_UTC || 2))),
+  databaseBackupEnabled: String(process.env.DATABASE_BACKUP_ENABLED || "true").toLowerCase() === "true",
+  mongoDumpBinary: process.env.MONGODUMP_BINARY || "mongodump",
+  mongoRestoreBinary: process.env.MONGORESTORE_BINARY || "mongorestore",
 };
