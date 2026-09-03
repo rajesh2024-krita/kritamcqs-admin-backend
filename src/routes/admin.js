@@ -5669,6 +5669,81 @@ function normalizeQuestionTypeBucket(question) {
   return "MCQ";
 }
 
+function normalizeAutomaticQuestionDistribution(payload = {}) {
+  return (Array.isArray(payload.automaticQuestionDistribution) ? payload.automaticQuestionDistribution : [])
+    .map((row) => ({
+      subjectId: String(row?.subjectId || "").trim(),
+      subjectName: String(row?.subjectName || row?.subject || "").trim(),
+      mcqCount: Math.max(0, Math.floor(Number(row?.mcqCount ?? row?.mcqs ?? row?.mcq ?? 0))),
+      numericCount: Math.max(0, Math.floor(Number(row?.numericCount ?? row?.numericalCount ?? row?.numeric ?? row?.integerCount ?? 0))),
+    }))
+    .filter((row) => row.subjectId || row.subjectName);
+}
+
+function buildSectionGroupsFromDistribution(distributionRows, subjectDocs, examType, blueprintConfig, payload = {}) {
+  const subjectMap = new Map(subjectDocs.map((subject) => [String(subject._id), subject]));
+  const expectedBySubjectKey = new Map();
+  (blueprintConfig?.sectionGroups || []).forEach((section) => {
+    const key = section.subjectKey || normalizeSubjectKey(section.label);
+    expectedBySubjectKey.set(key, Number(expectedBySubjectKey.get(key) || 0) + Number(section.totalQuestions || 0));
+  });
+
+  const actualBySubjectKey = new Map();
+  const sections = [];
+  distributionRows.forEach((row, index) => {
+    const subject = row.subjectId ? subjectMap.get(String(row.subjectId)) : null;
+    const subjectName = subject?.name || row.subjectName;
+    const subjectKey = normalizeSubjectKey(subjectName);
+    const total = Number(row.mcqCount || 0) + Number(row.numericCount || 0);
+    actualBySubjectKey.set(subjectKey, Number(actualBySubjectKey.get(subjectKey) || 0) + total);
+    if (row.mcqCount > 0) {
+      sections.push({
+        key: `${subjectKey}_MCQ_${index + 1}`,
+        label: `${subjectName} MCQ`,
+        subjectKey,
+        subjectId: row.subjectId || null,
+        questionType: "MCQ",
+        totalQuestions: row.mcqCount,
+        attemptQuestions: row.mcqCount,
+      });
+    }
+    if (row.numericCount > 0) {
+      sections.push({
+        key: `${subjectKey}_NUM_${index + 1}`,
+        label: `${subjectName} Numeric`,
+        subjectKey,
+        subjectId: row.subjectId || null,
+        questionType: "NUMERICAL",
+        totalQuestions: row.numericCount,
+        attemptQuestions: row.numericCount,
+      });
+    }
+  });
+
+  if (!sections.length) throw new AppError("Automatic question distribution must include at least one question", 400);
+  if (examType === "NEET" && distributionRows.some((row) => Number(row.numericCount || 0) > 0)) {
+    throw new AppError("NEET automatic mock tests support MCQ questions only", 400);
+  }
+
+  const expectedTotal = [...expectedBySubjectKey.values()].reduce((sum, value) => sum + Number(value || 0), 0);
+  const actualTotal = [...actualBySubjectKey.values()].reduce((sum, value) => sum + Number(value || 0), 0);
+  const requestedTotal = Math.floor(Number(payload.questionCount || 0));
+  if (requestedTotal > 0 && actualTotal !== requestedTotal) {
+    throw new AppError(`Automatic MCQ and numeric counts must equal the mock test total of ${requestedTotal} questions`, 400);
+  }
+  if (expectedTotal > 0 && actualTotal !== expectedTotal) {
+    throw new AppError(`Automatic question distribution must total exactly ${expectedTotal} questions for the selected ${examType} pattern`, 400);
+  }
+  for (const [subjectKey, expected] of expectedBySubjectKey.entries()) {
+    const actual = Number(actualBySubjectKey.get(subjectKey) || 0);
+    if (actual !== Number(expected || 0)) {
+      throw new AppError(`${subjectKey} automatic question count must be exactly ${expected} for the selected ${examType} pattern`, 400);
+    }
+  }
+
+  return sections;
+}
+
 function chooseBalancedQuestions(candidates, requiredCount, forcedDifficulty = "") {
   if (!requiredCount || requiredCount <= 0) return [];
   if (!Array.isArray(candidates) || candidates.length === 0) return [];
@@ -6197,7 +6272,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
 
   const preset = AUTO_MOCK_PRESET_BY_EXAM[examType];
   const blueprintConfig = await getPatternBlueprintConfig(examType, preset);
-  const blueprintSectionGroups = scaleSectionGroups(
+  let blueprintSectionGroups = scaleSectionGroups(
     blueprintConfig?.sectionGroups?.length ? blueprintConfig.sectionGroups : preset.sectionGroups,
     payload.questionCount ?? existing?.generationConfig?.questionCount,
   );
@@ -6251,6 +6326,19 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
   const rawChapterIds = payload.chapterIds ?? existing?.generationConfig?.chapterIds ?? [];
   const sourceChapterIds = [...new Set((Array.isArray(rawChapterIds) ? rawChapterIds : []).map(String).filter(Boolean))];
   const { subjects, groupedSubjectIds } = await resolveAutoMockSubjects(examType, sourceSubjectIds);
+  const automaticQuestionDistribution = normalizeAutomaticQuestionDistribution(payload);
+  if (automaticQuestionDistribution.length) {
+    const requestedDistributionSubjectIds = automaticQuestionDistribution.map((row) => row.subjectId).filter(Boolean);
+    if (requestedDistributionSubjectIds.length) {
+      const validSubjectIds = new Set(subjects.map((subject) => String(subject._id)));
+      const invalidSubject = requestedDistributionSubjectIds.find((id) => !validSubjectIds.has(String(id)));
+      if (invalidSubject) throw new AppError("Automatic question distribution includes an invalid subject for this exam type", 400);
+    }
+    blueprintSectionGroups = buildSectionGroupsFromDistribution(automaticQuestionDistribution, subjects, examType, {
+      ...blueprintConfig,
+      sectionGroups: blueprintSectionGroups,
+    }, payload);
+  }
 
   const baseFilter = {
     subjectId: { $in: subjects.map((item) => String(item._id)) },
@@ -6261,7 +6349,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
   };
 
   const allCandidates = await Question.find(baseFilter)
-    .select("_id subjectId chapterId difficulty responseType examMode")
+    .select("_id subjectId chapterId topicId difficulty responseType examMode")
     .limit(20000);
 
   if (!allCandidates.length) {
@@ -6280,7 +6368,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     }
 
     const primaryPool = allCandidates.filter((question) => {
-      if (!sectionSubjectIds.includes(String(question.subjectId))) return false;
+      if (section.subjectId ? String(question.subjectId) !== String(section.subjectId) : !sectionSubjectIds.includes(String(question.subjectId))) return false;
       if (chosenSet.has(String(question._id))) return false;
       if (section.questionType === "NUMERICAL") return normalizeQuestionTypeBucket(question) === "NUMERICAL";
       if (section.questionType === "MCQ") return normalizeQuestionTypeBucket(question) === "MCQ";
@@ -6288,7 +6376,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     });
 
     let selected = choosePrioritizedMockQuestions(primaryPool, section.totalQuestions, requestedDifficulty, selectionMix, usageContext, includedIdSet, chosenSet, selectionStats);
-    if (selected.length < section.totalQuestions) {
+    if (selected.length < section.totalQuestions && !automaticQuestionDistribution.length) {
       const selectedInSection = new Set(selected.map((question) => String(question._id)));
       const fallbackPool = allCandidates.filter((question) => {
         if (!sectionSubjectIds.includes(String(question.subjectId))) return false;
@@ -6303,6 +6391,9 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     const requiredQuestions = Number(section.totalQuestions || 0);
     const availableQuestions = selected.length;
     if (availableQuestions < requiredQuestions) {
+      if (automaticQuestionDistribution.length) {
+        throw new AppError(`Only ${availableQuestions} ${section.label} questions are available; ${requiredQuestions} required`, 400);
+      }
       sectionShortages.push({
         sectionKey: section.key,
         sectionLabel: section.label,
@@ -6347,6 +6438,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
   const selectedQuestions = allCandidates.filter((question) => chosenSet.has(String(question._id)));
   const subjectIds = [...new Set(selectedQuestions.map((item) => String(item.subjectId)).filter(Boolean))];
   const chapterIds = [...new Set(selectedQuestions.map((item) => String(item.chapterId)).filter(Boolean))];
+  const topicIds = [...new Set(selectedQuestions.map((item) => String(item.topicId)).filter(Boolean))];
   const marksPerQuestion = Number(effectiveMarkingScheme?.mcq?.correct ?? payload.marksPerQuestion ?? existing?.marksPerQuestion ?? preset.marksPerQuestion);
   const negativeMarks = Math.abs(Number(effectiveMarkingScheme?.mcq?.wrong ?? -(payload.negativeMarks ?? existing?.negativeMarks ?? preset.negativeMarks)));
   const computedAttemptQuestions = sectionGroups.reduce((sum, item) => sum + Number(item.attemptQuestions || 0), 0);
@@ -6415,6 +6507,11 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     slug: await ensureUniqueMockTestSlug(title, existing?._id),
     description: String(payload.description ?? existing?.description ?? `${examType} auto-generated mock test`).trim() || undefined,
     examType,
+    testType: "full",
+    subjectId: null,
+    subject: null,
+    difficulty: requestedDifficulty || "mixed",
+    generationMode: "automatic",
     patternPreset: preset.patternPreset,
     durationMinutes: Number(payload.durationMinutes ?? existing?.durationMinutes ?? preset.durationMinutes),
     totalQuestions: chosenQuestionIds.length,
@@ -6423,6 +6520,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     questionIds: chosenQuestionIds,
     subjectIds,
     chapterIds,
+    topicIds,
     instructions: Array.isArray(payload.instructions)
       ? payload.instructions.map((item) => String(item).trim()).filter(Boolean)
       : (Array.isArray(existing?.instructions) && existing.instructions.length ? existing.instructions : MOCK_TEST_PRESETS[preset.patternPreset]?.instructions || []),
@@ -6453,6 +6551,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
       selectionMix,
       includedQuestionIds,
       selectionStats,
+      automaticQuestionDistribution,
     },
     generationHistory: nextHistory,
     selectionMix,
@@ -10870,7 +10969,11 @@ router.get(
 router.post(
   "/mock-tests",
   asyncHandler(async (req, res) => {
-    const payload = await buildMockTestPayload(req.body);
+    const generationMode = String(req.body?.generationMode || "fixed").toLowerCase();
+    const testType = String(req.body?.testType || "full").toLowerCase();
+    const payload = generationMode === "automatic" && testType === "full"
+      ? await buildAutoMockTestPayload(req.body, req.userId)
+      : await buildMockTestPayload(req.body);
     const item = await MockTest.create(payload);
     res.status(201).json({ success: true, message: "Mock test created", data: (await serializeMockTests([item]))[0] });
   }),
@@ -10882,7 +10985,11 @@ router.put(
     requireAdminPassword(req);
     const existing = await MockTest.findById(req.params.id);
     if (!existing) throw new AppError("Mock test not found", 404);
-    const payload = await buildMockTestPayload(req.body, existing);
+    const generationMode = String(req.body?.generationMode || existing.generationMode || "fixed").toLowerCase();
+    const testType = String(req.body?.testType || existing.testType || "full").toLowerCase();
+    const payload = generationMode === "automatic" && testType === "full"
+      ? await buildAutoMockTestPayload(req.body, req.userId, existing)
+      : await buildMockTestPayload(req.body, existing);
     Object.assign(existing, payload);
     await existing.save();
     res.json({ success: true, message: "Mock test updated", data: (await serializeMockTests([existing]))[0] });
