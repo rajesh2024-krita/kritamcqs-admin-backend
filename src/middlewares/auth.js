@@ -32,6 +32,22 @@ export function hasEmployeePermission(admin, permission) {
   };
   const mapped = modulePermissionMap[permission];
   if (mapped && admin.modulePermissions?.[mapped[0]]?.[mapped[1]] === true) return true;
+  if (permission === "viewQuestions") {
+    const questionPermission = admin.modulePermissions?.questions || {};
+    if (
+      questionPermission.create === true
+      || questionPermission.edit === true
+      || questionPermission.delete === true
+      || questionPermission.bulkUpload === true
+      || admin.employeePermissions?.createQuestions === true
+      || admin.employeePermissions?.createManualQuestions === true
+      || admin.employeePermissions?.editQuestions === true
+      || admin.employeePermissions?.deleteQuestions === true
+      || admin.employeePermissions?.bulkUploadQuestions === true
+    ) {
+      return true;
+    }
+  }
   const aliases = QUESTION_PERMISSION_ALIASES[permission] || [permission];
   return aliases.some((key) => admin.employeePermissions?.[key] === true);
 }
