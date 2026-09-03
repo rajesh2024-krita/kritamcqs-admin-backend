@@ -28,6 +28,6 @@ export const adminAuthController = {
   },
 
   async me(req, res) {
-    sendResponse(res, { data: req.admin });
+    sendResponse(res, { data: authService.profile(req.admin) });
   },
 };

@@ -7,6 +7,50 @@ function getRole(user) {
   return user?.adminRole === "employee" ? "employee" : "main";
 }
 
+function normalizeEmployeePermissions(input = {}) {
+  return {
+    createQuestions: Boolean(input.createQuestions),
+    editQuestions: Boolean(input.editQuestions),
+    deleteQuestions: Boolean(input.deleteQuestions),
+    viewQuestions: Boolean(input.viewQuestions),
+    bulkUploadQuestions: Boolean(input.bulkUploadQuestions),
+    createManualQuestions: Boolean(input.createManualQuestions),
+  };
+}
+
+function normalizeModulePermissions(input = {}, employeePermissions = {}) {
+  const source = input && typeof input === "object" ? input : {};
+  const normalized = {};
+  Object.entries(source).forEach(([key, value]) => {
+    if (!key || !value || typeof value !== "object") return;
+    const create = Boolean(value.create);
+    const edit = Boolean(value.edit);
+    const deleteAllowed = Boolean(value.delete);
+    const bulkUpload = Boolean(value.bulkUpload);
+    normalized[key] = {
+      view: Boolean(value.view || create || edit || deleteAllowed || bulkUpload),
+      create,
+      edit,
+      delete: deleteAllowed,
+      bulkUpload,
+    };
+  });
+
+  const legacy = normalizeEmployeePermissions(employeePermissions);
+  const questionCreate = Boolean(normalized.questions?.create || legacy.createQuestions || legacy.createManualQuestions);
+  const questionEdit = Boolean(normalized.questions?.edit || legacy.editQuestions);
+  const questionDelete = Boolean(normalized.questions?.delete || legacy.deleteQuestions);
+  const questionBulkUpload = Boolean(normalized.questions?.bulkUpload || legacy.bulkUploadQuestions);
+  normalized.questions = {
+    view: Boolean(normalized.questions?.view || legacy.viewQuestions || questionCreate || questionEdit || questionDelete || questionBulkUpload),
+    create: questionCreate,
+    edit: questionEdit,
+    delete: questionDelete,
+    bulkUpload: questionBulkUpload,
+  };
+  return normalized;
+}
+
 function getClientIp(req) {
   const forwarded = String(req?.headers?.["x-forwarded-for"] || "").split(",")[0].trim();
   return forwarded || req?.ip || req?.socket?.remoteAddress || "";
@@ -14,9 +58,14 @@ function getClientIp(req) {
 
 function serializeAdmin(admin) {
   const json = typeof admin.toJSON === "function" ? admin.toJSON() : admin;
+  const adminRole = getRole(admin);
+  const employeePermissions = normalizeEmployeePermissions(json.employeePermissions || {});
   return {
     ...json,
-    adminRole: getRole(admin),
+    isAdmin: Boolean(json.isAdmin || adminRole === "employee"),
+    adminRole,
+    employeePermissions,
+    modulePermissions: normalizeModulePermissions(json.modulePermissions || {}, employeePermissions),
   };
 }
 
@@ -75,8 +124,10 @@ export const authService = {
     const ipAddress = getClientIp(req);
 
     const admin = await User.findOne({
-      $or: [{ email: loginEmail }, { mobile: loginMobile }],
-      isAdmin: true,
+      $and: [
+        { $or: [{ email: loginEmail }, { mobile: loginMobile }] },
+        { $or: [{ isAdmin: true }, { adminRole: "employee" }] },
+      ],
     });
 
     if (!admin || !verifyPassword(password, admin.passwordHash)) {
@@ -112,6 +163,9 @@ export const authService = {
       loginStatus: "success",
       loginTime: new Date(),
     });
+    if (admin.adminRole === "employee" && admin.isAdmin !== true) {
+      admin.isAdmin = true;
+    }
     admin.lastLoginAt = new Date();
     await admin.save();
 
@@ -129,5 +183,9 @@ export const authService = {
       );
     }
     return { success: true };
+  },
+
+  profile(admin) {
+    return serializeAdmin(admin);
   },
 };

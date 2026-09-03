@@ -78,12 +78,17 @@ export async function requireAdmin(req, _res, next) {
 
     const admin = await User.findById(decoded.userId);
 
-    if (!admin || !admin.isAdmin) {
+    if (!admin || (admin.isAdmin !== true && admin.adminRole !== "employee")) {
       throw new AppError("Admin access required", 403);
     }
 
     if (admin.isActive === false || admin.isBlocked === true) {
       throw new AppError("Admin account is inactive", 403);
+    }
+
+    if (admin.adminRole === "employee" && admin.isAdmin !== true) {
+      admin.isAdmin = true;
+      await admin.save();
     }
 
     req.admin = admin;
