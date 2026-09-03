@@ -42,11 +42,22 @@ export function hasModulePermission(admin, moduleKey, action = "view") {
   const modulePermissions = admin.modulePermissions || {};
   const modulePermission = modulePermissions[moduleKey] || {};
   if (moduleKey === "questions") {
-    if (action === "view") return modulePermission.view === true || admin.employeePermissions?.viewQuestions === true;
+    const canCreate = modulePermission.create === true || admin.employeePermissions?.createQuestions === true || admin.employeePermissions?.createManualQuestions === true;
+    const canEdit = modulePermission.edit === true || admin.employeePermissions?.editQuestions === true;
+    const canDelete = modulePermission.delete === true || admin.employeePermissions?.deleteQuestions === true;
+    const canBulkUpload = modulePermission.bulkUpload === true || admin.employeePermissions?.bulkUploadQuestions === true;
+    if (action === "view") return modulePermission.view === true || admin.employeePermissions?.viewQuestions === true || canCreate || canEdit || canDelete || canBulkUpload;
     if (action === "create") return modulePermission.create === true || admin.employeePermissions?.createQuestions === true || admin.employeePermissions?.createManualQuestions === true;
     if (action === "edit") return modulePermission.edit === true || admin.employeePermissions?.editQuestions === true;
     if (action === "delete") return modulePermission.delete === true || admin.employeePermissions?.deleteQuestions === true;
     if (action === "bulkUpload") return modulePermission.bulkUpload === true || admin.employeePermissions?.bulkUploadQuestions === true;
+  }
+  if (action === "view") {
+    return modulePermission.view === true
+      || modulePermission.create === true
+      || modulePermission.edit === true
+      || modulePermission.delete === true
+      || modulePermission.bulkUpload === true;
   }
   return modulePermission[action] === true;
 }

@@ -213,21 +213,29 @@ function sanitizeModulePermissions(input = {}, employeePermissions = {}) {
   const normalized = {};
   Object.entries(source).forEach(([key, value]) => {
     if (!key || !value || typeof value !== "object") return;
+    const create = Boolean(value.create);
+    const edit = Boolean(value.edit);
+    const deleteAllowed = Boolean(value.delete);
+    const bulkUpload = Boolean(value.bulkUpload);
     normalized[key] = {
-      view: Boolean(value.view),
-      create: Boolean(value.create),
-      edit: Boolean(value.edit),
-      delete: Boolean(value.delete),
-      bulkUpload: Boolean(value.bulkUpload),
+      view: Boolean(value.view || create || edit || deleteAllowed || bulkUpload),
+      create,
+      edit,
+      delete: deleteAllowed,
+      bulkUpload,
     };
   });
+  const questionCreate = Boolean(normalized.questions?.create || employeePermissions.createQuestions || employeePermissions.createManualQuestions);
+  const questionEdit = Boolean(normalized.questions?.edit || employeePermissions.editQuestions);
+  const questionDelete = Boolean(normalized.questions?.delete || employeePermissions.deleteQuestions);
+  const questionBulkUpload = Boolean(normalized.questions?.bulkUpload || employeePermissions.bulkUploadQuestions);
   if (!normalized.questions) normalized.questions = {};
   normalized.questions = {
-    view: Boolean(normalized.questions.view || employeePermissions.viewQuestions),
-    create: Boolean(normalized.questions.create || employeePermissions.createQuestions || employeePermissions.createManualQuestions),
-    edit: Boolean(normalized.questions.edit || employeePermissions.editQuestions),
-    delete: Boolean(normalized.questions.delete || employeePermissions.deleteQuestions),
-    bulkUpload: Boolean(normalized.questions.bulkUpload || employeePermissions.bulkUploadQuestions),
+    view: Boolean(normalized.questions.view || employeePermissions.viewQuestions || questionCreate || questionEdit || questionDelete || questionBulkUpload),
+    create: questionCreate,
+    edit: questionEdit,
+    delete: questionDelete,
+    bulkUpload: questionBulkUpload,
   };
   return normalized;
 }
