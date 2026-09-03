@@ -5364,6 +5364,11 @@ const DEFAULT_MOCK_PATTERN_BLUEPRINTS = {
       { subject: "Botany", questions: 45, marks: 180, weightage: 25 },
       { subject: "Zoology", questions: 45, marks: 180, weightage: 25 },
     ],
+    automaticPattern: [
+      { subject: "Biology", mcqQuestions: 90, numericQuestions: 0 },
+      { subject: "Physics", mcqQuestions: 45, numericQuestions: 0 },
+      { subject: "Chemistry", mcqQuestions: 45, numericQuestions: 0 },
+    ],
     chapterWise: [
       { subject: "Physics", chapter: "Mechanics (combined)", expectedQuestions: 12 },
       { subject: "Physics", chapter: "Electrodynamics", expectedQuestions: 9 },
@@ -5430,6 +5435,11 @@ const DEFAULT_MOCK_PATTERN_BLUEPRINTS = {
       { subject: "Physics", questions: 30, marks: 100, weightage: 33.3 },
       { subject: "Chemistry", questions: 30, marks: 100, weightage: 33.3 },
       { subject: "Mathematics", questions: 30, marks: 100, weightage: 33.3 },
+    ],
+    automaticPattern: [
+      { subject: "Physics", mcqQuestions: 20, numericQuestions: 10 },
+      { subject: "Chemistry", mcqQuestions: 20, numericQuestions: 10 },
+      { subject: "Mathematics", mcqQuestions: 20, numericQuestions: 10 },
     ],
     chapterWise: [
       { subject: "Physics", chapter: "Mechanics", expectedQuestions: 8 },
@@ -5520,18 +5530,38 @@ function normalizeBlueprintRows(rows, fields) {
     .filter((row) => fields.some((field) => String(row[field] ?? "").trim()));
 }
 
+function normalizeAutomaticPatternRows(rows) {
+  return (Array.isArray(rows) ? rows : [])
+    .map((row) => ({
+      subject: String(row?.subject || "").trim(),
+      mcqQuestions: Math.max(0, Math.floor(Number(row?.mcqQuestions ?? row?.mcqCount ?? row?.mcq ?? 0))),
+      numericQuestions: Math.max(0, Math.floor(Number(row?.numericQuestions ?? row?.numericCount ?? row?.numericalCount ?? row?.numeric ?? 0))),
+    }))
+    .filter((row) => row.subject);
+}
+
 function normalizePatternBlueprintPayload(key, payload = {}) {
   const fallback = DEFAULT_MOCK_PATTERN_BLUEPRINTS[key];
   if (!fallback) throw new AppError("Pattern blueprint not found", 404);
-  return {
+  const normalized = {
     key,
     title: String(payload.title ?? fallback.title).trim() || fallback.title,
     summary: normalizeBlueprintRows(payload.summary ?? fallback.summary, ["label", "value"]),
     subjectWise: normalizeBlueprintRows(payload.subjectWise ?? fallback.subjectWise, ["subject", "questions", "marks", "weightage"]),
+    automaticPattern: normalizeAutomaticPatternRows(payload.automaticPattern ?? fallback.automaticPattern),
     chapterWise: normalizeBlueprintRows(payload.chapterWise ?? fallback.chapterWise, ["subject", "chapter", "expectedQuestions"]),
     topicWise: normalizeBlueprintRows(payload.topicWise ?? fallback.topicWise, ["subject", "chapter", "topic", "expectedQuestions"]),
     rules: normalizeBlueprintRows(payload.rules ?? fallback.rules, ["rule", "value"]),
   };
+  const subjectTotal = normalized.subjectWise.reduce((sum, row) => sum + parseBlueprintNumber(row.questions), 0);
+  const automaticTotal = normalized.automaticPattern.reduce((sum, row) => sum + Number(row.mcqQuestions || 0) + Number(row.numericQuestions || 0), 0);
+  if (key === "NEET" && normalized.automaticPattern.some((row) => Number(row.numericQuestions || 0) > 0)) {
+    throw new AppError("NEET automatic pattern supports MCQ questions only", 400);
+  }
+  if (subjectTotal > 0 && automaticTotal > 0 && automaticTotal !== subjectTotal) {
+    throw new AppError(`Automatic pattern total must equal subject-wise total questions (${subjectTotal})`, 400);
+  }
+  return normalized;
 }
 
 async function getOrCreatePatternBlueprints() {
@@ -5544,6 +5574,18 @@ async function getOrCreatePatternBlueprints() {
     ),
   ));
   return MockPatternBlueprint.find({ key: { $in: keys } }).sort({ key: -1 });
+}
+
+function serializePatternBlueprint(doc) {
+  const raw = typeof doc?.toJSON === "function" ? doc.toJSON() : doc;
+  const key = String(raw?.key || "").toUpperCase();
+  const fallback = DEFAULT_MOCK_PATTERN_BLUEPRINTS[key] || {};
+  return {
+    ...raw,
+    automaticPattern: Array.isArray(raw?.automaticPattern) && raw.automaticPattern.length
+      ? raw.automaticPattern
+      : fallback.automaticPattern || [],
+  };
 }
 
 function parseBlueprintNumber(value) {
@@ -5559,6 +5601,35 @@ function getBlueprintSummaryNumber(blueprint, labelPart) {
 }
 
 function buildSectionGroupsFromBlueprint(blueprint, fallbackGroups = []) {
+  const automaticRows = Array.isArray(blueprint?.automaticPattern) ? blueprint.automaticPattern : [];
+  const automaticGroups = automaticRows
+    .flatMap((row, index) => {
+      const label = String(row?.subject || "").trim();
+      if (!label) return [];
+      const subjectKey = normalizeSubjectKey(label);
+      const mcqQuestions = Math.max(0, Math.floor(Number(row?.mcqQuestions ?? row?.mcqCount ?? 0)));
+      const numericQuestions = Math.max(0, Math.floor(Number(row?.numericQuestions ?? row?.numericCount ?? 0)));
+      return [
+        mcqQuestions > 0 ? {
+          key: `${subjectKey}_MCQ_${index + 1}`,
+          label: `${label} MCQ`,
+          subjectKey,
+          questionType: "MCQ",
+          totalQuestions: mcqQuestions,
+          attemptQuestions: mcqQuestions,
+        } : null,
+        numericQuestions > 0 ? {
+          key: `${subjectKey}_NUM_${index + 1}`,
+          label: `${label} Numeric`,
+          subjectKey,
+          questionType: "NUMERICAL",
+          totalQuestions: numericQuestions,
+          attemptQuestions: numericQuestions,
+        } : null,
+      ].filter(Boolean);
+    });
+  if (automaticGroups.length) return automaticGroups;
+
   const rows = Array.isArray(blueprint?.subjectWise) ? blueprint.subjectWise : [];
   const groups = rows
     .map((row, index) => {
@@ -5605,7 +5676,13 @@ async function getPatternBlueprintConfig(examType, fallbackPreset = null) {
   const fallback = DEFAULT_MOCK_PATTERN_BLUEPRINTS[key];
   if (!fallback) return null;
   const blueprint = await MockPatternBlueprint.findOne({ key }).lean();
-  const source = blueprint || fallback;
+  const source = {
+    ...fallback,
+    ...(blueprint || {}),
+    automaticPattern: Array.isArray(blueprint?.automaticPattern) && blueprint.automaticPattern.length
+      ? blueprint.automaticPattern
+      : fallback.automaticPattern,
+  };
   const sectionGroups = buildSectionGroupsFromBlueprint(source, fallbackPreset?.sectionGroups || []);
   const totalQuestions = sectionGroups.reduce((sum, item) => sum + Number(item.totalQuestions || 0), 0)
     || getBlueprintSummaryNumber(source, "total questions")
@@ -10525,7 +10602,7 @@ router.get(
   "/mock-tests/pattern-blueprints",
   asyncHandler(async (_req, res) => {
     const blueprints = await getOrCreatePatternBlueprints();
-    res.json({ success: true, data: blueprints });
+    res.json({ success: true, data: blueprints.map(serializePatternBlueprint) });
   }),
 );
 
@@ -10540,7 +10617,7 @@ router.put(
       payload,
       { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true },
     );
-    res.json({ success: true, message: "Pattern blueprint updated", data: blueprint });
+    res.json({ success: true, message: "Pattern blueprint updated", data: serializePatternBlueprint(blueprint) });
   }),
 );
 
