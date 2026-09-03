@@ -6468,15 +6468,7 @@ async function buildAutoMockTestPayload(payload, actorId, existing = null) {
     const requiredQuestions = Number(section.totalQuestions || 0);
     const availableQuestions = selected.length;
     if (availableQuestions < requiredQuestions) {
-      if (automaticQuestionDistribution.length) {
-        throw new AppError(`Only ${availableQuestions} ${section.label} questions are available; ${requiredQuestions} required`, 400);
-      }
-      sectionShortages.push({
-        sectionKey: section.key,
-        sectionLabel: section.label,
-        requiredQuestions,
-        availableQuestions,
-      });
+      throw new AppError(`Only ${availableQuestions} ${section.label} questions are available; ${requiredQuestions} required`, 400);
     }
     if (availableQuestions <= 0) {
       continue;
