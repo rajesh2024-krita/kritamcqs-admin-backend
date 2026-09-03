@@ -10149,6 +10149,201 @@ function sendQuestionExport(res, rows, format) {
   res.send(csv);
 }
 
+const QUESTION_BULK_TEMPLATE_HEADERS = [
+  "question_id",
+  "question",
+  "question_image",
+  "option_a",
+  "option_a_image",
+  "option_b",
+  "option_b_image",
+  "option_c",
+  "option_c_image",
+  "option_d",
+  "option_d_image",
+  "correct_answer",
+  "numeric_answer",
+  "subject",
+  "chapter",
+  "topic",
+  "difficulty",
+  "exam_type",
+  "year",
+  "question_type",
+  "response_type",
+  "explanation",
+  "explanation_image",
+  "video_url",
+  "passage",
+  "concept_tags",
+  "has_diagram",
+  "is_numerical",
+  "exact",
+];
+
+const QUESTION_BULK_TEMPLATE_ROWS = [
+  {
+    question_id: "",
+    question: "Which biomolecule stores genetic information in most living organisms?",
+    question_image: "",
+    option_a: "DNA",
+    option_a_image: "",
+    option_b: "Cellulose",
+    option_b_image: "",
+    option_c: "Triglyceride",
+    option_c_image: "",
+    option_d: "Starch",
+    option_d_image: "",
+    correct_answer: "A",
+    numeric_answer: "",
+    subject: "Biology",
+    chapter: "Molecular Basis of Inheritance",
+    topic: "DNA as Genetic Material",
+    difficulty: "easy",
+    exam_type: "NEET",
+    year: "2026",
+    question_type: "MCQ",
+    response_type: "single",
+    explanation: "DNA carries hereditary information in most organisms.",
+    explanation_image: "",
+    video_url: "",
+    passage: "",
+    concept_tags: "genetics|dna|neet",
+    has_diagram: "false",
+    is_numerical: "false",
+    exact: "false",
+  },
+  {
+    question_id: "",
+    question: "A projectile is fired with speed 20 m/s at 30 degrees. Take g = 10 m/s^2. What is its time of flight in seconds?",
+    question_image: "",
+    option_a: "",
+    option_a_image: "",
+    option_b: "",
+    option_b_image: "",
+    option_c: "",
+    option_c_image: "",
+    option_d: "",
+    option_d_image: "",
+    correct_answer: "",
+    numeric_answer: "2",
+    subject: "Physics",
+    chapter: "Motion in a Plane",
+    topic: "Projectile Motion",
+    difficulty: "medium",
+    exam_type: "JEE",
+    year: "2026",
+    question_type: "NUMERICAL",
+    response_type: "integer",
+    explanation: "Time of flight = 2u sin(theta) / g = 2 seconds.",
+    explanation_image: "",
+    video_url: "",
+    passage: "",
+    concept_tags: "kinematics|projectile|jee",
+    has_diagram: "false",
+    is_numerical: "true",
+    exact: "false",
+  },
+  {
+    question_id: "",
+    question: "For the reaction N2 + 3H2 -> 2NH3, how many moles of NH3 are formed from 1 mole of N2 with excess H2?",
+    question_image: "",
+    option_a: "1",
+    option_a_image: "",
+    option_b: "2",
+    option_b_image: "",
+    option_c: "3",
+    option_c_image: "",
+    option_d: "4",
+    option_d_image: "",
+    correct_answer: "B",
+    numeric_answer: "",
+    subject: "Chemistry",
+    chapter: "Some Basic Concepts of Chemistry",
+    topic: "Stoichiometry",
+    difficulty: "easy",
+    exam_type: "JEE",
+    year: "2026",
+    question_type: "MCQ",
+    response_type: "single",
+    explanation: "Balanced equation gives 2 moles of ammonia from 1 mole of nitrogen.",
+    explanation_image: "",
+    video_url: "",
+    passage: "",
+    concept_tags: "mole concept|stoichiometry|jee",
+    has_diagram: "false",
+    is_numerical: "false",
+    exact: "false",
+  },
+  {
+    question_id: "",
+    question: "Use an image URL in question_image when the main question has a diagram.",
+    question_image: "https://example.com/question-diagram.png",
+    option_a: "Statement A",
+    option_a_image: "",
+    option_b: "Statement B",
+    option_b_image: "",
+    option_c: "Statement C",
+    option_c_image: "",
+    option_d: "Statement D",
+    option_d_image: "",
+    correct_answer: "A",
+    numeric_answer: "",
+    subject: "Physics",
+    chapter: "Ray Optics",
+    topic: "Mirror Formula",
+    difficulty: "hard",
+    exam_type: "NEET",
+    year: "2026",
+    question_type: "MCQ",
+    response_type: "single",
+    explanation: "Replace sample text and image URLs with the real question content.",
+    explanation_image: "https://example.com/solution-diagram.png",
+    video_url: "https://example.com/solution-video",
+    passage: "Optional passage text can be added here for paragraph-linked questions.",
+    concept_tags: "optics|diagram|neet",
+    has_diagram: "true",
+    is_numerical: "false",
+    exact: "false",
+  },
+];
+
+function buildQuestionBulkTemplate(format) {
+  const normalizedFormat = String(format || "csv").toLowerCase() === "xlsx" ? "xlsx" : "csv";
+  const worksheet = XLSX.utils.json_to_sheet(QUESTION_BULK_TEMPLATE_ROWS, {
+    header: QUESTION_BULK_TEMPLATE_HEADERS,
+  });
+  worksheet["!cols"] = QUESTION_BULK_TEMPLATE_HEADERS.map((header) => ({
+    wch: Math.max(12, Math.min(40, header.length + 6)),
+  }));
+
+  if (normalizedFormat === "xlsx") {
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, "Question Template");
+    XLSX.utils.book_append_sheet(
+      workbook,
+      XLSX.utils.json_to_sheet([
+        { field: "Required", notes: "question, subject, chapter, topic, difficulty, exam_type, year" },
+        { field: "MCQ", notes: "Set question_type=MCQ, response_type=single or multiple, and correct_answer=A/B/C/D. For multiple answers, use A|C." },
+        { field: "Numeric", notes: "Set question_type=NUMERICAL, response_type=integer or numeric, is_numerical=true, and fill numeric_answer." },
+        { field: "Images", notes: "Use public image URLs in question_image, option_*_image, or explanation_image." },
+        { field: "Update", notes: "For bulk update, provide question_id or exact question text plus only the fields you want to change." },
+      ]),
+    );
+    return {
+      body: XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }),
+      contentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      filename: "question-bulk-upload-template.xlsx",
+    };
+  }
+
+  return {
+    body: XLSX.utils.sheet_to_csv(worksheet),
+    contentType: "text/csv; charset=utf-8",
+    filename: "question-bulk-upload-template.csv",
+  };
+}
+
 router.get(
   "/questions/export",
   requireQuestionPermission(QUESTION_PERMISSION_MAP.export),
@@ -10157,6 +10352,17 @@ router.get(
     const exportQuery = scope === "all" ? {} : req.query;
     const { items } = await questionService.listAll(exportQuery);
     sendQuestionExport(res, items.map(flattenQuestionForExport), req.query.format);
+  }),
+);
+
+router.get(
+  "/questions/bulk-upload/template/:format",
+  requireQuestionPermission(QUESTION_PERMISSION_MAP.bulkUpload),
+  asyncHandler(async (req, res) => {
+    const template = buildQuestionBulkTemplate(req.params.format);
+    res.setHeader("Content-Type", template.contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${template.filename}"`);
+    res.send(template.body);
   }),
 );
 
