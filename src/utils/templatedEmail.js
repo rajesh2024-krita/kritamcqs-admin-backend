@@ -1,5 +1,5 @@
 import { sendEmail } from "./simpleEmail.js";
-import { EmailLog } from "../models/index.js";
+import { EmailLog, EmailTemplate } from "../models/index.js";
 
 /**
  * Email template keys - must match API server
@@ -349,18 +349,20 @@ export async function sendTemplatedEmail(templateKey, to, variables = {}, attach
   try {
     const payload = normalizeVariables(variables);
 
-    // Get template (fallback to default if not found)
-    const template = DEFAULT_TEMPLATES[templateKey];
+    // The admin-authored database record is the only source of email content.
+    // Do not silently replace an administrator's design with code defaults.
+    const template = await EmailTemplate.findOne({ key: templateKey }).lean();
     
     if (!template) {
       logger?.warn({ templateKey }, "Email template not found; check template key");
-      return { skipped: true, reason: `Email template '${templateKey}' not found` };
+      return { skipped: true, reason: `Email template '${templateKey}' is not configured` };
     }
+    if (template.isActive === false) return { skipped: true, reason: `Email template '${templateKey}' is disabled` };
 
     // Render template with variables
     const subject = renderTemplate(template.subject, payload);
-    const html = renderTemplate(template.html, payload);
-    const text = renderTemplate(template.text, payload);
+    const html = renderTemplate(template.htmlContent, payload);
+    const text = renderTemplate(template.textContent, payload);
     const htmlBody = html.trim() || buildHtmlBody(text);
 
     // Log email send attempt

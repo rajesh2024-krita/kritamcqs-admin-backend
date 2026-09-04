@@ -517,14 +517,13 @@ function appendTextCta(text, template) {
 
 async function renderEmailTemplate(templateKey, values) {
   const template = await EmailTemplate.findOne({ key: templateKey }).lean();
-  if (template && template.isActive === false) {
-    return { skipped: true, reason: `Email template '${templateKey}' is inactive` };
+  if (!template || template.isActive === false) {
+    return { skipped: true, reason: !template ? `Email template '${templateKey}' is not configured` : `Email template '${templateKey}' is inactive` };
   }
 
-  const fallback = DEFAULT_TEMPLATES[templateKey] || {};
-  const subjectTemplate = template?.subject || fallback.subject || "";
-  const textTemplate = template?.textContent || fallback.text || "";
-  const htmlTemplate = template?.htmlContent || fallback.html || "";
+  const subjectTemplate = template.subject;
+  const textTemplate = template.textContent;
+  const htmlTemplate = template.htmlContent;
   const renderedCtaTemplate = template ? {
     ...template,
     ctaText: renderTemplate(template.ctaText, values),

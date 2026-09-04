@@ -927,10 +927,10 @@ async function sendTemplatedEmail(templateKey, to, variables, attachments = []) 
   const template = await EmailTemplate.findOne({ key: templateKey });
   const settings = await InvoiceSettings.findOne({ key: "default" });
   const definition = EMAIL_TEMPLATE_DEFINITIONS.find((item) => item.key === templateKey);
-  const fallback = DEFAULT_TEMPLATES[templateKey] || null;
-  const mergedData = sampleEmailVariables({ ...(template?.sampleData || {}), ...(variables || {}) });
+  // Sample data belongs to previews/tests and must never leak into a real recipient email.
+  const mergedData = { ...(variables || {}) };
 
-  if (template?.isActive === false || (!template && !fallback)) {
+  if (template?.isActive === false || !template) {
     const reason = template?.isActive === false ? `Email template '${templateKey}' is inactive` : `Email template '${templateKey}' is missing`;
     const log = await EmailLog.create({
       templateKey,
@@ -947,14 +947,7 @@ async function sendTemplatedEmail(templateKey, to, variables, attachments = []) 
     return { skipped: true, reason, logId: String(log._id) };
   }
 
-  const effectiveTemplate = template || {
-    name: definition?.name || templateKey,
-    module: definition?.module || "",
-    type: definition?.type || "",
-    subject: fallback.subject || `${definition?.name || templateKey} - {{app_name}}`,
-    textContent: fallback.text || "",
-    htmlContent: fallback.html || "",
-  };
+  const effectiveTemplate = template;
 
   if (settings?.emailEnabled === false) {
     const reason = "Email delivery is disabled in invoice/email settings";
